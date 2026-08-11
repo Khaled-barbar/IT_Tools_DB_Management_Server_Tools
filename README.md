@@ -10,7 +10,10 @@ Developer: Khaled Barbar
 1. Download or clone this complete repository into a folder the user can write
    to, such as `Desktop\IT Tools` or `Documents\IT Tools`.
 2. Keep the companion files beside
-   `IT_Tools_Database_Translations_and_Server_Checks.ps1`.
+   `IT_Tools_Database_Translations_and_Server_Checks.ps1`. If an official SQL
+   or PowerShell companion file is missing when a feature needs it, IT Tools
+   downloads it automatically from this repository and verifies its SHA-256
+   integrity hash before saving it locally.
 3. Run the main script with Windows PowerShell. Run as Administrator when a
    selected tool requires elevated access.
 

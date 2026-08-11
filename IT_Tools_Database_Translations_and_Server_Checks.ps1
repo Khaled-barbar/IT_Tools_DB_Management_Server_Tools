@@ -1,12 +1,12 @@
 ﻿# ==============================================================================
 # IT TOOLS: DATABASE TRANSLATIONS AND LOCAL SERVER CHECKS
-# Developer: Khaled Barbar
+# Developer: ⇓⇓⇓⇓
 #
-#  _  __ _           _          _   ____             _
-# | |/ /| |__   __ _| | ___  __| | | __ )  __ _ _ __| |__   __ _ _ __
-# | ' /| '_ \ / _` | |/ _ \/ _` | | |  _ \ / _` | '__| '_ \ / _` | '__|
-# | . \| | | | (_| | |  __/ (_| | | | |_) | (_| | |  | |_) | (_| | |
-# |_|\_\_| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
+#  _  __ _           _          _     ____             _
+# | |/ /| |__   __ _| | ___  __| | | | __ )  __ _ _ __| |__   __ _ _ __
+# | ' / | '_ \ / _` | |/ _ \/ _` | | |  _ \ / _` | '__| '_ \ / _` | '__|
+# | . \ | | | | (_| | |  __/ (_| | | | |_) | (_| | |  | |_) | (_| | |
+# |_|\_\__| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
 # ==============================================================================
 # This script contains two groups of tools:
 #   1. Database tools:
@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.0'
+$Script:ToolVersion = [version]'7.0.1'
 $Script:ToolReleaseDate = '2026-08-11'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1064,6 +1064,21 @@ function Get-SiteMonitoringTemplatePath {
             } |
             Where-Object { $null -ne $_.Version }
     )
+    if ($templates.Count -eq 0) {
+        [void](Get-RequiredScriptFolderFilePath `
+            -FileName 'D4A-ScheduledMonitor-v5.ps1' `
+            -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/D4A-ScheduledMonitor-v5.ps1' `
+            -FeatureName 'Add Site Monitoring')
+
+        $templates = @(
+            Get-ChildItem -LiteralPath $scriptFolder -File -Filter 'D4A-ScheduledMonitor*.ps1' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '(?i)\.bak\.ps1$|_\d{14}\.ps1$' } |
+                ForEach-Object {
+                    try { Get-SiteMonitoringScriptMetadata -ScriptPath $_.FullName } catch { $null }
+                } |
+                Where-Object { $null -ne $_.Version }
+        )
+    }
     if ($templates.Count -eq 0) {
         throw "No versioned D4A-ScheduledMonitor PowerShell template was found beside IT Tools: $scriptFolder"
     }
@@ -2408,11 +2423,58 @@ function Get-RequiredScriptFolderFilePath {
     $scriptFolder = Get-CurrentScriptFolder
     $filePath = Join-Path -Path $scriptFolder -ChildPath $FileName
     if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-        Write-Host "$FeatureName cannot start because '$FileName' was not found." -ForegroundColor Red
-        Write-Host 'Verify that the required file is present in the same folder as the IT Tools script.' -ForegroundColor Yellow
-        Write-Host "IT Tools folder: $scriptFolder" -ForegroundColor Yellow
-        Write-Host "Download the file if necessary: $DownloadUrl" -ForegroundColor Cyan
-        throw "Required companion file not found: $filePath"
+        Write-Host "The required companion file '$FileName' is missing." -ForegroundColor Yellow
+        Write-Host "IT Tools will download the official release file for $FeatureName now." -ForegroundColor Cyan
+
+        if (-not (Test-ITToolsScriptFolderWritable -Folder $scriptFolder)) {
+            Write-Host "IT Tools cannot save the file in: $scriptFolder" -ForegroundColor Red
+            Write-Host 'Run IT Tools as Administrator, or move the complete IT Tools folder to a user-owned Desktop or Documents folder and try again.' -ForegroundColor Yellow
+            throw "Required companion file could not be saved: $filePath"
+        }
+
+        $downloadFolder = Join-Path ([IO.Path]::GetTempPath()) ('ITToolsCompanion_{0}' -f [guid]::NewGuid().ToString('N'))
+        try {
+            [void](New-Item -Path $downloadFolder -ItemType Directory -Force -ErrorAction Stop)
+            $manifestText = Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName
+            $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
+            $fileEntries = @($manifest.files | Where-Object { [string]$_.path -ieq $FileName })
+            if ($fileEntries.Count -ne 1) {
+                throw "The official release manifest does not contain a unique entry for '$FileName'."
+            }
+
+            $expectedHash = ([string]$fileEntries[0].sha256).ToUpperInvariant()
+            if ($expectedHash -notmatch '^[A-F0-9]{64}$') {
+                throw "The release manifest contains an invalid SHA-256 value for '$FileName'."
+            }
+
+            $temporaryFilePath = Join-Path $downloadFolder $FileName
+            $temporaryFileFolder = Split-Path -Parent $temporaryFilePath
+            [void](New-Item -Path $temporaryFileFolder -ItemType Directory -Force -ErrorAction Stop)
+            Write-StreamingLog -Percent 25 -Step 'Download' -Description "Downloading missing companion file $FileName."
+            Invoke-WebRequest -Uri (Get-ITToolsUpdateUri -RelativePath $FileName) -OutFile $temporaryFilePath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+
+            Write-StreamingLog -Percent 70 -Step 'Verify' -Description "Verifying the official file $FileName."
+            $actualHash = (Get-FileHash -LiteralPath $temporaryFilePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+            if ($actualHash -ne $expectedHash) {
+                throw "Integrity check failed for '$FileName'."
+            }
+
+            if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                Copy-Item -LiteralPath $temporaryFilePath -Destination $filePath -Force -ErrorAction Stop
+            }
+            Write-StreamingLog -Percent 100 -Step 'Download' -Description "Required file $FileName is ready to use."
+            Write-Host "Downloaded and verified: $filePath" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "Automatic download failed for '$FileName'." -ForegroundColor Red
+            Write-Host "Official source: $DownloadUrl" -ForegroundColor Cyan
+            throw "Required companion file could not be downloaded: $filePath. $($_.Exception.Message)"
+        }
+        finally {
+            if (Test-Path -LiteralPath $downloadFolder -PathType Container) {
+                Remove-Item -LiteralPath $downloadFolder -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     return $filePath
@@ -3895,7 +3957,7 @@ function Invoke-LuleburgasAssemblyRulesSettings {
     try {
         $sqlFile = Get-RequiredScriptFolderFilePath `
             -FileName 'AssemblyRules_Luleburgas.sql' `
-            -DownloadUrl 'https://github.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/blob/main/AssemblyRules_Luleburgas.sql' `
+            -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/AssemblyRules_Luleburgas.sql' `
             -FeatureName 'Import Luleburgas System Settings'
         Assert-AssemblyRulesImportFileIsStagingOnly -FilePath $sqlFile
 
@@ -4091,7 +4153,7 @@ function Invoke-LuleburgasRolePermissionsImport {
     try {
         $sqlFile = Get-RequiredScriptFolderFilePath `
             -FileName 'RoleAdminLuleburgaz-DanoneStandard-090426.sql' `
-            -DownloadUrl 'https://github.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/blob/main/RoleAdminLuleburgaz-DanoneStandard-090426.sql' `
+            -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/RoleAdminLuleburgaz-DanoneStandard-090426.sql' `
             -FeatureName 'Import Luleburgas User Roles and Privileges'
 
         Write-Host "SQL file: $sqlFile" -ForegroundColor Gray
@@ -7861,7 +7923,7 @@ function Invoke-DiskSpaceAnalyzer {
 
     $analyzerPath = Get-RequiredScriptFolderFilePath `
         -FileName 'D4A-DiskSpaceAnalyzer.ps1' `
-        -DownloadUrl 'https://github.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/blob/main/D4A-DiskSpaceAnalyzer.ps1' `
+        -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/D4A-DiskSpaceAnalyzer.ps1' `
         -FeatureName 'Analyze Disk Usage (Visual Report)'
 
     Write-Host "Disk usage analyzer: $analyzerPath" -ForegroundColor Gray
