@@ -1,0 +1,3406 @@
+#requires -Version 5.1
+# D4A-Monitor-Version: 6.3.0
+# D4A-Monitor-Release-Date: 2026-07-28
+
+<#
+.SYNOPSIS
+    Monitors D4A application and Windows server health and sends D4A email notifications.
+
+.DESCRIPTION
+    Runs application, service, resource, TLS, Nginx, and Windows event checks.
+    Results are written to daily run_log and error_log files under monitor-logs.
+    Monitoring logs are retained for five days by default.
+
+    Site-specific settings are loaded from
+    monitor-logs\D4A-ScheduledMonitor.config.json. Command-line parameters take
+    precedence over the configuration file, which takes precedence over the
+    built-in defaults.
+
+    Ignore rules are stored in monitor-logs\ignore-rules.txt. Rules use the
+    format key|temporary|2h| or key|permanent||. A temporary rule is stamped
+    with its calculated end time on first use and commented out after expiry.
+
+    In normal mode, an email is sent when a new issue is detected. The monitor
+    automatically creates a 24-hour cooldown rule for that issue. Resolved
+    issues have their automatic cooldown removed so a recurrence is reported.
+    Test and daily-summary modes send the complete scan report even when healthy.
+
+    API health warnings use a separate 4000 ms threshold. When API health is
+    initially unavailable, the monitor retries twice at five-second intervals
+    and alerts only when all three attempts fail. NSSM server.log rotation
+    events 1063 and 1077 are permanently excluded. Windows-event warnings and
+    Watchdog evidence of a successful service restart are retained for the
+    daily summary and do not send normal alert emails.
+
+    To change an automatic cooldown, use -SetIssueCooldown with
+    -IssueCooldownDuration. The command rewrites both the duration and its
+    calculated expiry timestamp; do not edit only one of those values manually.
+
+    Use -AddSiteAddress to persist one or more additional frontend sites in
+    the JSON configuration. Their matching D4A API endpoints are derived and
+    checked automatically during each normal monitoring run.
+
+.EXAMPLE
+    .\D4A-ScheduledMonitor-v5.ps1 -SiteAddress 'https://akbou.decide4action.com'
+
+.EXAMPLE
+    .\D4A-ScheduledMonitor-v5.ps1 `
+        -SiteAddress 'https://akbou.decide4action.com' `
+        -SendTestResultsEmail
+
+.EXAMPLE
+    # Send the daily performance summary even when no issue is detected.
+    .\D4A-ScheduledMonitor-v5.ps1 -SendDailySummaryEmail
+
+.EXAMPLE
+    # Add a site to the persistent JSON configuration, then view the result.
+    .\D4A-ScheduledMonitor-v5.ps1 -AddSiteAddress 'https://newsite.decide4action.com'
+    .\D4A-ScheduledMonitor-v5.ps1 -ShowConfiguration
+
+.EXAMPLE
+    # Change the automatic cooldown for one issue to 12 hours or 3 days.
+    # This recalculates the expiry timestamp from the current time.
+    .\D4A-ScheduledMonitor-v5.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '12h'
+    .\D4A-ScheduledMonitor-v5.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '3d'
+    .\D4A-ScheduledMonitor-v5.ps1 -ClearIssueCooldown 'server-cpu'
+
+.EXAMPLE
+    powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File .\D4A-ScheduledMonitor-v5.ps1 `
+        -SiteAddress 'https://akbou.decide4action.com'
+#>
+
+[CmdletBinding()]
+param(
+    [string]$ConfigPath,
+
+    [switch]$ValidateConfiguration,
+
+    # Show the effective configuration without running a health scan.
+    [switch]$ShowConfiguration,
+
+    # Add one or more comma-separated frontend sites to the persistent JSON
+    # configuration without running a health scan.
+    [string]$AddSiteAddress,
+
+    # Comma-separated frontend addresses. The corresponding D4A API is always
+    # checked automatically for every configured frontend.
+    [string]$SiteAddress = 'hostname:1200',
+
+    # Friendly identifier used in email subjects, for example "Akbou".
+    [string]$MonitoringName = 'D4A site',
+
+    # Default notification recipient. Change this value if the monitor should
+    # always use another mailbox, or override it with -NotificationTo.
+    [string]$NotificationTo = 'techsupport@decide4action.com',
+
+    [Alias('SendEmailResults')]
+    [switch]$SendTestResultsEmail,
+
+    [switch]$SendDailySummaryEmail,
+
+    [switch]$DisableEmail,
+
+    [string]$LogDirectory,
+    [string]$WatchdogLogRoot,
+
+    [ValidateRange(1, 365)]
+    [int]$LogRetentionDays = 5,
+
+    [ValidateRange(50, 5000)]
+    [int]$WatchdogLogTailLines = 300,
+
+    [string]$D4AInstallRoot,
+    [string]$NginxErrorLog,
+
+    [Alias('EmailDbConfigPath')]
+    [string]$DbConfigPath,
+
+    [string]$NodeExecutable,
+    [string]$NodemailerModulePath,
+    [string]$FromAddress,
+
+    # SetIssueCooldown recalculates both duration and expiry from now, without
+    # running a full monitor scan. ClearIssueCooldown removes the automatic rule.
+    [string]$SetIssueCooldown,
+    [string]$ClearIssueCooldown,
+    [string]$IssueCooldownDuration = '24h',
+
+    [ValidateRange(5, 300)]
+    [int]$EmailTimeoutSeconds = 30,
+
+    # Optional SMTP fallback. It is used only when SmtpServer is explicitly set.
+    [string]$SmtpServer = '',
+
+    [ValidateRange(1, 65535)]
+    [int]$SmtpPort = 25,
+
+    [switch]$SmtpUseSsl,
+    [string]$SmtpCredentialFile,
+
+    [ValidateRange(1, 300)]
+    [int]$HttpTimeoutSeconds = 15,
+
+    [ValidateRange(1, 10)]
+    [int]$ApplicationAttempts = 2,
+
+    [ValidateRange(1, 60000)]
+    [int]$ApplicationWarningMs = 2000,
+
+    [ValidateRange(1, 120000)]
+    [int]$ApplicationAlertMs = 5000,
+
+    # API /health has its own latency threshold and only alerts after its
+    # configured in-run retry sequence has failed consecutively.
+    [ValidateRange(1, 60000)]
+    [int]$ApiHealthWarningMs = 4000,
+
+    [ValidateRange(1, 5)]
+    [int]$ApiHealthFailureAttempts = 3,
+
+    [ValidateRange(1, 60)]
+    [int]$ApiHealthRetryIntervalSeconds = 5,
+
+    # Safe NSSM log-rotation events are excluded only when their message
+    # confirms that they concern an output-file rotation.
+    [string]$NssmExcludedLogRotationEventIds = '1063,1077',
+
+    [ValidateRange(1, 240)]
+    [int]$CpuSampleDurationSeconds = 60,
+
+    [ValidateRange(1, 30)]
+    [int]$CpuSampleIntervalSeconds = 5,
+
+    [ValidateRange(1, 60)]
+    [int]$LogLookbackMinutes = 5,
+
+    [ValidateRange(100, 50000)]
+    [int]$DiagnosticTailLines = 5000,
+
+    [ValidateRange(1, 10000)]
+    [int]$NginxErrorsPerMinuteThreshold = 20,
+
+    [ValidateRange(2, 60)]
+    [int]$NginxConsecutiveMinutes = 2,
+
+    [ValidateRange(1, 10)]
+    [int]$DataCollectorConsecutiveFailureThreshold = 3,
+
+    [ValidateRange(1, 120)]
+    [int]$DataCollectorLastHealthyWarningMinutes = 5,
+
+    [ValidateRange(2, 240)]
+    [int]$DataCollectorLastHealthyCriticalMinutes = 10,
+
+    [ValidateRange(1, 50)]
+    [int]$MaxRedirects = 10
+)
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+catch {
+    # The operating system TLS defaults remain in effect if this is unavailable.
+}
+
+$script:ScriptPath = [string]$MyInvocation.MyCommand.Path
+$script:MonitorVersion = '6.3.0'
+$script:MonitorReleaseDate = '2026-07-28'
+$script:CommandLineParameterNames = @($PSBoundParameters.Keys)
+$script:ResolvedConfigPath = $null
+$script:ConfigurationLoaded = $false
+$script:ScriptDirectory = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $PSScriptRoot
+}
+else {
+    Split-Path -Parent $script:ScriptPath
+}
+$script:RunStartedAt = Get-Date
+$script:Results = [System.Collections.Generic.List[object]]::new()
+$script:RunLogPath = $null
+$script:ErrorLogPath = $null
+$script:IgnoreRulesPath = $null
+$script:MonitorLogDirectory = $null
+$script:MonitorStatePath = $null
+$script:LoggingReady = $false
+$script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
+
+function Resolve-MonitorConfigurationPath {
+    if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+        return [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ConfigPath))
+    }
+
+    return Join-Path (Join-Path $script:ScriptDirectory 'monitor-logs') 'D4A-ScheduledMonitor.config.json'
+}
+
+function Get-MonitorConfigurationProperty {
+    param(
+        [Parameter(Mandatory = $true)][object]$Configuration,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    return $Configuration.PSObject.Properties[$Name]
+}
+
+function Convert-MonitorConfigurationValue {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][ValidateSet('String', 'StringList', 'Int', 'Bool', 'Path')][string]$Type,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    switch ($Type) {
+        'StringList' {
+            $items = @($Value | ForEach-Object { ([string]$_).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($items.Count -eq 0) { throw "Configuration property '$Name' cannot be empty." }
+            return ($items -join ',')
+        }
+        'Int' {
+            $number = 0
+            if (-not [int]::TryParse(([string]$Value), [ref]$number)) {
+                throw "Configuration property '$Name' must be a whole number."
+            }
+            return $number
+        }
+        'Bool' {
+            if ($Value -is [bool]) { return [bool]$Value }
+            $boolean = $false
+            if (-not [bool]::TryParse(([string]$Value), [ref]$boolean)) {
+                throw "Configuration property '$Name' must be true or false."
+            }
+            return $boolean
+        }
+        'Path' {
+            $pathValue = ([string]$Value).Trim()
+            if ([string]::IsNullOrWhiteSpace($pathValue)) { return '' }
+            return [Environment]::ExpandEnvironmentVariables($pathValue)
+        }
+        default { return ([string]$Value).Trim() }
+    }
+}
+
+function Import-MonitorConfiguration {
+    $script:ResolvedConfigPath = Resolve-MonitorConfigurationPath
+    if (-not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        if ($script:CommandLineParameterNames -contains 'ConfigPath') {
+            throw "Monitor configuration file not found: $($script:ResolvedConfigPath)"
+        }
+        return
+    }
+
+    try {
+        $configuration = Get-Content -LiteralPath $script:ResolvedConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Unable to read monitor configuration '$($script:ResolvedConfigPath)': $($_.Exception.Message)"
+    }
+
+    $configurationVersion = Get-MonitorConfigurationProperty -Configuration $configuration -Name 'ConfigurationVersion'
+    if ($null -eq $configurationVersion) {
+        throw "Monitor configuration is missing ConfigurationVersion: $($script:ResolvedConfigPath)"
+    }
+    if ([int]$configurationVersion.Value -ne 1) {
+        throw "Unsupported monitor ConfigurationVersion '$($configurationVersion.Value)'. Expected version 1."
+    }
+
+    $settingMap = [ordered]@{
+        SiteAddress                = 'StringList'
+        MonitoringName             = 'String'
+        NotificationTo             = 'StringList'
+        LogDirectory               = 'Path'
+        WatchdogLogRoot            = 'Path'
+        LogRetentionDays           = 'Int'
+        WatchdogLogTailLines       = 'Int'
+        D4AInstallRoot             = 'Path'
+        NginxErrorLog              = 'Path'
+        DbConfigPath               = 'Path'
+        NodeExecutable             = 'Path'
+        NodemailerModulePath       = 'Path'
+        FromAddress                = 'String'
+        EmailTimeoutSeconds        = 'Int'
+        SmtpServer                 = 'String'
+        SmtpPort                   = 'Int'
+        SmtpUseSsl                 = 'Bool'
+        SmtpCredentialFile         = 'Path'
+        HttpTimeoutSeconds         = 'Int'
+        ApplicationAttempts        = 'Int'
+        ApplicationWarningMs       = 'Int'
+        ApplicationAlertMs         = 'Int'
+        ApiHealthWarningMs         = 'Int'
+        ApiHealthFailureAttempts   = 'Int'
+        ApiHealthRetryIntervalSeconds = 'Int'
+        NssmExcludedLogRotationEventIds = 'StringList'
+        CpuSampleDurationSeconds   = 'Int'
+        CpuSampleIntervalSeconds   = 'Int'
+        LogLookbackMinutes         = 'Int'
+        DiagnosticTailLines        = 'Int'
+        NginxErrorsPerMinuteThreshold = 'Int'
+        NginxConsecutiveMinutes       = 'Int'
+        DataCollectorConsecutiveFailureThreshold = 'Int'
+        DataCollectorLastHealthyWarningMinutes   = 'Int'
+        DataCollectorLastHealthyCriticalMinutes  = 'Int'
+        MaxRedirects               = 'Int'
+    }
+
+    foreach ($settingName in $settingMap.Keys) {
+        if ($script:CommandLineParameterNames -contains $settingName) { continue }
+        $property = Get-MonitorConfigurationProperty -Configuration $configuration -Name $settingName
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+
+        $convertedValue = Convert-MonitorConfigurationValue -Value $property.Value -Type $settingMap[$settingName] -Name $settingName
+        Set-Variable -Name $settingName -Value $convertedValue -Scope Script
+    }
+
+    $script:ConfigurationLoaded = $true
+}
+
+function Test-MonitorConfigurationValues {
+    $ranges = [ordered]@{
+        LogRetentionDays         = @(1, 365)
+        WatchdogLogTailLines     = @(50, 5000)
+        EmailTimeoutSeconds      = @(5, 300)
+        SmtpPort                 = @(1, 65535)
+        HttpTimeoutSeconds       = @(1, 300)
+        ApplicationAttempts      = @(1, 10)
+        ApplicationWarningMs     = @(1, 60000)
+        ApplicationAlertMs       = @(1, 120000)
+        ApiHealthWarningMs       = @(1, 60000)
+        ApiHealthFailureAttempts = @(1, 5)
+        ApiHealthRetryIntervalSeconds = @(1, 60)
+        CpuSampleDurationSeconds = @(1, 240)
+        CpuSampleIntervalSeconds = @(1, 30)
+        LogLookbackMinutes       = @(1, 60)
+        DiagnosticTailLines      = @(100, 50000)
+        NginxErrorsPerMinuteThreshold = @(1, 10000)
+        NginxConsecutiveMinutes       = @(2, 60)
+        DataCollectorConsecutiveFailureThreshold = @(1, 10)
+        DataCollectorLastHealthyWarningMinutes   = @(1, 120)
+        DataCollectorLastHealthyCriticalMinutes  = @(2, 240)
+        MaxRedirects             = @(1, 50)
+    }
+
+    foreach ($settingName in $ranges.Keys) {
+        $value = [int](Get-Variable -Name $settingName -Scope Script -ValueOnly)
+        $minimum = [int]$ranges[$settingName][0]
+        $maximum = [int]$ranges[$settingName][1]
+        if ($value -lt $minimum -or $value -gt $maximum) {
+            throw "Monitor setting '$settingName' must be between $minimum and $maximum. Current value: $value."
+        }
+    }
+
+    if ($ApplicationWarningMs -ge $ApplicationAlertMs) {
+        throw 'ApplicationWarningMs must be lower than ApplicationAlertMs.'
+    }
+    if ($ApiHealthWarningMs -ge $ApplicationAlertMs) {
+        throw 'ApiHealthWarningMs must be lower than ApplicationAlertMs.'
+    }
+    $null = Get-NssmExcludedLogRotationEventIds
+    if ($DataCollectorLastHealthyWarningMinutes -ge $DataCollectorLastHealthyCriticalMinutes) {
+        throw 'DataCollectorLastHealthyWarningMinutes must be lower than DataCollectorLastHealthyCriticalMinutes.'
+    }
+    if ([string]::IsNullOrWhiteSpace($MonitoringName)) {
+        throw 'MonitoringName cannot be empty.'
+    }
+    if ([string]::IsNullOrWhiteSpace($NotificationTo)) {
+        throw 'NotificationTo cannot be empty.'
+    }
+
+    foreach ($address in @($NotificationTo -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        try {
+            $parsedAddress = [Net.Mail.MailAddress]::new($address)
+            if ($parsedAddress.Address -ine $address) { throw 'Address normalization mismatch.' }
+        }
+        catch {
+            throw "NotificationTo contains an invalid email address: $address"
+        }
+    }
+
+    [void]@(ConvertTo-HttpUris -Addresses $SiteAddress)
+}
+
+function Get-UniqueMonitorSiteAddresses {
+    param([Parameter(Mandatory = $true)][string[]]$Addresses)
+
+    $uniqueAddresses = [System.Collections.Generic.List[string]]::new()
+    $seenAddresses = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $addressText = (@($Addresses | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
+    foreach ($uri in @(ConvertTo-HttpUris -Addresses $addressText)) {
+        $normalizedAddress = $uri.AbsoluteUri.TrimEnd('/')
+        if ($seenAddresses.Add($normalizedAddress)) {
+            $uniqueAddresses.Add($normalizedAddress) | Out-Null
+        }
+    }
+
+    return @($uniqueAddresses)
+}
+
+function Get-MonitorConfigurationForManagement {
+    if (-not $script:ConfigurationLoaded -or -not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        throw "A persistent monitoring configuration is required: $($script:ResolvedConfigPath)"
+    }
+
+    try {
+        return (Get-Content -LiteralPath $script:ResolvedConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+    }
+    catch {
+        throw "Unable to read monitoring configuration '$($script:ResolvedConfigPath)': $($_.Exception.Message)"
+    }
+}
+
+function Add-MonitorConfiguredSites {
+    param([Parameter(Mandatory = $true)][string]$Addresses)
+
+    $configuration = Get-MonitorConfigurationForManagement
+    $existingAddresses = @($configuration.SiteAddress | ForEach-Object { [string]$_ })
+    $requestedAddresses = @($Addresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($requestedAddresses.Count -eq 0) {
+        throw 'Enter at least one frontend site address.'
+    }
+
+    $allAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses @($existingAddresses + $requestedAddresses))
+    $existingNormalizedAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses $existingAddresses)
+    $existingSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($address in $existingNormalizedAddresses) { $existingSet.Add($address) | Out-Null }
+    $addedAddresses = @($allAddresses | Where-Object { -not $existingSet.Contains($_) })
+
+    if ($addedAddresses.Count -eq 0) {
+        Write-Host 'All requested sites are already in the monitoring configuration. No file was changed.' -ForegroundColor Yellow
+        return
+    }
+
+    $configuration.SiteAddress = @($allAddresses)
+    $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $configurationDirectory = Split-Path -Parent $script:ResolvedConfigPath
+    $backupPath = Join-Path $configurationDirectory ('{0}_{1}.bak.json' -f ([IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath)), $timestamp)
+    Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination $backupPath -ErrorAction Stop
+    $json = $configuration | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($script:ResolvedConfigPath, $json + [Environment]::NewLine, $script:Utf8NoBom)
+
+    Write-Host "Added site(s): $($addedAddresses -join ', ')" -ForegroundColor Green
+    foreach ($address in $addedAddresses) {
+        $frontendUri = (ConvertTo-HttpUris -Addresses $address | Select-Object -First 1)
+        $apiUri = Get-D4AApiUri -FrontendUri $frontendUri
+        Write-Host "Automatic API health check: $($apiUri.AbsoluteUri)" -ForegroundColor Green
+    }
+    Write-Host "Configuration updated: $($script:ResolvedConfigPath)" -ForegroundColor Green
+    Write-Host "Configuration backup: $backupPath" -ForegroundColor Yellow
+}
+
+function Show-MonitorConfiguration {
+    $configuration = Get-MonitorConfigurationForManagement
+    $configuredSites = @(Get-UniqueMonitorSiteAddresses -Addresses @($configuration.SiteAddress | ForEach-Object { [string]$_ }))
+    $apiSites = @(
+        foreach ($site in $configuredSites) {
+            $frontendUri = (ConvertTo-HttpUris -Addresses $site | Select-Object -First 1)
+            (Get-D4AApiUri -FrontendUri $frontendUri).AbsoluteUri
+        }
+    )
+    $schedule = $configuration.TaskScheduler
+    $frequency = if ($null -ne $schedule -and $null -ne $schedule.FrequencyMinutes) { "$($schedule.FrequencyMinutes) minute(s)" } else { 'Not recorded in configuration' }
+    $dailySummary = if ($null -ne $schedule -and $schedule.DailySummaryEnabled) { "Enabled at $($schedule.DailySummaryTime)" } else { 'Not enabled' }
+
+    Write-Host ''
+    Write-Host 'Current Monitoring Configuration' -ForegroundColor Cyan
+    [pscustomobject]@{
+        MonitorVersion       = $script:MonitorVersion
+        ReleaseDate          = $script:MonitorReleaseDate
+        ConfigurationFile    = $script:ResolvedConfigPath
+        MonitoringName       = $MonitoringName
+        FrontendSites        = ($configuredSites -join ', ')
+        AutomaticApiSites    = ($apiSites -join ', ')
+        NotificationAddresses = $NotificationTo
+        ScheduledFrequency   = $frequency
+        DailySummary         = $dailySummary
+        LogDirectory         = $LogDirectory
+        LogRetentionDays     = $LogRetentionDays
+        WatchdogLogRoot      = $WatchdogLogRoot
+    } | Format-List
+
+    Write-Host 'Important thresholds' -ForegroundColor Cyan
+    [pscustomobject]@{
+        HttpTimeoutSeconds                  = $HttpTimeoutSeconds
+        ApplicationWarningMs                = $ApplicationWarningMs
+        ApplicationAlertMs                  = $ApplicationAlertMs
+        ApiHealthWarningMs                  = $ApiHealthWarningMs
+        ApiHealthFailureAttempts            = $ApiHealthFailureAttempts
+        NginxErrorsPerMinuteThreshold       = $NginxErrorsPerMinuteThreshold
+        NginxConsecutiveMinutes             = $NginxConsecutiveMinutes
+        DataCollectorFailureAlertThreshold  = $DataCollectorConsecutiveFailureThreshold
+        DataCollectorLastHealthyWarningMins = $DataCollectorLastHealthyWarningMinutes
+        DataCollectorLastHealthyCriticalMins = $DataCollectorLastHealthyCriticalMinutes
+    } | Format-List
+}
+
+function Get-IgnoreRulesDescriptionHeader {
+    return @'
+# ==============================================================================
+# DESCRIPTION - AUTOMATIC COOLDOWN COMMANDS
+# ==============================================================================
+# Automatic rules limit duplicate notifications for the same issue. Use these
+# commands from the folder containing D4A-ScheduledMonitor-v5.ps1 instead of
+# manually changing only one part of an automatic rule.
+#
+# Change an automatic cooldown and recalculate BOTH duration and expiry from now:
+# .\D4A-ScheduledMonitor-v5.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '12h'
+# .\D4A-ScheduledMonitor-v5.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '3d'
+#
+# Remove the automatic cooldown immediately:
+# .\D4A-ScheduledMonitor-v5.ps1 -ClearIssueCooldown 'server-cpu'
+#
+# Valid durations include 30m, 2h, 3d, and 1w. The rule key is displayed in
+# monitoring emails and daily monitoring logs, for example [rule-key=server-cpu].
+# ==============================================================================
+
+'@
+}
+
+function Get-MonitorLogsReadme {
+    return @'
+D4A SCHEDULED MONITOR - MONITOR LOGS README
+===========================================
+
+Purpose
+-------
+D4A-ScheduledMonitor-v5.ps1 checks D4A site availability and server health.
+It can check one or more frontend site addresses, the corresponding API health
+endpoints, TLS certificates, local D4A Windows services, the local API listener,
+  CPU, memory, disk space, Nginx errors, relevant Windows events, and local
+  Decide4Action, Data Collector, MDC, PLC, and Mosquitto/MQTT services.
+
+Email behavior
+--------------
+Normal scheduled runs send an email only when a new warning, alert, or error is
+found. After a successful notification, an automatic 24-hour cooldown is added
+for that specific issue. When the issue is no longer detected, the automatic
+cooldown is removed. Test and daily-summary runs send an email even when the
+server is healthy.
+
+External configuration
+----------------------
+D4A-ScheduledMonitor.config.json is stored in monitor-logs. It contains the
+site name, frontend addresses, notification recipients, installation paths,
+log retention, and optional thresholds. Scheduled Task frequency is recorded
+there as deployment metadata but remains controlled by Windows Task Scheduler.
+Command-line parameters override JSON values for temporary manual tests.
+The optional API reliability settings are ApiHealthWarningMs (default 4000),
+ApiHealthFailureAttempts (default 3), ApiHealthRetryIntervalSeconds (default
+5), and NssmExcludedLogRotationEventIds (default 1063,1077).
+
+DAILY LOG FILES AND WATCHDOG EVIDENCE
+=====================================
+run_log_yyyyMMdd.txt
+  One daily execution log containing monitor start/end records, configuration,
+  checks, successful results, warnings, email activity, and diagnostics. Each
+  entry keeps its component category, such as Application, Server, Diagnostics,
+  Email, or Ignore.
+
+error_log_yyyyMMdd.txt
+  One daily error log containing warnings, alerts, errors, and their component
+  category. This is the primary file to review when an alert email is received.
+
+ignore-rules.txt
+  The single persistent file for notification suppression and automatic
+  cooldowns. It is never removed by the dated-log retention process.
+
+Watchdog evidence
+  Recent Watchdog TaskSchedulerOutput service logs are read only and added to
+  the monitor results when they help explain an issue. The monitor never
+  restarts services or changes Watchdog state.
+
+RELIABILITY ALERT POLICY
+========================
+Data Collector LastEventTime SQL timeouts are retryable while the D4A Data
+Collector Windows service is Running. The first failure is logged only, the
+second logs diagnostics, and the third consecutive failure alerts. The runtime
+state file D4A-ScheduledMonitor.state.json stores this counter and LastHealthy
+timestamp; it is state data, not a component log.
+
+When the service is Running, LastHealthy older than 5 minutes is a warning and
+older than 10 minutes is critical. If the Windows service is not Running, the
+existing immediate Windows-service alert applies.
+
+Nginx upstream errors notify only when the rate is more than 20 matching errors
+per minute for two consecutive minutes. Lower or isolated bursts are recorded
+without an email alert.
+
+API /health warnings use a 4000 ms threshold. After an initial availability
+failure, the monitor makes at most two retries at five-second intervals and
+alerts only if all three attempts fail. A recovered retry is included in daily
+results but does not send a normal notification. NSSM output-file rotation
+events 1063 and 1077 are excluded. Windows-event warnings appear only in the
+daily monitoring results email. Watchdog evidence that a service was
+successfully restarted is also daily-only; Windows-event alerts and unresolved
+Watchdog failures still notify immediately.
+
+All dated .txt monitoring logs are retained for the current day plus the prior
+four days. README.txt and ignore-rules.txt are not removed by log retention.
+
+ignore-rules.txt
+  Controls notification suppression. Each active rule is one line:
+    rule-key|temporary|duration|ignore-until
+    rule-key|permanent||
+    rule-key|automatic|duration|ignore-until
+  Automatic rules are maintained by the monitor. Temporary and permanent rules
+  may be maintained manually. Comments begin with # and are ignored.
+
+README.txt
+  This guide. The monitor creates it only when it is missing, so local notes in
+  this file are preserved.
+
+Temporary email helper files
+----------------------------
+  While an email is being sent, temporary d4a_monitor_email_*.js and .json files
+  can briefly appear under monitor-logs. They are removed after the send attempt. If
+  a process is interrupted, they may remain and can be deleted after review.
+
+Watchdog log evidence
+---------------------
+If the Watchdog uses <D4A install root>\Log\TaskSchedulerOutput, the monitor
+checks recent per-service Watchdog entries for errors, stale data, timeouts,
+crashes, or restart activity. Evidence that Watchdog successfully restarted a
+service is included in daily and test reports only. Unresolved failures and
+failed restarts still cause an immediate alert. These entries do not cause any
+service restart. Set -WatchdogLogRoot to another
+TaskSchedulerOutput folder when a nonstandard path is used.
+
+Manual run examples
+-------------------
+Add one or more sites permanently to the JSON configuration. The monitor
+derives and checks the matching API endpoint automatically:
+  .\D4A-ScheduledMonitor-v5.ps1 -AddSiteAddress 'hostname:1200,akbou.decide4action.com'
+
+Show the effective configuration without running a health check:
+  .\D4A-ScheduledMonitor-v5.ps1 -ShowConfiguration
+
+Run the monitor with its configured sites and normal alert behavior:
+  .\D4A-ScheduledMonitor-v5.ps1
+
+Run a test and send a complete email even when there are no issues:
+  .\D4A-ScheduledMonitor-v5.ps1 -SendTestResultsEmail
+
+Run a daily-style complete report manually:
+  .\D4A-ScheduledMonitor-v5.ps1 -SendDailySummaryEmail
+
+Test one site temporarily without changing the configured default:
+  .\D4A-ScheduledMonitor-v5.ps1 -SiteAddress 'https://akbou.decide4action.com' -SendTestResultsEmail
+
+Test multiple frontend sites. Separate them with commas; each matching API is
+added automatically:
+  .\D4A-ScheduledMonitor-v5.ps1 -SiteAddress 'hostname:1200,akbou.decide4action.com' -SendTestResultsEmail
+
+Increase CPU sampling during a manual performance test:
+  .\D4A-ScheduledMonitor-v5.ps1 -CpuSampleDurationSeconds 120 -SendTestResultsEmail
+
+Ignore rule examples
+--------------------
+The rule key is included in run_log and notification emails, for example:
+  [rule-key=server-cpu]
+
+Recommended: change an automatic cooldown. This recalculates both duration and
+expiry timestamp from the current time; do not edit only the duration column:
+  .\D4A-ScheduledMonitor-v5.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '3d'
+
+Remove an automatic cooldown so a currently recurring issue can notify again:
+  .\D4A-ScheduledMonitor-v5.ps1 -ClearIssueCooldown 'server-cpu'
+
+Manually add a temporary ignore rule. Leave the last field empty; the monitor
+calculates the expiry on its next run:
+  application-frontend-availability|temporary|2h|
+
+Manually add a permanent ignore rule. Use this only for an accepted permanent
+condition, because it has no expiry:
+  server-api-listener|permanent||
+
+To stop ignoring a manually added rule, delete or comment out its line by adding
+# at the beginning, then save ignore-rules.txt.
+'@
+}
+
+function Get-MonitorLogsReadmeUpdate {
+    return @'
+
+DAILY LOG FILES AND WATCHDOG EVIDENCE
+=====================================
+The monitor uses one daily run log and one daily error log:
+  run_log_yyyyMMdd.txt - all execution activity, with a component category.
+  error_log_yyyyMMdd.txt - warnings, alerts, and errors, with a category.
+  ignore-rules.txt - the single persistent ignore and cooldown rules file.
+
+Only the current day and the prior four days are retained. README.txt and
+ignore-rules.txt remain untouched. The monitor reads Watchdog
+TaskSchedulerOutput logs when available to provide root-cause evidence, but it
+does not restart services or change the Watchdog state.
+
+RELIABILITY ALERT POLICY
+========================
+Data Collector LastEventTime SQL timeouts are retried while the Windows service
+is Running: log only on failure 1, diagnostics on failure 2, and alert on
+failure 3. LastHealthy older than 5 minutes is a warning; older than 10 minutes
+is critical. Nginx alerts require more than 20 matching errors per minute for
+two consecutive minutes. API /health warns at 4000 ms and retries an initial
+availability failure twice at five-second intervals before alerting. NSSM
+server.log rotation events 1063 and 1077 are excluded; Windows-event warnings
+and successful Watchdog restart evidence are included only in daily monitoring
+results.
+'@
+}
+
+function Ensure-MonitorLogDocumentation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$IgnoreRulesPath
+    )
+
+    $descriptionHeader = Get-IgnoreRulesDescriptionHeader
+    $isNewIgnoreRulesFile = -not (Test-Path -LiteralPath $IgnoreRulesPath -PathType Leaf)
+    if ($isNewIgnoreRulesFile) {
+        [IO.File]::WriteAllText($IgnoreRulesPath, $descriptionHeader, $script:Utf8NoBom)
+    }
+    else {
+        $existingRules = [IO.File]::ReadAllText($IgnoreRulesPath)
+        if ($existingRules -notmatch '(?m)^# DESCRIPTION - AUTOMATIC COOLDOWN COMMANDS$') {
+            [IO.File]::WriteAllText($IgnoreRulesPath, $descriptionHeader + $existingRules, $script:Utf8NoBom)
+        }
+    }
+
+    $readmePath = Join-Path $Directory 'README.txt'
+    if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) {
+        [IO.File]::WriteAllText($readmePath, (Get-MonitorLogsReadme), $script:Utf8NoBom)
+    }
+    else {
+        $existingReadme = [IO.File]::ReadAllText($readmePath)
+        if ($existingReadme -notmatch '(?m)^RELIABILITY ALERT POLICY$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeUpdate), $script:Utf8NoBom)
+        }
+    }
+
+    return $isNewIgnoreRulesFile
+}
+
+function Get-DailyMonitorLogPath {
+    param([Parameter(Mandatory = $true)][ValidateSet('Run', 'Error')][string]$Type)
+
+    if ([string]::IsNullOrWhiteSpace($script:MonitorLogDirectory)) {
+        throw 'The monitor log directory has not been initialized.'
+    }
+
+    $prefix = if ($Type -eq 'Run') { 'run_log' } else { 'error_log' }
+    return (Join-Path $script:MonitorLogDirectory ('{0}_{1}.txt' -f $prefix, $script:RunStartedAt.ToString('yyyyMMdd')))
+}
+
+function Remove-ExpiredMonitorLogs {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    $cutoffDate = (Get-Date).Date.AddDays(-($LogRetentionDays - 1))
+    $datePattern = '^(?:run_log_|error_log_)?(?<Date>\d{8})\.txt$'
+    foreach ($file in @(Get-ChildItem -LiteralPath $Directory -File -Filter '*.txt' -ErrorAction SilentlyContinue)) {
+        if ($file.Name -notmatch $datePattern) { continue }
+
+        $fileDate = [DateTime]::MinValue
+        if (-not [DateTime]::TryParseExact($matches.Date, 'yyyyMMdd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$fileDate)) {
+            continue
+        }
+        if ($fileDate -lt $cutoffDate) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Initialize-MonitorLogging {
+    $directory = if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        Join-Path $script:ScriptDirectory 'monitor-logs'
+    }
+    else {
+        [Environment]::ExpandEnvironmentVariables($LogDirectory)
+    }
+
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Path $directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $directory = (Get-Item -LiteralPath $directory -ErrorAction Stop).FullName
+    $script:MonitorLogDirectory = $directory
+    Remove-ExpiredMonitorLogs -Directory $directory
+    $script:RunLogPath = Get-DailyMonitorLogPath -Type Run
+    $script:ErrorLogPath = Get-DailyMonitorLogPath -Type Error
+    $script:IgnoreRulesPath = Join-Path $directory 'ignore-rules.txt'
+    $script:MonitorStatePath = Join-Path $directory 'D4A-ScheduledMonitor.state.json'
+
+    if (-not (Test-Path -LiteralPath $script:RunLogPath -PathType Leaf)) {
+        [IO.File]::WriteAllText($script:RunLogPath, '', $script:Utf8NoBom)
+    }
+    if (-not (Test-Path -LiteralPath $script:ErrorLogPath -PathType Leaf)) {
+        [IO.File]::WriteAllText($script:ErrorLogPath, '', $script:Utf8NoBom)
+    }
+
+    $isNewIgnoreRulesFile = Ensure-MonitorLogDocumentation -Directory $directory -IgnoreRulesPath $script:IgnoreRulesPath
+
+    if ($isNewIgnoreRulesFile) {
+        $template = @'
+# D4A Scheduled Monitor ignore rules
+# Format: rule-key|temporary|duration|ignore-until
+#         rule-key|permanent||
+#         rule-key|automatic|duration|ignore-until
+#
+# Temporary durations: 30m, 2h, 3d, or 1w. Leave ignore-until empty when
+# adding a temporary rule. The monitor calculates and writes the end time.
+# Automatic rules are created after a notification and removed when that
+# specific issue is no longer detected. Expired temporary rules are commented
+# out automatically.
+#
+# Examples:
+# application-frontend-availability|temporary|2h|
+# server-api-listener|permanent||
+'@
+        [IO.File]::AppendAllText($script:IgnoreRulesPath, $template, $script:Utf8NoBom)
+    }
+
+    $script:LoggingReady = $true
+}
+
+function Get-MonitorRuntimeState {
+    $defaultState = [pscustomobject]@{
+        StateVersion = 1
+        DataCollectorLastEvent = [pscustomobject]@{
+            ConsecutiveFailures = 0
+            LastHealthy         = $null
+            LastProcessedFailureId = $null
+            LastDiagnosticsFailureId = $null
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath) -or -not (Test-Path -LiteralPath $script:MonitorStatePath -PathType Leaf)) {
+        return $defaultState
+    }
+
+    try {
+        $state = Get-Content -LiteralPath $script:MonitorStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $state.DataCollectorLastEvent) {
+            $state | Add-Member -MemberType NoteProperty -Name DataCollectorLastEvent -Value $defaultState.DataCollectorLastEvent
+        }
+        foreach ($propertyName in @('ConsecutiveFailures', 'LastHealthy', 'LastProcessedFailureId', 'LastDiagnosticsFailureId')) {
+            if ($null -eq $state.DataCollectorLastEvent.PSObject.Properties[$propertyName]) {
+                $state.DataCollectorLastEvent | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.DataCollectorLastEvent.$propertyName
+            }
+        }
+        return $state
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+            'Unable to read monitor state. Data Collector retry tracking will restart: {0}' -f $_.Exception.Message
+        )
+        return $defaultState
+    }
+}
+
+function Save-MonitorRuntimeState {
+    param([Parameter(Mandatory = $true)][object]$State)
+
+    if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath)) { return }
+    $temporaryPath = '{0}.{1}.tmp' -f $script:MonitorStatePath, [guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::WriteAllText($temporaryPath, ($State | ConvertTo-Json -Depth 6), $script:Utf8NoBom)
+        Move-Item -LiteralPath $temporaryPath -Destination $script:MonitorStatePath -Force -ErrorAction Stop
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+            'Unable to save monitor state: {0}' -f $_.Exception.Message
+        )
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Add-TextToFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+
+    [IO.File]::AppendAllText(
+        $Path,
+        $Text + [Environment]::NewLine,
+        $script:Utf8NoBom
+    )
+}
+
+function Write-RunLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Level = 'INFO',
+        [string]$Category = 'Monitor',
+        [ConsoleColor]$Color = [ConsoleColor]::Gray,
+        [switch]$NoConsole
+    )
+
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff zzz')
+    $line = '[{0}] [{1}] [{2}] {3}' -f $timestamp, $Level.ToUpperInvariant(), $Category, $Message
+
+    if ($script:LoggingReady) {
+        try {
+            Add-TextToFile -Path $script:RunLogPath -Text $line
+        }
+        catch {
+            Write-Host ('[LOG ERROR] Unable to write run log: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        }
+    }
+
+    if (-not $NoConsole.IsPresent) {
+        Write-Host $line -ForegroundColor $Color
+    }
+}
+
+function Write-ErrorLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Level = 'ERROR',
+        [string]$Category = 'Monitor'
+    )
+
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff zzz')
+    $line = '[{0}] [{1}] [{2}] {3}' -f $timestamp, $Level.ToUpperInvariant(), $Category, $Message
+
+    if ($script:LoggingReady) {
+        try {
+            Add-TextToFile -Path $script:ErrorLogPath -Text $line
+        }
+        catch {
+            Write-Host ('[LOG ERROR] Unable to write error log: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        }
+    }
+}
+
+function ConvertTo-IgnoreRuleKey {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $key = $Value.Trim().ToLowerInvariant() -replace '[^a-z0-9]+', '-'
+    $key = $key.Trim('-')
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        throw 'An ignore-rule key cannot be empty.'
+    }
+    return $key
+}
+
+function Add-MonitorResult {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('OK', 'Warning', 'Alert', 'Error')]
+        [string]$Severity,
+
+        [Parameter(Mandatory = $true)][string]$Category,
+        [Parameter(Mandatory = $true)][string]$Check,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Key,
+        [bool]$NotificationEligible = $true
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Key)) {
+        $Key = ConvertTo-IgnoreRuleKey -Value ('{0}-{1}' -f $Category, $Check)
+    }
+    else {
+        $Key = ConvertTo-IgnoreRuleKey -Value $Key
+    }
+
+    $result = [pscustomobject]@{
+        Time     = Get-Date
+        Severity = $Severity
+        Category = $Category
+        Check    = $Check
+        Message  = $Message
+        Key      = $Key
+        IgnoreActive = $false
+        IgnoreMode = $null
+        IgnoreUntil = $null
+        NotificationEligible = $NotificationEligible
+    }
+    $script:Results.Add($result) | Out-Null
+
+    $color = switch ($Severity) {
+        'OK' { [ConsoleColor]::Green }
+        'Warning' { [ConsoleColor]::Yellow }
+        'Alert' { [ConsoleColor]::Red }
+        'Error' { [ConsoleColor]::Magenta }
+    }
+
+    Write-RunLog -Level $Severity -Category $Category -Color $color -Message (
+        '{0} [rule-key={1}]: {2}' -f $Check, $Key, $Message
+    )
+    if ($Severity -ne 'OK') {
+        Write-ErrorLog -Level $Severity -Category $Category -Message (
+            '{0} [rule-key={1}]: {2}' -f $Check, $Key, $Message
+        )
+    }
+}
+
+function ConvertTo-IgnoreDuration {
+    param([Parameter(Mandatory = $true)][string]$Duration)
+
+    $value = $Duration.Trim().ToLowerInvariant()
+    if ($value -notmatch '^(?<Amount>[1-9]\d*)\s*(?<Unit>m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?)$') {
+        throw ('Invalid temporary ignore duration "{0}". Use values such as 30m, 2h, 3d, or 1w.' -f $Duration)
+    }
+
+    $amount = [int]$matches.Amount
+    switch -Regex ($matches.Unit) {
+        '^m' { return [TimeSpan]::FromMinutes($amount) }
+        '^h' { return [TimeSpan]::FromHours($amount) }
+        '^d' { return [TimeSpan]::FromDays($amount) }
+        '^w' { return [TimeSpan]::FromDays($amount * 7) }
+    }
+}
+
+function Get-ActiveIgnoreRules {
+    if (-not (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf)) {
+        throw ('Ignore-rules file not found: {0}' -f $script:IgnoreRulesPath)
+    }
+
+    $now = Get-Date
+    $activeRules = [System.Collections.Generic.List[object]]::new()
+    $updatedLines = [System.Collections.Generic.List[string]]::new()
+    $changed = $false
+    $lineNumber = 0
+
+    foreach ($originalLine in @(Get-Content -LiteralPath $script:IgnoreRulesPath -ErrorAction Stop)) {
+        $lineNumber++
+        $trimmedLine = $originalLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmedLine) -or $trimmedLine.StartsWith('#')) {
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $parts = @($originalLine -split '\|', 4)
+        if ($parts.Count -lt 2) {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+                'Invalid ignore rule at line {0}; expected key|temporary|duration|ignore-until or key|permanent||.' -f $lineNumber
+            )
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore rule at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        try {
+            $key = ConvertTo-IgnoreRuleKey -Value $parts[0]
+        }
+        catch {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message ('Invalid ignore-rule key at line {0}: {1}' -f $lineNumber, $_.Exception.Message)
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore-rule key at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $mode = $parts[1].Trim().ToLowerInvariant()
+        $duration = if ($parts.Count -ge 3) { $parts[2].Trim() } else { '' }
+        $untilText = if ($parts.Count -ge 4) { $parts[3].Trim() } else { '' }
+
+        if ($mode -eq 'permanent') {
+            $normalizedLine = '{0}|permanent||' -f $key
+            if ($originalLine -ne $normalizedLine) { $changed = $true }
+            $updatedLines.Add($normalizedLine) | Out-Null
+            $activeRules.Add([pscustomobject]@{
+                Key         = $key
+                Mode        = 'permanent'
+                Duration    = $null
+                IgnoreUntil = $null
+            }) | Out-Null
+            continue
+        }
+
+        if ($mode -notin @('temporary', 'automatic')) {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+                'Invalid ignore-rule mode at line {0}: {1}. Use temporary, automatic, or permanent.' -f $lineNumber, $mode
+            )
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore-rule mode at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        try {
+            $durationSpan = ConvertTo-IgnoreDuration -Duration $duration
+        }
+        catch {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message ('Invalid temporary rule at line {0}: {1}' -f $lineNumber, $_.Exception.Message)
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid temporary rule at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $ignoreUntil = [DateTimeOffset]::MinValue
+        if ([string]::IsNullOrWhiteSpace($untilText)) {
+            $ignoreUntil = [DateTimeOffset]::new($now.Add($durationSpan))
+            $changed = $true
+            Write-RunLog -Category Ignore -Color Cyan -Message (
+                'Temporary rule {0} activated until {1}.' -f $key, $ignoreUntil.ToString('o')
+            )
+        }
+        elseif (-not [DateTimeOffset]::TryParse($untilText, [ref]$ignoreUntil)) {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message ('Invalid ignore-until date at line {0}: {1}' -f $lineNumber, $untilText)
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore-until date at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $normalizedTemporaryLine = '{0}|temporary|{1}|{2}' -f $key, $duration, $ignoreUntil.ToString('o')
+        if ($ignoreUntil.LocalDateTime -le $now) {
+            $expiredLine = '# EXPIRED {0} | {1}' -f $now.ToString('o'), $normalizedTemporaryLine
+            $updatedLines.Add($expiredLine) | Out-Null
+            $changed = $true
+            Write-RunLog -Category Ignore -Color DarkGray -Message ('Expired temporary rule commented out: {0}' -f $key)
+            continue
+        }
+
+        if ($originalLine -ne $normalizedTemporaryLine) { $changed = $true }
+        $updatedLines.Add($normalizedTemporaryLine) | Out-Null
+        $activeRules.Add([pscustomobject]@{
+            Key         = $key
+            Mode        = $mode
+            Duration    = $duration
+            IgnoreUntil = $ignoreUntil
+        }) | Out-Null
+    }
+
+    if ($changed) {
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $updatedLines.ToArray(), $script:Utf8NoBom)
+    }
+
+    return @($activeRules.ToArray())
+}
+
+function Apply-IgnoreRulesToResults {
+    param([object[]]$ActiveRules)
+
+    $rulesByKey = @{}
+    foreach ($rule in @($ActiveRules)) {
+        if (-not $rulesByKey.ContainsKey($rule.Key)) {
+            $rulesByKey[$rule.Key] = $rule
+        }
+        else {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+                'Duplicate active ignore rule found for {0}; the first rule is used.' -f $rule.Key
+            )
+        }
+    }
+
+    foreach ($result in $script:Results) {
+        $rule = $null
+        if ($result.Severity -ne 'OK' -and $rulesByKey.ContainsKey($result.Key)) {
+            $rule = $rulesByKey[$result.Key]
+        }
+
+        $result.IgnoreActive = ($null -ne $rule)
+        $result.IgnoreMode = if ($null -ne $rule) { $rule.Mode } else { $null }
+        $result.IgnoreUntil = if ($null -ne $rule) { $rule.IgnoreUntil } else { $null }
+    }
+}
+
+function Get-IgnoreRuleEntries {
+    param([object[]]$Results)
+
+    $keys = @($Results | Where-Object {
+        $_.Severity -ne 'OK' -and $_.NotificationEligible -and -not $_.IgnoreActive
+    } |
+        Select-Object -ExpandProperty Key -Unique | Sort-Object)
+    return @(
+        foreach ($key in $keys) {
+            [pscustomobject]@{
+                Key       = $key
+                Temporary = '{0}|temporary|2h|' -f $key
+                Permanent = '{0}|permanent||' -f $key
+            }
+        }
+    )
+}
+
+function Set-AutomaticIssueCooldown {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [string]$Duration = '24h',
+        [switch]$Remove
+    )
+
+    $normalizedKey = ConvertTo-IgnoreRuleKey -Value $Key
+    $durationSpan = $null
+    if (-not $Remove.IsPresent) {
+        $durationSpan = ConvertTo-IgnoreDuration -Duration $Duration
+    }
+
+    $existingLines = if (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf) {
+        @(Get-Content -LiteralPath $script:IgnoreRulesPath -ErrorAction Stop)
+    }
+    else {
+        @()
+    }
+
+    $updatedLines = [System.Collections.Generic.List[string]]::new()
+    $changed = $false
+    foreach ($line in $existingLines) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+
+        $parts = @($line -split '\|', 4)
+        try {
+            $lineKey = if ($parts.Count -ge 1) { ConvertTo-IgnoreRuleKey -Value $parts[0] } else { '' }
+        }
+        catch {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+        $lineMode = if ($parts.Count -ge 2) { $parts[1].Trim().ToLowerInvariant() } else { '' }
+        if ($lineKey -eq $normalizedKey -and $lineMode -eq 'automatic') {
+            $changed = $true
+            continue
+        }
+
+        $updatedLines.Add($line) | Out-Null
+    }
+
+    if (-not $Remove.IsPresent) {
+        $ignoreUntil = [DateTimeOffset]::new((Get-Date).Add($durationSpan))
+        $updatedLines.Add(('{0}|automatic|{1}|{2}' -f $normalizedKey, $Duration, $ignoreUntil.ToString('o'))) | Out-Null
+        $changed = $true
+        Write-RunLog -Category Ignore -Color Cyan -Message (
+            'Automatic cooldown set for {0} until {1}.' -f $normalizedKey, $ignoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz')
+        )
+    }
+    elseif ($changed) {
+        Write-RunLog -Category Ignore -Color Green -Message ('Automatic cooldown removed for {0}.' -f $normalizedKey)
+    }
+
+    if ($changed) {
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $updatedLines.ToArray(), $script:Utf8NoBom)
+    }
+}
+
+function Remove-ResolvedAutomaticIssueCooldowns {
+    param([string[]]$ActiveIssueKeys)
+
+    $activeKeys = @{}
+    foreach ($key in @($ActiveIssueKeys)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$key)) {
+            $activeKeys[(ConvertTo-IgnoreRuleKey -Value $key)] = $true
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf)) {
+        return
+    }
+
+    $updatedLines = [System.Collections.Generic.List[string]]::new()
+    $changed = $false
+    foreach ($line in @(Get-Content -LiteralPath $script:IgnoreRulesPath -ErrorAction Stop)) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+
+        $parts = @($line -split '\|', 4)
+        try {
+            $lineKey = if ($parts.Count -ge 1) { ConvertTo-IgnoreRuleKey -Value $parts[0] } else { '' }
+        }
+        catch {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+        $lineMode = if ($parts.Count -ge 2) { $parts[1].Trim().ToLowerInvariant() } else { '' }
+        if ($lineMode -eq 'automatic' -and -not $activeKeys.ContainsKey($lineKey)) {
+            $changed = $true
+            Write-RunLog -Category Ignore -Color Green -Message ('Resolved issue removed from automatic cooldown: {0}.' -f $lineKey)
+            continue
+        }
+
+        $updatedLines.Add($line) | Out-Null
+    }
+
+    if ($changed) {
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $updatedLines.ToArray(), $script:Utf8NoBom)
+    }
+}
+
+function Invoke-SafeMonitorCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$Category,
+        [Parameter(Mandatory = $true)][string]$Check,
+        [Parameter(Mandatory = $true)][scriptblock]$Action
+    )
+
+    try {
+        & $Action
+    }
+    catch {
+        $detail = $_.Exception.Message
+        if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) {
+            $detail = '{0} | Stack: {1}' -f $detail, (($_.ScriptStackTrace -replace '[\r\n]+', ' ').Trim())
+        }
+        Add-MonitorResult -Severity Error -Category $Category -Check $Check -Message $detail
+    }
+}
+
+function ConvertTo-HttpUri {
+    param([Parameter(Mandatory = $true)][string]$Address)
+
+    $value = $Address.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw 'SiteAddress is required.'
+    }
+
+    if ($value -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://') {
+        $localAddress = $value -match '(?i)^(localhost|hostname|127\.0\.0\.1|\[::1\])(?=[:/]|$)'
+        $localPort = $value -match ':1200(?=/|$)'
+        $scheme = if ($localAddress -or $localPort) { 'http' } else { 'https' }
+        $value = '{0}://{1}' -f $scheme, $value
+    }
+
+    $uri = $null
+    if (-not [Uri]::TryCreate($value, [UriKind]::Absolute, [ref]$uri)) {
+        throw ('Invalid site address: {0}' -f $Address)
+    }
+    if ($uri.Scheme -notin @('http', 'https')) {
+        throw ('Only HTTP and HTTPS site addresses are supported: {0}' -f $Address)
+    }
+
+    return $uri
+}
+
+function ConvertTo-HttpUris {
+    param([AllowNull()][string]$Addresses)
+
+    $value = if ([string]::IsNullOrWhiteSpace($Addresses)) { 'hostname:1200' } else { $Addresses }
+    $uris = [System.Collections.Generic.List[Uri]]::new()
+    foreach ($address in @($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $uri = ConvertTo-HttpUri -Address $address
+        if (@($uris | Where-Object { $_.AbsoluteUri.TrimEnd('/') -ieq $uri.AbsoluteUri.TrimEnd('/') }).Count -eq 0) {
+            $uris.Add($uri) | Out-Null
+        }
+    }
+
+    if ($uris.Count -eq 0) {
+        throw 'At least one D4A site address is required.'
+    }
+    return @($uris.ToArray())
+}
+
+function Get-MonitorEndpointLabel {
+    param([Parameter(Mandatory = $true)][Uri]$Uri)
+
+    if ($Uri.IsDefaultPort) { return $Uri.DnsSafeHost }
+    return ('{0}:{1}' -f $Uri.DnsSafeHost, $Uri.Port)
+}
+
+function Test-IsIpAddress {
+    param([Parameter(Mandatory = $true)][string]$HostName)
+
+    $parsed = $null
+    return [Net.IPAddress]::TryParse($HostName, [ref]$parsed)
+}
+
+function Get-D4AApiUri {
+    param([Parameter(Mandatory = $true)][Uri]$FrontendUri)
+
+    $hostName = $FrontendUri.DnsSafeHost
+    $isLocalName = $hostName -notmatch '\.'
+    if ($FrontendUri.Port -eq 1200 -or (Test-IsIpAddress -HostName $hostName) -or $isLocalName) {
+        return [UriBuilder]::new($FrontendUri.Scheme, $hostName, 32167, '/health').Uri
+    }
+
+    $labels = $hostName.Split('.')
+    if ($labels[0] -notmatch '(?i)-api$') {
+        $labels[0] = '{0}-api' -f $labels[0]
+    }
+
+    $builder = [UriBuilder]::new($FrontendUri.Scheme, ($labels -join '.'))
+    $builder.Port = -1
+    $builder.Path = '/health'
+    $builder.Query = ''
+    $builder.Fragment = ''
+    return $builder.Uri
+}
+
+function Get-AuthorityBaseUri {
+    param([Parameter(Mandatory = $true)][Uri]$Uri)
+
+    $builder = [UriBuilder]::new($Uri.Scheme, $Uri.DnsSafeHost, $Uri.Port, '/')
+    if ($Uri.IsDefaultPort) {
+        $builder.Port = -1
+    }
+    return $builder.Uri
+}
+
+function Invoke-HttpProbe {
+    param(
+        [Parameter(Mandatory = $true)][Uri]$Uri,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $response = $null
+    try {
+        $request = [Net.HttpWebRequest]::Create($Uri)
+        $request.Method = 'GET'
+        $request.UserAgent = 'D4A-ScheduledMonitor/6.0'
+        $request.AllowAutoRedirect = $true
+        $request.MaximumAutomaticRedirections = $MaxRedirects
+        $request.Timeout = $TimeoutSeconds * 1000
+        $request.ReadWriteTimeout = $TimeoutSeconds * 1000
+        $request.AutomaticDecompression = [Net.DecompressionMethods]::GZip -bor [Net.DecompressionMethods]::Deflate
+        $response = [Net.HttpWebResponse]$request.GetResponse()
+
+        return [pscustomobject]@{
+            Uri        = $Uri
+            FinalUri   = $response.ResponseUri
+            StatusCode = [int]$response.StatusCode
+            StatusText = [string]$response.StatusDescription
+            Millis     = $stopwatch.ElapsedMilliseconds
+            Error      = $null
+        }
+    }
+    catch [Net.WebException] {
+        $webResponse = $_.Exception.Response
+        $statusCode = $null
+        $statusText = $null
+        $finalUri = $Uri
+        if ($null -ne $webResponse) {
+            try {
+                $statusCode = [int]$webResponse.StatusCode
+                $statusText = [string]$webResponse.StatusDescription
+                $finalUri = $webResponse.ResponseUri
+            }
+            catch {
+                # Keep the original WebException details when response parsing fails.
+            }
+        }
+
+        return [pscustomobject]@{
+            Uri        = $Uri
+            FinalUri   = $finalUri
+            StatusCode = $statusCode
+            StatusText = $statusText
+            Millis     = $stopwatch.ElapsedMilliseconds
+            Error      = $_.Exception.Message
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Uri        = $Uri
+            FinalUri   = $Uri
+            StatusCode = $null
+            StatusText = $null
+            Millis     = $stopwatch.ElapsedMilliseconds
+            Error      = $_.Exception.Message
+        }
+    }
+    finally {
+        $stopwatch.Stop()
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
+    }
+}
+
+function Test-HttpProbeSucceeded {
+    param([Parameter(Mandatory = $true)][psobject]$Result)
+
+    return $null -ne $Result.StatusCode -and $Result.StatusCode -ge 200 -and $Result.StatusCode -lt 400
+}
+
+function Get-HttpProbeFailureDetail {
+    param([Parameter(Mandatory = $true)][psobject]$Result)
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) {
+        return [string]$Result.Error
+    }
+    if ($null -ne $Result.StatusCode) {
+        return 'HTTP {0} {1}' -f $Result.StatusCode, $Result.StatusText
+    }
+    return 'No HTTP response was received.'
+}
+
+function Test-WebEndpoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][Uri]$Uri,
+        [int]$WarningMs = $ApplicationWarningMs,
+        [int]$AlertMs = $ApplicationAlertMs,
+        [ValidateRange(1, 5)][int]$FailureAttempts = 1,
+        [ValidateRange(0, 60)][int]$FailureRetryIntervalSeconds = 0
+    )
+
+    $attemptResults = [System.Collections.Generic.List[object]]::new()
+    $attemptResults.Add((Invoke-HttpProbe -Uri $Uri -TimeoutSeconds $HttpTimeoutSeconds)) | Out-Null
+
+    # Retry only after an availability failure. A healthy first response never
+    # creates extra traffic, and a recovery stops the sequence immediately.
+    while (-not (Test-HttpProbeSucceeded -Result ($attemptResults | Select-Object -Last 1)) -and $attemptResults.Count -lt $FailureAttempts) {
+        if ($FailureRetryIntervalSeconds -gt 0) {
+            Write-RunLog -Category Application -Color DarkGray -Message (
+                '{0}: availability attempt {1}/{2} failed; retrying in {3} second(s).' -f
+                    $Name, $attemptResults.Count, $FailureAttempts, $FailureRetryIntervalSeconds
+            )
+            Start-Sleep -Seconds $FailureRetryIntervalSeconds
+        }
+        $attemptResults.Add((Invoke-HttpProbe -Uri $Uri -TimeoutSeconds $HttpTimeoutSeconds)) | Out-Null
+    }
+
+    $result = $attemptResults | Select-Object -Last 1
+    $successful = Test-HttpProbeSucceeded -Result $result
+    if (-not $successful) {
+        Add-MonitorResult -Severity Alert -Category Application -Check $Name -Message (
+            '{0}; URL={1}; elapsed={2} ms; {3} consecutive availability attempt(s) failed.' -f
+                (Get-HttpProbeFailureDetail -Result $result),
+                $Uri.AbsoluteUri,
+                $result.Millis,
+                $attemptResults.Count
+        )
+        return
+    }
+
+    $message = 'HTTP {0} {1}; URL={2}; final={3}; elapsed={4} ms' -f
+        $result.StatusCode,
+        $result.StatusText,
+        $Uri.AbsoluteUri,
+        $result.FinalUri.AbsoluteUri,
+        $result.Millis
+
+    if ($attemptResults.Count -gt 1) {
+        $firstFailure = Get-HttpProbeFailureDetail -Result ($attemptResults | Select-Object -First 1)
+        Add-MonitorResult -Severity Warning -Category Application -Check $Name -Message (
+            'Initial availability attempt failed ({0}) but recovered on attempt {1}/{2}. {3}' -f
+                $firstFailure, $attemptResults.Count, $FailureAttempts, $message
+        ) -NotificationEligible:$false
+        return
+    }
+
+    if ($result.Millis -ge $AlertMs) {
+        Add-MonitorResult -Severity Alert -Category Application -Check $Name -Message (
+            '{0}; alert threshold={1} ms' -f $message, $AlertMs
+        )
+    }
+    elseif ($result.Millis -ge $WarningMs) {
+        Add-MonitorResult -Severity Warning -Category Application -Check $Name -Message (
+            '{0}; warning threshold={1} ms' -f $message, $WarningMs
+        )
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Application -Check $Name -Message $message
+    }
+}
+
+function Test-ApplicationPerformance {
+    param(
+        [Parameter(Mandatory = $true)][Uri]$PublicApiBaseUri,
+        [Parameter(Mandatory = $true)][string]$TargetLabel
+    )
+
+    $targets = @(
+        [pscustomobject]@{ Name = 'Direct API'; BaseUri = [Uri]'http://127.0.0.1:32167/' },
+        [pscustomobject]@{ Name = 'Public API'; BaseUri = $PublicApiBaseUri }
+    )
+    $endpoints = @(
+        '/Decide4ActionStartup/gettenantinfo',
+        '/api/getSystemsAvailable'
+    )
+
+    foreach ($target in $targets) {
+        foreach ($endpoint in $endpoints) {
+            $uri = [Uri]::new($target.BaseUri, $endpoint.TrimStart('/'))
+            $attemptResults = [System.Collections.Generic.List[object]]::new()
+            for ($attempt = 1; $attempt -le $ApplicationAttempts; $attempt++) {
+                $attemptResults.Add((Invoke-HttpProbe -Uri $uri -TimeoutSeconds $HttpTimeoutSeconds)) | Out-Null
+            }
+
+            $successful = @($attemptResults | Where-Object {
+                $null -ne $_.StatusCode -and $_.StatusCode -ge 200 -and $_.StatusCode -lt 400
+            })
+            $failedCount = $attemptResults.Count - $successful.Count
+            $checkName = '{0} {1} ({2})' -f $target.Name, $endpoint, $TargetLabel
+
+            if ($successful.Count -eq 0) {
+                $last = $attemptResults | Select-Object -Last 1
+                $detail = if (-not [string]::IsNullOrWhiteSpace([string]$last.Error)) {
+                    $last.Error
+                }
+                elseif ($null -ne $last.StatusCode) {
+                    'HTTP {0} {1}' -f $last.StatusCode, $last.StatusText
+                }
+                else {
+                    'No valid response.'
+                }
+                Add-MonitorResult -Severity Alert -Category 'Application performance' -Check $checkName -Message (
+                    'All {0} attempt(s) failed; URL={1}; last result={2}' -f $attemptResults.Count, $uri.AbsoluteUri, $detail
+                )
+                continue
+            }
+
+            $averageMs = [Math]::Round((($successful | Measure-Object -Property Millis -Average).Average), 0)
+            $maximumMs = [int](($successful | Measure-Object -Property Millis -Maximum).Maximum)
+            $message = 'URL={0}; successful={1}/{2}; average={3} ms; maximum={4} ms' -f
+                $uri.AbsoluteUri, $successful.Count, $attemptResults.Count, $averageMs, $maximumMs
+
+            if ($failedCount -gt 0) {
+                Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message $message
+            }
+            elseif ($averageMs -ge $ApplicationAlertMs) {
+                Add-MonitorResult -Severity Alert -Category 'Application performance' -Check $checkName -Message (
+                    '{0}; alert threshold={1} ms' -f $message, $ApplicationAlertMs
+                )
+            }
+            elseif ($averageMs -ge $ApplicationWarningMs) {
+                Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
+                    '{0}; warning threshold={1} ms' -f $message, $ApplicationWarningMs
+                )
+            }
+            else {
+                Add-MonitorResult -Severity OK -Category 'Application performance' -Check $checkName -Message $message
+            }
+        }
+    }
+}
+
+function Test-TlsCertificate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][Uri]$Uri
+    )
+
+    if ($Uri.Scheme -ne 'https') {
+        Add-MonitorResult -Severity OK -Category TLS -Check $Name -Message 'Skipped because the endpoint uses HTTP.'
+        return
+    }
+
+    $tcpClient = [Net.Sockets.TcpClient]::new()
+    $sslStream = $null
+    $certificate = $null
+    try {
+        $port = if ($Uri.IsDefaultPort) { 443 } else { $Uri.Port }
+        $connect = $tcpClient.BeginConnect($Uri.DnsSafeHost, $port, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne($HttpTimeoutSeconds * 1000)) {
+            throw ('Timed out connecting to {0}:{1}.' -f $Uri.DnsSafeHost, $port)
+        }
+        $tcpClient.EndConnect($connect)
+        $tcpClient.ReceiveTimeout = $HttpTimeoutSeconds * 1000
+        $tcpClient.SendTimeout = $HttpTimeoutSeconds * 1000
+
+        $acceptCertificate = [Net.Security.RemoteCertificateValidationCallback]{
+            param($Sender, $RemoteCertificate, $Chain, $PolicyErrors)
+            return $true
+        }
+        $sslStream = [Net.Security.SslStream]::new($tcpClient.GetStream(), $false, $acceptCertificate)
+        $sslStream.ReadTimeout = $HttpTimeoutSeconds * 1000
+        $sslStream.WriteTimeout = $HttpTimeoutSeconds * 1000
+        $sslStream.AuthenticateAsClient($Uri.DnsSafeHost)
+        if ($null -eq $sslStream.RemoteCertificate) {
+            throw 'The remote server did not provide a TLS certificate.'
+        }
+
+        $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($sslStream.RemoteCertificate)
+        $daysRemaining = [Math]::Floor(($certificate.NotAfter.ToUniversalTime() - [DateTime]::UtcNow).TotalDays)
+        $message = 'Subject={0}; issuer={1}; expires={2}; days remaining={3}' -f
+            $certificate.Subject,
+            $certificate.Issuer,
+            $certificate.NotAfter.ToString('yyyy-MM-dd HH:mm:ss'),
+            $daysRemaining
+
+        if ($daysRemaining -lt 0) {
+            Add-MonitorResult -Severity Alert -Category TLS -Check $Name -Message ('Certificate has expired. {0}' -f $message)
+        }
+        elseif ($daysRemaining -le 7) {
+            Add-MonitorResult -Severity Alert -Category TLS -Check $Name -Message ('Certificate expires within 7 days. {0}' -f $message)
+        }
+        elseif ($daysRemaining -le 30) {
+            Add-MonitorResult -Severity Warning -Category TLS -Check $Name -Message ('Certificate expires within 30 days. {0}' -f $message)
+        }
+        else {
+            Add-MonitorResult -Severity OK -Category TLS -Check $Name -Message $message
+        }
+    }
+    catch {
+        Add-MonitorResult -Severity Error -Category TLS -Check $Name -Message (
+            'Unable to inspect certificate for {0}: {1}' -f $Uri.AbsoluteUri, $_.Exception.Message
+        )
+    }
+    finally {
+        if ($null -ne $certificate) { $certificate.Dispose() }
+        if ($null -ne $sslStream) { $sslStream.Dispose() }
+        $tcpClient.Dispose()
+    }
+}
+
+function Get-SystemClassInstance {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClassName,
+        [string]$Filter
+    )
+
+    if ($null -ne (Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue)) {
+        try {
+            if ([string]::IsNullOrWhiteSpace($Filter)) {
+                return Get-CimInstance -ClassName $ClassName -ErrorAction Stop
+            }
+            return Get-CimInstance -ClassName $ClassName -Filter $Filter -ErrorAction Stop
+        }
+        catch {
+            # WMI is retained as a compatibility fallback for older servers.
+        }
+    }
+
+    if ($null -eq (Get-Command -Name Get-WmiObject -ErrorAction SilentlyContinue)) {
+        throw ('Neither CIM nor WMI can query {0}.' -f $ClassName)
+    }
+    if ([string]::IsNullOrWhiteSpace($Filter)) {
+        return Get-WmiObject -Class $ClassName -ErrorAction Stop
+    }
+    return Get-WmiObject -Class $ClassName -Filter $Filter -ErrorAction Stop
+}
+
+function Test-D4AWindowsServices {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $matching = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            $displayName = [string]$service.DisplayName
+            # D4A services consistently use the D4A or Decide4Action prefix.
+            # This includes compact names such as D4AMDCService and D4A_PLC.
+            $serviceScopePattern = '(?i)^\s*(?:D4A|Decide4Action)'
+            $matchesScope =
+                $name -match $serviceScopePattern -or
+                $displayName -match $serviceScopePattern
+
+            if ($matchesScope) {
+                $service
+            }
+        }
+    )
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity Warning -Category Server -Check 'D4A Windows services' -Message (
+            'No service matched the D4A service scope.'
+        ) -Key 'server-d4a-windows-services'
+        return
+    }
+
+    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
+        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
+            [string]$service.Name
+        }
+        else {
+            [string]$service.DisplayName
+        }
+        $message = '{0} [{1}]; State={2}; Status={3}' -f
+            $display, $service.Name, $service.State, $service.Status
+        $serviceKey = 'server-windows-service-{0}' -f $service.Name
+
+        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
+            Add-MonitorResult -Severity OK -Category Server -Check 'Windows service' -Message $message -Key $serviceKey
+        }
+        else {
+            Add-MonitorResult -Severity Alert -Category Server -Check 'Windows service' -Message $message -Key $serviceKey
+        }
+    }
+}
+
+function Test-MosquittoWindowsService {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $matching = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            $displayName = [string]$service.DisplayName
+            if ($name -match '(?i)(?:\bMosquitto\b|\bMQTT\b)' -or $displayName -match '(?i)(?:\bMosquitto\b|\bMQTT\b)') {
+                $service
+            }
+        }
+    )
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'Mosquitto/MQTT service' -Message (
+            'No Mosquitto or MQTT Windows service was found; broker status check was skipped.'
+        ) -Key 'server-mosquitto-mqtt-service'
+        return
+    }
+
+    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
+        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
+            [string]$service.Name
+        }
+        else {
+            [string]$service.DisplayName
+        }
+        $message = '{0} [{1}]; State={2}; Status={3}' -f
+            $display, $service.Name, $service.State, $service.Status
+        $serviceKey = 'server-mosquitto-mqtt-service-{0}' -f $service.Name
+
+        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
+            Add-MonitorResult -Severity OK -Category Server -Check 'Mosquitto/MQTT service' -Message $message -Key $serviceKey
+        }
+        else {
+            Add-MonitorResult -Severity Alert -Category Server -Check 'Mosquitto/MQTT service' -Message $message -Key $serviceKey
+        }
+    }
+}
+
+function Test-ApiListener {
+    $listeners = @()
+    $connectionQueryFailed = $false
+    if ($null -ne (Get-Command -Name Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+        try {
+            $listeners = @(Get-NetTCPConnection -LocalPort 32167 -State Listen -ErrorAction Stop)
+        }
+        catch {
+            $connectionQueryFailed = $true
+            Write-ErrorLog -Level Warning -Category Server -Message (
+                'Get-NetTCPConnection could not inspect port 32167; trying netstat: {0}' -f $_.Exception.Message
+            )
+        }
+    }
+
+    if ($null -eq (Get-Command -Name Get-NetTCPConnection -ErrorAction SilentlyContinue) -or $connectionQueryFailed) {
+        $netstatCommand = Get-Command -Name netstat.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $netstatCommand) {
+            throw 'Neither Get-NetTCPConnection nor netstat.exe can inspect port 32167.'
+        }
+
+        $netstatRows = @(& $netstatCommand.Source -ano -p tcp 2>$null)
+        $listeners = @(
+            foreach ($row in $netstatRows) {
+                if ([string]$row -match '^\s*TCP\s+\S+:32167\s+\S+\s+LISTENING\s+(?<Pid>\d+)\s*$') {
+                    [pscustomobject]@{ OwningProcess = [int]$matches.Pid }
+                }
+            }
+        )
+    }
+
+    if ($listeners.Count -eq 0) {
+        Add-MonitorResult -Severity Alert -Category Server -Check 'API listener' -Message 'No process is listening on TCP port 32167.'
+        return
+    }
+
+    $processDetails = @(
+        foreach ($listener in $listeners) {
+            $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+            if ($null -ne $process) {
+                '{0} (PID {1}, {2:N1} MB)' -f $process.ProcessName, $process.Id, ($process.WorkingSet64 / 1MB)
+            }
+            else {
+                'PID {0}' -f $listener.OwningProcess
+            }
+        }
+    )
+    $message = '{0} listener(s) found on port 32167: {1}' -f $listeners.Count, ($processDetails -join '; ')
+    if ($listeners.Count -gt 1) {
+        Add-MonitorResult -Severity Warning -Category Server -Check 'API listener' -Message $message
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Server -Check 'API listener' -Message $message
+    }
+}
+
+function Test-MemoryHealth {
+    $operatingSystem = @(Get-SystemClassInstance -ClassName Win32_OperatingSystem) | Select-Object -First 1
+    if ($null -eq $operatingSystem -or [double]$operatingSystem.TotalVisibleMemorySize -le 0) {
+        throw 'Windows did not return valid memory totals.'
+    }
+
+    $totalKb = [double]$operatingSystem.TotalVisibleMemorySize
+    $freeKb = [double]$operatingSystem.FreePhysicalMemory
+    $usedPercent = [Math]::Round((($totalKb - $freeKb) / $totalKb) * 100, 1)
+    $usedGb = [Math]::Round(($totalKb - $freeKb) / 1MB, 2)
+    $totalGb = [Math]::Round($totalKb / 1MB, 2)
+    $message = '{0}% used ({1} GB of {2} GB)' -f $usedPercent, $usedGb, $totalGb
+
+    if ($usedPercent -ge 92) {
+        Add-MonitorResult -Severity Alert -Category Server -Check Memory -Message ('{0}; alert threshold=92%' -f $message)
+    }
+    elseif ($usedPercent -ge 85) {
+        Add-MonitorResult -Severity Warning -Category Server -Check Memory -Message ('{0}; warning threshold=85%' -f $message)
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Server -Check Memory -Message $message
+    }
+}
+
+function Get-OneCpuSample {
+    try {
+        $row = @(Get-SystemClassInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'") |
+            Select-Object -First 1
+        if ($null -ne $row -and $null -ne $row.PercentProcessorTime) {
+            return [double]$row.PercentProcessorTime
+        }
+    }
+    catch {
+        # Fall through to the less precise Win32_Processor value.
+    }
+
+    $processors = @(Get-SystemClassInstance -ClassName Win32_Processor | Where-Object { $null -ne $_.LoadPercentage })
+    if ($processors.Count -eq 0) {
+        throw 'Windows did not return a CPU utilization value.'
+    }
+    return [double](($processors | Measure-Object -Property LoadPercentage -Average).Average)
+}
+
+function Test-CpuHealth {
+    $sampleCount = [Math]::Max(1, [int][Math]::Ceiling($CpuSampleDurationSeconds / [double]$CpuSampleIntervalSeconds))
+    $samples = [System.Collections.Generic.List[double]]::new()
+    $errors = [System.Collections.Generic.List[string]]::new()
+
+    Write-RunLog -Category Server -Message (
+        'CPU sampling started: {0} sample(s), interval {1} second(s).' -f $sampleCount, $CpuSampleIntervalSeconds
+    ) -Color DarkGray
+
+    for ($index = 1; $index -le $sampleCount; $index++) {
+        try {
+            $samples.Add((Get-OneCpuSample)) | Out-Null
+        }
+        catch {
+            $errors.Add($_.Exception.Message) | Out-Null
+        }
+        if ($index -lt $sampleCount) {
+            Start-Sleep -Seconds $CpuSampleIntervalSeconds
+        }
+    }
+
+    if ($samples.Count -eq 0) {
+        throw ('Every CPU sample failed. {0}' -f ($errors -join ' | '))
+    }
+
+    $average = [Math]::Round((($samples | Measure-Object -Average).Average), 1)
+    $maximum = [Math]::Round((($samples | Measure-Object -Maximum).Maximum), 1)
+    $message = 'Average={0}%; maximum={1}%; successful samples={2}/{3}' -f
+        $average, $maximum, $samples.Count, $sampleCount
+
+    if ($average -ge 85) {
+        Add-MonitorResult -Severity Alert -Category Server -Check CPU -Message ('{0}; alert threshold=85%' -f $message)
+    }
+    elseif ($average -ge 70) {
+        Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message ('{0}; warning threshold=70%' -f $message)
+    }
+    elseif ($errors.Count -gt 0) {
+        Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message (
+            '{0}; failed samples={1}' -f $message, $errors.Count
+        )
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Server -Check CPU -Message $message
+    }
+}
+
+function Test-DiskHealth {
+    $disks = @(Get-SystemClassInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' |
+        Where-Object { [double]$_.Size -gt 0 } |
+        Sort-Object -Property DeviceID)
+    if ($disks.Count -eq 0) {
+        throw 'Windows did not return any fixed disks.'
+    }
+
+    foreach ($disk in $disks) {
+        $freeGb = [Math]::Round(([double]$disk.FreeSpace / 1GB), 2)
+        $sizeGb = [Math]::Round(([double]$disk.Size / 1GB), 2)
+        $freePercent = [Math]::Round(([double]$disk.FreeSpace / [double]$disk.Size) * 100, 1)
+        $message = '{0}; free={1} GB of {2} GB ({3}% free)' -f
+            $disk.DeviceID, $freeGb, $sizeGb, $freePercent
+        $diskKey = 'server-disk-space-{0}' -f $disk.DeviceID
+
+        if ($freeGb -lt 3 -or $freePercent -lt 5) {
+            Add-MonitorResult -Severity Alert -Category Server -Check 'Disk space' -Message $message -Key $diskKey
+        }
+        elseif ($freeGb -lt 10 -or $freePercent -lt 10) {
+            Add-MonitorResult -Severity Warning -Category Server -Check 'Disk space' -Message $message -Key $diskKey
+        }
+        else {
+            Add-MonitorResult -Severity OK -Category Server -Check 'Disk space' -Message $message -Key $diskKey
+        }
+    }
+}
+
+function Resolve-NginxErrorLog {
+    if (-not [string]::IsNullOrWhiteSpace($NginxErrorLog)) {
+        return [Environment]::ExpandEnvironmentVariables($NginxErrorLog)
+    }
+
+    $roots = @(
+        $D4AInstallRoot,
+        $env:D4A_HOME,
+        'D:\Apps\Decide4Action',
+        'C:\Apps\Decide4Action',
+        'D:\Apps\Decide4Action-v2',
+        'C:\Apps\Decide4Action-v2',
+        'C:\Program Files\Decide4Action',
+        'C:\Program Files\Decide4Action-v2'
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+
+    foreach ($root in $roots) {
+        $expandedRoot = [Environment]::ExpandEnvironmentVariables([string]$root)
+        foreach ($folder in @('Decide4Action-Ngnix', 'Decide4Action-Nginx')) {
+            $nginxRoot = Join-Path $expandedRoot $folder
+            if (-not (Test-Path -LiteralPath $nginxRoot -PathType Container)) {
+                continue
+            }
+            $candidate = Get-ChildItem -LiteralPath $nginxRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'nginx-*' } |
+                Sort-Object -Property LastWriteTime -Descending |
+                ForEach-Object { Join-Path $_.FullName 'logs\error.log' } |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+                Select-Object -First 1
+            if (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
+                return [string]$candidate
+            }
+        }
+    }
+    return $null
+}
+
+function Test-NginxErrors {
+    $path = Resolve-NginxErrorLog
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Nginx errors' -Message (
+            'No Nginx error log was discovered; optional log inspection was skipped.'
+        )
+        return
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Add-MonitorResult -Severity Error -Category Diagnostics -Check 'Nginx errors' -Message ('Log file not found: {0}' -f $path)
+        return
+    }
+
+    $now = Get-Date
+    $since = $now.AddMinutes(-[Math]::Max($LogLookbackMinutes, $NginxConsecutiveMinutes + 1))
+    $matching = [System.Collections.Generic.List[string]]::new()
+    $minuteBuckets = @{}
+    foreach ($line in @(Get-Content -LiteralPath $path -Tail $DiagnosticTailLines -ErrorAction Stop)) {
+        if ($line -notmatch '(?i)10054|upstream prematurely closed|connect\(\) failed|timed out') {
+            continue
+        }
+
+        $include = $false
+        if ($line -match '^(?<Stamp>\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})') {
+            $parsed = [DateTime]::MinValue
+            if ([DateTime]::TryParseExact(
+                $matches.Stamp,
+                'yyyy/MM/dd HH:mm:ss',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeLocal,
+                [ref]$parsed
+            )) {
+                $include = $parsed -ge $since
+                if ($include) {
+                    $minute = [datetime]::new($parsed.Year, $parsed.Month, $parsed.Day, $parsed.Hour, $parsed.Minute, 0)
+                    $minuteKey = $minute.ToString('o')
+                    if (-not $minuteBuckets.ContainsKey($minuteKey)) { $minuteBuckets[$minuteKey] = 0 }
+                    $minuteBuckets[$minuteKey]++
+                }
+            }
+        }
+        if ($include) {
+            $matching.Add($line) | Out-Null
+        }
+    }
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Nginx errors' -Message (
+            'No matching upstream errors since {0}; log={1}' -f $since.ToString('yyyy-MM-dd HH:mm:ss'), $path
+        )
+        return
+    }
+
+    $sustainedWindow = $null
+    foreach ($minuteKey in @($minuteBuckets.Keys | Sort-Object)) {
+        $windowStart = [datetime]::Parse($minuteKey, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        $windowMatches = $true
+        for ($offset = 0; $offset -lt $NginxConsecutiveMinutes; $offset++) {
+            $candidateKey = $windowStart.AddMinutes($offset).ToString('o')
+            if (-not $minuteBuckets.ContainsKey($candidateKey) -or [int]$minuteBuckets[$candidateKey] -le $NginxErrorsPerMinuteThreshold) {
+                $windowMatches = $false
+                break
+            }
+        }
+        if ($windowMatches) {
+            $sustainedWindow = $windowStart
+            break
+        }
+    }
+
+    $sample = (($matching | Select-Object -Last 3) -replace '[\r\n]+', ' ') -join ' | '
+    if ($sample.Length -gt 1000) { $sample = $sample.Substring(0, 1000) + '...' }
+    if ($null -ne $sustainedWindow) {
+        $rates = for ($offset = 0; $offset -lt $NginxConsecutiveMinutes; $offset++) {
+            $minute = $sustainedWindow.AddMinutes($offset)
+            '{0}={1}' -f $minute.ToString('yyyy-MM-dd HH:mm'), $minuteBuckets[$minute.ToString('o')]
+        }
+        Add-MonitorResult -Severity Alert -Category Diagnostics -Check 'Nginx errors' -Message (
+            'Sustained Nginx upstream error rate exceeded {0} errors/minute for {1} consecutive minutes; rates={2}; log={3}; sample={4}' -f
+                $NginxErrorsPerMinuteThreshold, $NginxConsecutiveMinutes, ($rates -join ', '), $path, $sample
+        )
+        return
+    }
+
+    Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Nginx errors' -Message (
+        '{0} matching upstream error(s) since {1}, but no sustained rate exceeded {2} errors/minute for {3} consecutive minutes; log={4}' -f
+            $matching.Count, $since.ToString('yyyy-MM-dd HH:mm:ss'), $NginxErrorsPerMinuteThreshold, $NginxConsecutiveMinutes, $path
+    )
+}
+
+function Get-NssmExcludedLogRotationEventIds {
+    $eventIds = [System.Collections.Generic.List[int]]::new()
+    foreach ($value in @($NssmExcludedLogRotationEventIds -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        $eventId = 0
+        if (-not [int]::TryParse($value, [ref]$eventId) -or $eventId -lt 1) {
+            throw ('NssmExcludedLogRotationEventIds contains an invalid event ID: {0}' -f $value)
+        }
+        if (-not $eventIds.Contains($eventId)) {
+            $eventIds.Add($eventId) | Out-Null
+        }
+    }
+    return @($eventIds.ToArray())
+}
+
+function Test-IsExcludedNssmLogRotationEvent {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Event,
+        [Parameter(Mandatory = $true)][int[]]$ExcludedEventIds
+    )
+
+    if ([string]$Event.ProviderName -notmatch '(?i)^nssm$' -or [int]$Event.Id -notin $ExcludedEventIds) {
+        return $false
+    }
+
+    # Do not suppress unrelated NSSM events that happen to reuse an ID. Both
+    # configured IDs are safe only for the expected server.log rotation messages.
+    return [string]$Event.Message -match '(?i)(?:rotated output file|failed to rotate output file).*server\.log'
+}
+
+function Test-RelevantWindowsEvents {
+    if ($null -eq (Get-Command -Name Get-WinEvent -ErrorAction SilentlyContinue)) {
+        throw 'Get-WinEvent is unavailable.'
+    }
+
+    $since = (Get-Date).AddMinutes(-$LogLookbackMinutes)
+    $excludedNssmEventIds = @(Get-NssmExcludedLogRotationEventIds)
+    $events = [System.Collections.Generic.List[object]]::new()
+    foreach ($logName in @('Application', 'System')) {
+        # Get-WinEvent reports "no matching events" as a non-terminating error.
+        # An empty window is healthy, so suppress only that command-level noise.
+        foreach ($event in @(Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $since } -ErrorAction SilentlyContinue)) {
+            if (Test-IsExcludedNssmLogRotationEvent -Event $event -ExcludedEventIds $excludedNssmEventIds) {
+                Write-RunLog -Category Diagnostics -Color DarkGray -Message (
+                    'Excluded safe NSSM server.log rotation event: ID={0}; time={1}.' -f $event.Id, $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                )
+                continue
+            }
+            $messageText = [string]$event.Message
+            $provider = [string]$event.ProviderName
+            $componentMentioned = $messageText -match '(?i)D4A|Decide4Action|node(?:\.exe)?|32167|Data Collector|\bPLC\b|\bMDC\b'
+            $providerRelevant = $provider -match '(?i)Application Error|\.NET Runtime|Windows Error Reporting|Node|nssm|Service Control Manager'
+            if ($componentMentioned -and $providerRelevant) {
+                $events.Add($event) | Out-Null
+            }
+        }
+    }
+
+    if ($events.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Windows events' -Message (
+            'No relevant crash or service events since {0}.' -f $since.ToString('yyyy-MM-dd HH:mm:ss')
+        )
+        return
+    }
+
+    foreach ($group in @($events | Group-Object -Property ProviderName, Id)) {
+        $latest = $group.Group | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1
+        $eventMessage = (([string]$latest.Message -replace '[\r\n]+', ' ').Trim())
+        if ($eventMessage.Length -gt 700) {
+            $eventMessage = $eventMessage.Substring(0, 700) + '...'
+        }
+        $severity = if (@($group.Group | Where-Object {
+            $_.Level -in @(1, 2) -or $_.LevelDisplayName -match '(?i)critical|error'
+        }).Count -gt 0) { 'Alert' } else { 'Warning' }
+        $eventKey = 'diagnostics-windows-event-{0}-{1}' -f $latest.ProviderName, $latest.Id
+        Add-MonitorResult -Severity $severity -Category Diagnostics -Check 'Windows events' -Message (
+            '{0} event(s); provider={1}; ID={2}; latest={3}; message={4}' -f
+                $group.Count,
+                $latest.ProviderName,
+                $latest.Id,
+                $latest.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'),
+                $eventMessage
+        ) -Key $eventKey -NotificationEligible:($severity -eq 'Alert')
+    }
+}
+
+function Resolve-WatchdogLogRoot {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    function Add-WatchdogCandidate {
+        param([AllowNull()][string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
+        if (-not $candidates.Contains($expandedPath)) {
+            $candidates.Add($expandedPath) | Out-Null
+        }
+    }
+
+    Add-WatchdogCandidate -Path $WatchdogLogRoot
+    foreach ($root in @($D4AInstallRoot, $env:D4A_HOME, (Split-Path -Parent $script:ScriptDirectory), 'D:\Apps\Decide4Action', 'C:\Apps\Decide4Action')) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
+            Add-WatchdogCandidate -Path (Join-Path ([Environment]::ExpandEnvironmentVariables([string]$root)) 'Log\TaskSchedulerOutput')
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Container) {
+            return (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+        }
+    }
+    return $null
+}
+
+function Get-WatchdogLogEntryTime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Line,
+        [datetime]$FallbackTime
+    )
+
+    if ($Line -match '^\[(?<Timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]') {
+        $parsedTime = [DateTime]::MinValue
+        if ([DateTime]::TryParseExact($matches.Timestamp, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsedTime)) {
+            return $parsedTime
+        }
+    }
+    return $FallbackTime
+}
+
+function ConvertTo-MonitorDateTimeOffset {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $parsed = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($Value.Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+        return $parsed
+    }
+    return $null
+}
+
+function Get-DataCollectorWindowsService {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    return @(
+        $services | Where-Object {
+            $name = [string]$_.Name
+            $displayName = [string]$_.DisplayName
+            ($name -match '(?i)^\s*(?:D4A|Decide4Action).*Data\s*Collector' -or
+             $displayName -match '(?i)^\s*(?:D4A|Decide4Action).*Data\s*Collector')
+        } | Select-Object -First 1
+    )
+}
+
+function Test-IsDataCollectorWatchdogFile {
+    param([Parameter(Mandatory = $true)][object]$File)
+
+    $serviceFolderName = Split-Path -Leaf (Split-Path -Parent $File.FullName)
+    return $serviceFolderName -match '(?i)data\s*collector|datacollector|^dc$'
+}
+
+function Test-DataCollectorWatchdogHealth {
+    param([Parameter(Mandatory = $true)][string]$WatchdogRoot)
+
+    $dataCollectorService = @(Get-DataCollectorWindowsService)
+    if ($dataCollectorService.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+            'No D4A Data Collector Windows service was found; Watchdog LastEventTime retry analysis was skipped.'
+        ) -Key 'diagnostics-datacollector-sql-health'
+        return
+    }
+
+    $service = $dataCollectorService[0]
+    if ([string]$service.State -ne 'Running' -or [string]$service.Status -ne 'OK') {
+        # Test-D4AWindowsServices has already added the immediate service alert.
+        Write-RunLog -Level Alert -Category Diagnostics -Color Red -Message (
+            'Data Collector service is not running. SQL LastEventTime retry logic was skipped; service state={0}; status={1}.' -f $service.State, $service.Status
+        )
+        return
+    }
+
+    $todayFileName = '{0}.txt' -f (Get-Date -Format 'yyyyMMdd')
+    $dataCollectorLog = @(
+        Get-ChildItem -LiteralPath $WatchdogRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)data\s*collector|datacollector|^dc$' } |
+            ForEach-Object { Join-Path $_.FullName $todayFileName } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+    )
+    if ($dataCollectorLog.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+            'Data Collector service is running, but no current Watchdog Data Collector log was found. SQL LastEventTime retry analysis was skipped.'
+        ) -Key 'diagnostics-datacollector-sql-health'
+        return
+    }
+
+    $logFile = Get-Item -LiteralPath $dataCollectorLog[0] -ErrorAction Stop
+    $state = Get-MonitorRuntimeState
+    $tracking = $state.DataCollectorLastEvent
+    $entryTime = $logFile.LastWriteTime
+    $latestFailure = $null
+    $latestHealthy = ConvertTo-MonitorDateTimeOffset -Value ([string]$tracking.LastHealthy)
+    foreach ($line in @(Get-Content -LiteralPath $logFile.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop)) {
+        $entryTime = Get-WatchdogLogEntryTime -Line ([string]$line) -FallbackTime $entryTime
+        if ($line -match '(?i)LastHealthy:\s*(?<Value>[^|,\r\n]+)') {
+            $candidateHealthy = ConvertTo-MonitorDateTimeOffset -Value $matches.Value
+            if ($null -ne $candidateHealthy -and ($null -eq $latestHealthy -or $candidateHealthy -gt $latestHealthy)) {
+                $latestHealthy = $candidateHealthy
+            }
+        }
+        if ($line -match '(?i)Data Collector LastEvent healthy') {
+            $candidateHealthy = [DateTimeOffset]$entryTime
+            if ($null -eq $latestHealthy -or $candidateHealthy -gt $latestHealthy) { $latestHealthy = $candidateHealthy }
+        }
+        if ($line -match '(?i)Unable to evaluate LastEventTime|Data Collector LastEvent error') {
+            $failureId = '{0}|{1}' -f $entryTime.ToUniversalTime().ToString('o'), (([string]$line -replace '\s+', ' ').Trim())
+            $failure = [pscustomobject]@{
+                Id      = $failureId
+                Time    = [DateTimeOffset]$entryTime
+                IsSqlTimeout = $line -match '(?i)Execution Timeout Expired|SQL.*timeout|timeout'
+                Sample  = (([string]$line -replace '[\r\n]+', ' ').Trim())
+            }
+            if ($null -eq $latestFailure -or $failure.Time -gt $latestFailure.Time -or
+                ($failure.Time -eq $latestFailure.Time -and $failure.IsSqlTimeout -and -not $latestFailure.IsSqlTimeout)) {
+                $latestFailure = $failure
+            }
+        }
+    }
+
+    $hasUnresolvedFailure = $null -ne $latestFailure -and ($null -eq $latestHealthy -or $latestFailure.Time -ge $latestHealthy)
+    if (-not $hasUnresolvedFailure) {
+        $tracking.ConsecutiveFailures = 0
+        if ($null -ne $latestHealthy) { $tracking.LastHealthy = $latestHealthy.ToString('o') }
+    }
+    elseif ($tracking.LastProcessedFailureId -ne $latestFailure.Id) {
+        $tracking.ConsecutiveFailures = [int]$tracking.ConsecutiveFailures + 1
+        $tracking.LastProcessedFailureId = $latestFailure.Id
+    }
+    if ($null -ne $latestHealthy) { $tracking.LastHealthy = $latestHealthy.ToString('o') }
+    Save-MonitorRuntimeState -State $state
+
+    $failureCount = [int]$tracking.ConsecutiveFailures
+    if ($hasUnresolvedFailure) {
+        $timeoutLabel = if ($latestFailure.IsSqlTimeout) { 'SQL health check timeout' } else { 'LastEventTime health check failure' }
+        if ($failureCount -lt $DataCollectorConsecutiveFailureThreshold) {
+            $diagnosticAction = if ($failureCount -ge 2) { 'retry and collect diagnostics' } else { 'retry; do not notify yet' }
+            Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+                'Data Collector status=Degraded / {0}; consecutive failures={1}/{2}; action={3}; service=Running; sample={4}' -f
+                    $timeoutLabel, $failureCount, $DataCollectorConsecutiveFailureThreshold, $diagnosticAction, $latestFailure.Sample
+            )
+            Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+                'Status=Degraded / {0}; consecutive failures={1}/{2}; action={3}; no notification sent.' -f
+                    $timeoutLabel, $failureCount, $DataCollectorConsecutiveFailureThreshold, $diagnosticAction
+            ) -Key 'diagnostics-datacollector-sql-health'
+        }
+        else {
+            Add-MonitorResult -Severity Alert -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+                'Status=Alert / {0}; {1} consecutive LastEventTime failures while the service is Running; threshold={2}; sample={3}' -f
+                    $timeoutLabel, $failureCount, $DataCollectorConsecutiveFailureThreshold, $latestFailure.Sample
+            ) -Key 'diagnostics-datacollector-sql-health'
+        }
+    }
+
+    if ($null -ne $latestHealthy) {
+        $lastHealthyAgeMinutes = [Math]::Round(((Get-Date) - $latestHealthy.LocalDateTime).TotalMinutes, 1)
+        if ($lastHealthyAgeMinutes -gt $DataCollectorLastHealthyCriticalMinutes) {
+            Add-MonitorResult -Severity Alert -Category Diagnostics -Check 'Data Collector LastHealthy' -Message (
+                'Status=Critical; service=Running; LastHealthy={0}; age={1} minutes; critical threshold={2} minutes.' -f
+                    $latestHealthy.ToString('o'), $lastHealthyAgeMinutes, $DataCollectorLastHealthyCriticalMinutes
+            ) -Key 'diagnostics-datacollector-lasthealthy'
+        }
+        elseif ($lastHealthyAgeMinutes -gt $DataCollectorLastHealthyWarningMinutes) {
+            Add-MonitorResult -Severity Warning -Category Diagnostics -Check 'Data Collector LastHealthy' -Message (
+                'Status=Warning; service=Running; LastHealthy={0}; age={1} minutes; warning threshold={2} minutes.' -f
+                    $latestHealthy.ToString('o'), $lastHealthyAgeMinutes, $DataCollectorLastHealthyWarningMinutes
+            ) -Key 'diagnostics-datacollector-lasthealthy'
+        }
+        elseif (-not $hasUnresolvedFailure) {
+            Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector LastHealthy' -Message (
+                'Status=Healthy; service=Running; LastHealthy={0}; age={1} minutes.' -f $latestHealthy.ToString('o'), $lastHealthyAgeMinutes
+            ) -Key 'diagnostics-datacollector-lasthealthy'
+        }
+    }
+}
+
+function Test-IsWatchdogSuccessfulRestartEvidence {
+    param([string[]]$Samples)
+
+    $evidence = (@($Samples) -join ' ')
+    if ([string]::IsNullOrWhiteSpace($evidence)) { return $false }
+
+    # A failed restart is still actionable even when another entry mentions a restart.
+    if ($evidence -match '(?i)restart\s+failed|restart\s+unsuccessful|failed\s+to\s+restart') {
+        return $false
+    }
+
+    return $evidence -match '(?i)restart\s+succeeded|restarted\s+service'
+}
+
+function Test-WatchdogServiceLogs {
+    $watchdogRoot = Resolve-WatchdogLogRoot
+    if ([string]::IsNullOrWhiteSpace($watchdogRoot)) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+            'Watchdog TaskSchedulerOutput folder was not found; optional root-cause log analysis was skipped.'
+        ) -Key 'diagnostics-watchdog-logs'
+        return
+    }
+
+    Test-DataCollectorWatchdogHealth -WatchdogRoot $watchdogRoot
+
+    $since = (Get-Date).AddMinutes(-$LogLookbackMinutes)
+    $todayFileName = '{0}.txt' -f (Get-Date -Format 'yyyyMMdd')
+    $logFiles = [System.Collections.Generic.List[object]]::new()
+    foreach ($serviceFolder in @(Get-ChildItem -LiteralPath $watchdogRoot -Directory -ErrorAction SilentlyContinue)) {
+        $logFile = Join-Path $serviceFolder.FullName $todayFileName
+        if (Test-Path -LiteralPath $logFile -PathType Leaf) {
+            $file = Get-Item -LiteralPath $logFile -ErrorAction Stop
+            if ($file.LastWriteTime -ge $since) { $logFiles.Add($file) | Out-Null }
+        }
+    }
+
+    if ($logFiles.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+            'No Watchdog service log was updated during the current monitoring window; root={0}' -f $watchdogRoot
+        ) -Key 'diagnostics-watchdog-logs'
+        return
+    }
+
+    $incidentPattern = '(?i)\b(error|fail(?:ed|ure)?|unhealthy|not\s+running|stale|timeout|timed\s+out|exception|crash|restart(?:ed|ing|\s+succeeded|\s+failed|\s+deferred)?)\b'
+    foreach ($file in $logFiles) {
+        if (Test-IsDataCollectorWatchdogFile -File $file) { continue }
+        $lines = @((Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop))
+        $entryTime = $file.LastWriteTime
+        $samples = [System.Collections.Generic.List[string]]::new()
+        $lastEvidenceIndex = -3
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            $line = [string]$lines[$index]
+            $entryTime = Get-WatchdogLogEntryTime -Line $line -FallbackTime $entryTime
+            if ($entryTime -lt $since -or $line -notmatch $incidentPattern) { continue }
+            if ($index - $lastEvidenceIndex -lt 3) { continue }
+
+            $entryLines = [System.Collections.Generic.List[string]]::new()
+            for ($contextIndex = $index; $contextIndex -lt [Math]::Min($index + 3, $lines.Count); $contextIndex++) {
+                $contextLine = (([string]$lines[$contextIndex] -replace '[\r\n]+', ' ').Trim())
+                if (-not [string]::IsNullOrWhiteSpace($contextLine)) { $entryLines.Add($contextLine) | Out-Null }
+            }
+            $sample = $entryLines -join ' | '
+            if ($sample.Length -gt 900) { $sample = $sample.Substring(0, 900) + '...' }
+            if (-not $samples.Contains($sample)) { $samples.Add($sample) | Out-Null }
+            $lastEvidenceIndex = $index
+            if ($samples.Count -ge 3) { break }
+        }
+
+        if ($samples.Count -eq 0) { continue }
+        $hasSuccessfulRestart = Test-IsWatchdogSuccessfulRestartEvidence -Samples $samples.ToArray()
+        $severity = if ($hasSuccessfulRestart) {
+            'Warning'
+        }
+        elseif (($samples -join ' ') -match '(?i)restart\s+failed|\berror\b|\bfailed\b|unhealthy|not\s+running|stale|timeout|exception|crash') {
+            'Alert'
+        }
+        else {
+            'Warning'
+        }
+        $serviceName = Split-Path -Leaf (Split-Path -Parent $file.FullName)
+        $evidenceLabel = if ($hasSuccessfulRestart) { 'successful restart evidence' } else { 'evidence' }
+        Add-MonitorResult -Severity $severity -Category Diagnostics -Check 'Watchdog service logs' -Message (
+            'Recent Watchdog {0}; service={1}; file={2}; sample={3}' -f $evidenceLabel, $serviceName, $file.FullName, ($samples -join ' || ')
+        ) -Key ('diagnostics-watchdog-{0}' -f $serviceName) -NotificationEligible:(-not $hasSuccessfulRestart)
+    }
+}
+
+function Resolve-DbConfigPath {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    function Add-Candidate {
+        param([string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        try {
+            $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+            if (-not $candidates.Contains($expanded)) {
+                $candidates.Add($expanded) | Out-Null
+            }
+        }
+        catch {
+            Write-ErrorLog -Category Email -Message ('Unable to expand email configuration path {0}: {1}' -f $Path, $_.Exception.Message)
+        }
+    }
+
+    Add-Candidate -Path $DbConfigPath
+    foreach ($root in @($D4AInstallRoot, $env:D4A_HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
+            $expandedRoot = [Environment]::ExpandEnvironmentVariables([string]$root)
+            Add-Candidate -Path (Join-Path $expandedRoot 'Services\API\dbconfig.js')
+            Add-Candidate -Path (Join-Path $expandedRoot 'API\dbconfig.js')
+        }
+    }
+    foreach ($path in @(
+        'C:\Decide4Action\Services\API\dbconfig.js',
+        'D:\Decide4Action\Services\API\dbconfig.js',
+        'C:\Decide4Action-v2\Services\API\dbconfig.js',
+        'D:\Decide4Action-v2\Services\API\dbconfig.js',
+        'C:\Apps\Decide4Action\Services\API\dbconfig.js',
+        'D:\Apps\Decide4Action\Services\API\dbconfig.js',
+        'C:\Apps\Decide4Action-v2\Services\API\dbconfig.js',
+        'D:\Apps\Decide4Action-v2\Services\API\dbconfig.js',
+        'C:\Program Files\Decide4Action\Services\API\dbconfig.js',
+        'C:\Program Files\Decide4Action-v2\Services\API\dbconfig.js'
+    )) {
+        Add-Candidate -Path $path
+    }
+
+    foreach ($candidate in $candidates) {
+        try {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction Stop) {
+                return (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+            }
+        }
+        catch {
+            Write-ErrorLog -Category Email -Message ('Unable to inspect email configuration path {0}: {1}' -f $candidate, $_.Exception.Message)
+        }
+    }
+    return $null
+}
+
+function Resolve-NodeExecutable {
+    param([string]$ResolvedDbConfigPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($NodeExecutable)
+        if (Test-Path -LiteralPath $expanded -PathType Leaf) {
+            return (Get-Item -LiteralPath $expanded -ErrorAction Stop).FullName
+        }
+        throw ('Specified Node executable not found: {0}' -f $expanded)
+    }
+
+    foreach ($commandName in @('node.exe', 'node')) {
+        $command = Get-Command -Name $commandName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+            return [string]$command.Source
+        }
+    }
+
+    $candidatePaths = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($ResolvedDbConfigPath)) {
+        $apiDirectory = Split-Path -Parent $ResolvedDbConfigPath
+        $candidatePaths.Add((Join-Path $apiDirectory 'node.exe')) | Out-Null
+        $candidatePaths.Add((Join-Path (Split-Path -Parent $apiDirectory) 'node.exe')) | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        $candidatePaths.Add((Join-Path $env:ProgramFiles 'nodejs\node.exe')) | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $candidatePaths.Add((Join-Path ${env:ProgramFiles(x86)} 'nodejs\node.exe')) | Out-Null
+    }
+
+    foreach ($candidate in $candidatePaths) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+        }
+    }
+    throw 'Node.js was not found. Supply -NodeExecutable or add node.exe to PATH.'
+}
+
+function Invoke-NodeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodePath,
+        [Parameter(Mandatory = $true)][string]$HelperPath,
+        [Parameter(Mandatory = $true)][string]$PayloadPath
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $NodePath
+    $startInfo.Arguments = '"{0}" "{1}"' -f $HelperPath.Replace('"', '\"'), $PayloadPath.Replace('"', '\"')
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'The Node email helper process could not be started.'
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $processTimeoutMs = ($EmailTimeoutSeconds + 10) * 1000
+        if (-not $process.WaitForExit($processTimeoutMs)) {
+            try { $process.Kill() } catch { }
+            throw ('The email helper exceeded the {0}-second process timeout.' -f ($EmailTimeoutSeconds + 10))
+        }
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result.Trim()
+        $stderr = $stderrTask.Result.Trim()
+        if ($process.ExitCode -ne 0) {
+            $detail = (@($stderr, $stdout) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ' | '
+            if ([string]::IsNullOrWhiteSpace($detail)) {
+                $detail = 'The Node helper returned no diagnostic output.'
+            }
+            throw ('Node email helper failed with exit code {0}: {1}' -f $process.ExitCode, $detail)
+        }
+        return $stdout
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Invoke-DbConfiguredEmail {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedDbConfigPath,
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$TextBody,
+        [Parameter(Mandatory = $true)][string]$HtmlBody
+    )
+
+    $nodePath = Resolve-NodeExecutable -ResolvedDbConfigPath $ResolvedDbConfigPath
+    $tempId = '{0}_{1}' -f $PID, [Guid]::NewGuid().ToString('N')
+    $helperPath = Join-Path (Split-Path -Parent $script:RunLogPath) ('d4a_monitor_email_{0}.js' -f $tempId)
+    $payloadPath = Join-Path (Split-Path -Parent $script:RunLogPath) ('d4a_monitor_email_{0}.json' -f $tempId)
+    $payload = [ordered]@{
+        dbConfigPath         = $ResolvedDbConfigPath
+        nodemailerModulePath = $NodemailerModulePath
+        scriptDirectory      = $script:ScriptDirectory
+        timeoutMs            = $EmailTimeoutSeconds * 1000
+        to                   = $NotificationTo
+        from                 = $FromAddress
+        subject              = $Subject
+        text                 = $TextBody
+        html                 = $HtmlBody
+    }
+
+    $helper = @'
+"use strict";
+const fs = require("fs");
+const path = require("path");
+
+function loadNodemailer(explicitPath, configDirectory, scriptDirectory) {
+    const candidates = [];
+    if (explicitPath) candidates.push(explicitPath);
+    candidates.push(path.join(configDirectory, "node_modules", "nodemailer"));
+    candidates.push(path.join(path.dirname(configDirectory), "node_modules", "nodemailer"));
+    if (scriptDirectory) {
+        candidates.push(path.join(scriptDirectory, "node_modules", "nodemailer"));
+        candidates.push(path.join(scriptDirectory, "scripts", "node_modules", "nodemailer"));
+    }
+    if (process.env.USERPROFILE) {
+        candidates.push(path.join(process.env.USERPROFILE, "Downloads", "scripts", "node_modules", "nodemailer"));
+    }
+
+    const failures = [];
+    for (const candidate of candidates) {
+        try {
+            if (path.isAbsolute(candidate) && fs.existsSync(candidate)) return require(candidate);
+            return require(require.resolve(candidate, { paths: [configDirectory, path.dirname(configDirectory), process.cwd()] }));
+        } catch (error) {
+            failures.push(candidate + ": " + error.message);
+        }
+    }
+    try {
+        return require(require.resolve("nodemailer", { paths: [configDirectory, path.dirname(configDirectory), process.cwd()] }));
+    } catch (error) {
+        failures.push("nodemailer: " + error.message);
+    }
+    throw new Error("nodemailer could not be loaded. " + failures.join(" | "));
+}
+
+function asBoolean(value) {
+    if (typeof value === "boolean") return value;
+    return String(value || "").toLowerCase() === "true";
+}
+
+async function main() {
+    const payload = JSON.parse(fs.readFileSync(process.argv[2], "utf8").replace(/^\uFEFF/, ""));
+    const configPath = path.resolve(payload.dbConfigPath);
+    const configDirectory = path.dirname(configPath);
+    process.chdir(configDirectory);
+    const loadedConfig = require(configPath);
+    const config = loadedConfig && loadedConfig.default ? loadedConfig.default : loadedConfig;
+    const timeoutMs = Number(payload.timeoutMs || 30000);
+
+    let transporter = config.EmailTransporter;
+    if (!transporter || typeof transporter.sendMail !== "function") {
+        const nodemailer = loadNodemailer(payload.nodemailerModulePath, configDirectory, payload.scriptDirectory);
+        transporter = nodemailer.createTransport({
+            host: config.EmailHost,
+            port: Number(config.EmailPort || 587),
+            secure: asBoolean(config.EmailSecure),
+            auth: config.EmailUser || config.EmailPass ? { user: config.EmailUser, pass: config.EmailPass } : undefined,
+            connectionTimeout: timeoutMs,
+            greetingTimeout: timeoutMs,
+            socketTimeout: timeoutMs,
+            tls: config.EmailTlsCiphers ? { ciphers: config.EmailTlsCiphers } : undefined
+        });
+    }
+
+    const from = payload.from || config.EmailFrom || config.EmailUser;
+    if (!from) throw new Error("No sender was found in -FromAddress, EmailFrom, or EmailUser.");
+    if (!payload.to) throw new Error("NotificationTo is empty.");
+
+    const info = await transporter.sendMail({
+        from,
+        to: payload.to,
+        subject: payload.subject,
+        text: payload.text,
+        html: payload.html
+    });
+    console.log("Email sent successfully.");
+    console.log("MessageId: " + (info && info.messageId ? info.messageId : ""));
+}
+
+main().catch(error => {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exit(1);
+});
+'@
+
+    try {
+        [IO.File]::WriteAllText($helperPath, $helper, $script:Utf8NoBom)
+        [IO.File]::WriteAllText($payloadPath, ($payload | ConvertTo-Json -Depth 6), $script:Utf8NoBom)
+        $output = Invoke-NodeProcess -NodePath $nodePath -HelperPath $helperPath -PayloadPath $payloadPath
+        return [pscustomobject]@{
+            Method  = 'D4A dbconfig.js / Node.js / nodemailer'
+            Details = $output
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $helperPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $payloadPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-SmtpEmail {
+    param(
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$TextBody,
+        [Parameter(Mandatory = $true)][string]$HtmlBody
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SmtpServer)) {
+        throw 'SmtpServer is empty.'
+    }
+    $from = if ([string]::IsNullOrWhiteSpace($FromAddress)) {
+        'd4a-monitor@decide4action.com'
+    }
+    else {
+        $FromAddress
+    }
+
+    $credential = $null
+    if (-not [string]::IsNullOrWhiteSpace($SmtpCredentialFile)) {
+        if (-not (Test-Path -LiteralPath $SmtpCredentialFile -PathType Leaf)) {
+            throw ('SMTP credential file not found: {0}' -f $SmtpCredentialFile)
+        }
+        $credential = Import-Clixml -LiteralPath $SmtpCredentialFile -ErrorAction Stop
+        if ($credential -isnot [Management.Automation.PSCredential]) {
+            throw 'SmtpCredentialFile must contain a PSCredential object.'
+        }
+    }
+
+    $message = [Net.Mail.MailMessage]::new()
+    $client = [Net.Mail.SmtpClient]::new($SmtpServer, $SmtpPort)
+    try {
+        $message.From = [Net.Mail.MailAddress]::new($from)
+        $message.To.Add($NotificationTo)
+        $message.Subject = $Subject
+        $message.SubjectEncoding = [Text.Encoding]::UTF8
+        $message.BodyEncoding = [Text.Encoding]::UTF8
+        $message.AlternateViews.Add([Net.Mail.AlternateView]::CreateAlternateViewFromString(
+            $TextBody, [Text.Encoding]::UTF8, 'text/plain'
+        )) | Out-Null
+        $message.AlternateViews.Add([Net.Mail.AlternateView]::CreateAlternateViewFromString(
+            $HtmlBody, [Text.Encoding]::UTF8, 'text/html'
+        )) | Out-Null
+
+        $client.EnableSsl = [bool]$SmtpUseSsl
+        $client.Timeout = $EmailTimeoutSeconds * 1000
+        if ($null -ne $credential) {
+            $client.Credentials = $credential.GetNetworkCredential()
+        }
+        $client.Send($message)
+        return [pscustomobject]@{ Method = 'PowerShell SMTP'; Details = $null }
+    }
+    finally {
+        $message.Dispose()
+        $client.Dispose()
+    }
+}
+
+function Get-IssueTypeLabel {
+    param([object[]]$IssueResults)
+
+    if (@($IssueResults | Where-Object { $_.Severity -eq 'Error' }).Count -gt 0) { return 'Errors' }
+    if (@($IssueResults | Where-Object { $_.Severity -eq 'Alert' }).Count -gt 0) { return 'Alerts' }
+    return 'Warnings'
+}
+
+function New-EmailContent {
+    param(
+        [Parameter(Mandatory = $true)][string]$MonitoredSite,
+        [Parameter(Mandatory = $true)][string]$MonitoringName,
+        [object[]]$ActiveIgnoreRules,
+        [ValidateSet('Alert', 'Test', 'Daily')]
+        [string]$EmailType = 'Alert'
+    )
+
+    $allResults = @($script:Results.ToArray())
+    $dailyOnlyResults = @($allResults | Where-Object {
+        $_.Severity -ne 'OK' -and -not $_.NotificationEligible
+    })
+    $emailResults = if ($EmailType -eq 'Alert') {
+        @($allResults | Where-Object {
+            $_.Severity -eq 'OK' -or $_.NotificationEligible
+        })
+    }
+    else {
+        $allResults
+    }
+    $issues = @($emailResults | Where-Object { $_.Severity -ne 'OK' })
+    $unignoredIssues = @($issues | Where-Object { -not $_.IgnoreActive })
+    $ignoredIssues = @($issues | Where-Object { $_.IgnoreActive })
+    $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
+    $ruleEntries = @(Get-IgnoreRuleEntries -Results $emailResults)
+    $issueLabel = if ($unignoredNotifiableIssues.Count -gt 0) {
+        Get-IssueTypeLabel -IssueResults $unignoredNotifiableIssues
+    }
+    elseif ($ignoredIssues.Count -gt 0) {
+        'Ignored issues'
+    }
+    else {
+        'Healthy'
+    }
+    $heading = switch ($EmailType) {
+        'Test' { 'MONITORING TEST RESULTS' }
+        'Daily' { 'DAILY MONITORING RESULTS' }
+        default { 'MONITORING ALERT' }
+    }
+    $subject = switch ($EmailType) {
+        'Test' { 'Monitoring test results for {0}' -f $MonitoringName }
+        'Daily' { 'Daily monitoring results for {0}' -f $MonitoringName }
+        default { 'Monitoring alert for {0} - {1} detected' -f $MonitoringName, $issueLabel }
+    }
+
+    $text = [Text.StringBuilder]::new()
+    [void]$text.AppendLine($heading)
+    [void]$text.AppendLine(('Monitoring name: {0}' -f $MonitoringName))
+    [void]$text.AppendLine(('Sites: {0}' -f $MonitoredSite))
+    [void]$text.AppendLine(('Server: {0}' -f $env:COMPUTERNAME))
+    [void]$text.AppendLine(('Scan started: {0}' -f $script:RunStartedAt.ToString('yyyy-MM-dd HH:mm:ss zzz')))
+    [void]$text.AppendLine(('Scan completed: {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')))
+    [void]$text.AppendLine(('Issues detected: {0}' -f $issues.Count))
+    [void]$text.AppendLine(('Issues not ignored: {0}' -f $unignoredIssues.Count))
+    [void]$text.AppendLine(('Issues covered by active rules: {0}' -f $ignoredIssues.Count))
+    [void]$text.AppendLine(('Active ignore rules: {0}' -f @($ActiveIgnoreRules).Count))
+    if ($EmailType -eq 'Alert' -and $dailyOnlyResults.Count -gt 0) {
+        [void]$text.AppendLine(('Daily-only warning or recovery evidence held for the daily monitoring email: {0}' -f $dailyOnlyResults.Count))
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('ISSUES DETECTED')
+    if ($issues.Count -eq 0) {
+        [void]$text.AppendLine('No warnings, alerts, or errors were detected.')
+    }
+    else {
+        foreach ($result in $issues) {
+            $ignoreStatus = if ($result.IgnoreActive) {
+                'IGNORED ({0}{1})' -f $result.IgnoreMode, $(if ($null -ne $result.IgnoreUntil) { '; until ' + $result.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { '' })
+            }
+            else {
+                'NOT IGNORED'
+            }
+            [void]$text.AppendLine(('[{0}] [{1}] {2}: {3}' -f $result.Severity, $result.Category, $result.Check, $result.Message))
+            [void]$text.AppendLine(('Rule key: {0}; Ignore status: {1}' -f $result.Key, $ignoreStatus))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('ACTIVE IGNORE RULES')
+    if (@($ActiveIgnoreRules).Count -eq 0) {
+        [void]$text.AppendLine('No active ignore rules are defined.')
+    }
+    else {
+        foreach ($rule in @($ActiveIgnoreRules | Sort-Object -Property Key)) {
+            $until = if ($null -ne $rule.IgnoreUntil) { $rule.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { 'permanent' }
+            [void]$text.AppendLine(('{0}|{1}|{2}|{3}' -f $rule.Key, $rule.Mode, $rule.Duration, $until))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('IGNORE RULE ENTRIES FOR NOT-IGNORED ISSUES')
+    if ($ruleEntries.Count -eq 0) {
+        [void]$text.AppendLine('No new ignore-rule entries are needed.')
+    }
+    else {
+        [void]$text.AppendLine(('Add one of the following lines to: {0}' -f $script:IgnoreRulesPath))
+        foreach ($entry in $ruleEntries) {
+            [void]$text.AppendLine(('Temporary (edit duration if needed): {0}' -f $entry.Temporary))
+            [void]$text.AppendLine(('Permanent: {0}' -f $entry.Permanent))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('AUTOMATIC NOTIFICATION COOLDOWN')
+    [void]$text.AppendLine('After an alert email, the monitor automatically silences the same issue for 24 hours.')
+    [void]$text.AppendLine('To change the duration, run the command below. It updates both the duration and expiry time from now:')
+    [void]$text.AppendLine(('  .\D4A-ScheduledMonitor-v5.ps1 -SetIssueCooldown ''<rule-key>'' -IssueCooldownDuration ''12h'''))
+    [void]$text.AppendLine('To remove the automatic cooldown, run:')
+    [void]$text.AppendLine(('  .\D4A-ScheduledMonitor-v5.ps1 -ClearIssueCooldown ''<rule-key>'''))
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('COMPLETE SCAN RESULTS')
+    foreach ($result in $emailResults) {
+        $ignoreStatus = if ($result.IgnoreActive) { 'ignored' } else { 'not ignored' }
+        [void]$text.AppendLine(('[{0}] [{1}] {2}: {3} [key={4}; {5}]' -f $result.Severity, $result.Category, $result.Check, $result.Message, $result.Key, $ignoreStatus))
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine(('Monitoring logs: {0}' -f $script:MonitorLogDirectory))
+    [void]$text.AppendLine(('Monitor summary log: {0}' -f $script:RunLogPath))
+
+    $html = [Text.StringBuilder]::new()
+    [void]$html.AppendLine('<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#202124;font-size:14px">')
+    [void]$html.AppendLine(('<h2>{0}</h2>' -f [Net.WebUtility]::HtmlEncode($heading)))
+    [void]$html.AppendLine(('<p><b>Monitoring name:</b> {0}<br><b>Sites:</b> {1}<br><b>Server:</b> {2}<br><b>Time:</b> {3}<br><b>Issues detected:</b> {4}<br><b>Not ignored:</b> {5}<br><b>Covered by active ignore rules:</b> {6}</p>' -f
+        [Net.WebUtility]::HtmlEncode($MonitoringName),
+        [Net.WebUtility]::HtmlEncode($MonitoredSite),
+        [Net.WebUtility]::HtmlEncode($env:COMPUTERNAME),
+        [Net.WebUtility]::HtmlEncode((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')),
+        $issues.Count,
+        $unignoredIssues.Count,
+        $ignoredIssues.Count))
+    if ($EmailType -eq 'Alert' -and $dailyOnlyResults.Count -gt 0) {
+        [void]$html.AppendLine(('<p><i>{0} daily-only warning or recovery item(s) were retained for the daily monitoring email and are omitted here.</i></p>' -f $dailyOnlyResults.Count))
+    }
+
+    if ($issues.Count -eq 0) {
+        [void]$html.AppendLine('<p style="padding:10px;background:#e8f5e9;border:1px solid #81c784"><b>Healthy:</b> No warnings, alerts, or errors were detected.</p>')
+    }
+    else {
+        [void]$html.AppendLine('<h3>Issues detected</h3><table style="border-collapse:collapse;width:100%" border="1" cellpadding="6">')
+        [void]$html.AppendLine('<tr><th>Severity</th><th>Category</th><th>Check</th><th>Details</th><th>Rule key</th><th>Ignore status</th></tr>')
+        foreach ($result in $issues) {
+            $background = if ($result.IgnoreActive) { '#e3f2fd' } elseif ($result.Severity -in @('Alert', 'Error')) { '#f8d7da' } else { '#fff3cd' }
+            $ignoreStatus = if ($result.IgnoreActive) {
+                'Ignored: {0}{1}' -f $result.IgnoreMode, $(if ($null -ne $result.IgnoreUntil) { '; until ' + $result.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { '' })
+            }
+            else {
+                'Not ignored'
+            }
+            [void]$html.AppendLine(('<tr style="background:{0}"><td><b>{1}</b></td><td>{2}</td><td>{3}</td><td>{4}</td><td><code>{5}</code></td><td>{6}</td></tr>' -f
+                $background,
+                [Net.WebUtility]::HtmlEncode([string]$result.Severity),
+                [Net.WebUtility]::HtmlEncode([string]$result.Category),
+                [Net.WebUtility]::HtmlEncode([string]$result.Check),
+                [Net.WebUtility]::HtmlEncode([string]$result.Message),
+                [Net.WebUtility]::HtmlEncode([string]$result.Key),
+                [Net.WebUtility]::HtmlEncode($ignoreStatus)))
+        }
+        [void]$html.AppendLine('</table>')
+    }
+
+    [void]$html.AppendLine('<h3>Active ignore rules</h3>')
+    if (@($ActiveIgnoreRules).Count -eq 0) {
+        [void]$html.AppendLine('<p>No active ignore rules are defined.</p>')
+    }
+    else {
+        [void]$html.AppendLine('<table style="border-collapse:collapse;width:100%" border="1" cellpadding="6"><tr><th>Rule key</th><th>Mode</th><th>Duration</th><th>Ignore until</th></tr>')
+        foreach ($rule in @($ActiveIgnoreRules | Sort-Object -Property Key)) {
+            $until = if ($null -ne $rule.IgnoreUntil) { $rule.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { 'Permanent' }
+            [void]$html.AppendLine(('<tr><td><code>{0}</code></td><td>{1}</td><td>{2}</td><td>{3}</td></tr>' -f
+                [Net.WebUtility]::HtmlEncode([string]$rule.Key),
+                [Net.WebUtility]::HtmlEncode([string]$rule.Mode),
+                [Net.WebUtility]::HtmlEncode([string]$rule.Duration),
+                [Net.WebUtility]::HtmlEncode($until)))
+        }
+        [void]$html.AppendLine('</table>')
+    }
+
+    [void]$html.AppendLine('<h3>Ignore a currently not-ignored issue</h3>')
+    if ($ruleEntries.Count -eq 0) {
+        [void]$html.AppendLine('<p>No new ignore-rule entries are needed.</p>')
+    }
+    else {
+        [void]$html.AppendLine(('<p>Add one line to <code>{0}</code>. A temporary rule receives its end date automatically during the next scan.</p>' -f [Net.WebUtility]::HtmlEncode($script:IgnoreRulesPath)))
+        foreach ($entry in $ruleEntries) {
+            [void]$html.AppendLine(('<p><b>{0}</b><br>Temporary: <code>{1}</code><br>Permanent: <code>{2}</code></p>' -f
+                [Net.WebUtility]::HtmlEncode([string]$entry.Key),
+                [Net.WebUtility]::HtmlEncode([string]$entry.Temporary),
+                [Net.WebUtility]::HtmlEncode([string]$entry.Permanent)))
+        }
+    }
+
+    [void]$html.AppendLine('<h3>Automatic notification cooldown</h3>')
+    [void]$html.AppendLine('<p>After an alert email, the same issue is automatically silenced for 24 hours. A resolved issue has its automatic rule removed. The override command recalculates both duration and expiry time from now.</p>')
+    [void]$html.AppendLine('<p>Override: <code>.\D4A-ScheduledMonitor-v5.ps1 -SetIssueCooldown ''&lt;rule-key&gt;'' -IssueCooldownDuration ''12h''</code><br>Remove: <code>.\D4A-ScheduledMonitor-v5.ps1 -ClearIssueCooldown ''&lt;rule-key&gt;''</code></p>')
+
+    [void]$html.AppendLine('<h3>Complete scan results</h3><table style="border-collapse:collapse;width:100%" border="1" cellpadding="6">')
+    [void]$html.AppendLine('<tr><th>Severity</th><th>Category</th><th>Check</th><th>Details</th><th>Rule key</th><th>Ignore status</th></tr>')
+    foreach ($result in $emailResults) {
+        $ignoreStatus = if ($result.IgnoreActive) { 'Ignored' } else { 'Not ignored' }
+        [void]$html.AppendLine(('<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td><code>{4}</code></td><td>{5}</td></tr>' -f
+            [Net.WebUtility]::HtmlEncode([string]$result.Severity),
+            [Net.WebUtility]::HtmlEncode([string]$result.Category),
+            [Net.WebUtility]::HtmlEncode([string]$result.Check),
+            [Net.WebUtility]::HtmlEncode([string]$result.Message),
+            [Net.WebUtility]::HtmlEncode([string]$result.Key),
+            $ignoreStatus))
+    }
+    [void]$html.AppendLine('</table>')
+    [void]$html.AppendLine(('<p><b>Monitoring logs:</b> <code>{0}</code><br><b>Monitor summary log:</b> <code>{1}</code><br><b>Ignore rules:</b> <code>{2}</code></p>' -f
+        [Net.WebUtility]::HtmlEncode($script:MonitorLogDirectory),
+        [Net.WebUtility]::HtmlEncode($script:RunLogPath),
+        [Net.WebUtility]::HtmlEncode($script:IgnoreRulesPath)))
+    [void]$html.AppendLine('</body></html>')
+
+    return [pscustomobject]@{
+        Subject  = $subject
+        TextBody = $text.ToString()
+        HtmlBody = $html.ToString()
+    }
+}
+
+function Send-MonitorEmail {
+    param(
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$TextBody,
+        [Parameter(Mandatory = $true)][string]$HtmlBody
+    )
+
+    if ([string]::IsNullOrWhiteSpace($NotificationTo)) {
+        throw 'NotificationTo is empty.'
+    }
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $resolvedConfig = Resolve-DbConfigPath
+    if (-not [string]::IsNullOrWhiteSpace($resolvedConfig)) {
+        try {
+            return Invoke-DbConfiguredEmail `
+                -ResolvedDbConfigPath $resolvedConfig `
+                -Subject $Subject `
+                -TextBody $TextBody `
+                -HtmlBody $HtmlBody
+        }
+        catch {
+            $failures.Add(('dbconfig.js delivery failed: {0}' -f $_.Exception.Message)) | Out-Null
+        }
+    }
+    else {
+        $failures.Add('No D4A API dbconfig.js file was found.') | Out-Null
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SmtpServer)) {
+        try {
+            return Invoke-SmtpEmail -Subject $Subject -TextBody $TextBody -HtmlBody $HtmlBody
+        }
+        catch {
+            $failures.Add(('SMTP fallback failed: {0}' -f $_.Exception.Message)) | Out-Null
+        }
+    }
+    else {
+        $failures.Add('SMTP fallback is not configured; set -SmtpServer to enable it.') | Out-Null
+    }
+
+    throw ($failures -join ' ')
+}
+
+function Get-ExitCode {
+    $severities = @($script:Results | Select-Object -ExpandProperty Severity)
+    if ($severities -contains 'Error' -or $severities -contains 'Alert') { return 2 }
+    if ($severities -contains 'Warning') { return 1 }
+    return 0
+}
+
+function Invoke-D4AMonitor {
+    Initialize-MonitorLogging
+    Write-RunLog -Category Monitor -Color Cyan -Message (
+        'D4A monitoring run started. Version={0}; release date={1}; script={2}' -f
+            $script:MonitorVersion, $script:MonitorReleaseDate, $script:ScriptPath
+    )
+    Write-RunLog -Category Configuration -Message (
+        'Configuration={0}; external configuration loaded={1}' -f $script:ResolvedConfigPath, $script:ConfigurationLoaded
+    ) -Color DarkGray
+    Write-RunLog -Category Monitor -Message ('Monitoring logs={0}' -f $script:MonitorLogDirectory) -Color DarkGray
+    Write-RunLog -Category Monitor -Message ('Monitor summary log={0}' -f $script:RunLogPath) -Color DarkGray
+
+    if ($DisableEmail.IsPresent -and ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Email -Message (
+            '-DisableEmail cannot be used with -SendTestResultsEmail or -SendDailySummaryEmail.'
+        )
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SetIssueCooldown) -and -not [string]::IsNullOrWhiteSpace($ClearIssueCooldown)) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check 'Issue cooldown' -Message (
+            'Use either -SetIssueCooldown or -ClearIssueCooldown, not both.'
+        )
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SetIssueCooldown)) {
+        Set-AutomaticIssueCooldown -Key $SetIssueCooldown -Duration $IssueCooldownDuration
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ClearIssueCooldown)) {
+        Set-AutomaticIssueCooldown -Key $ClearIssueCooldown -Remove
+        return
+    }
+    if ($ApplicationWarningMs -ge $ApplicationAlertMs) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Thresholds -Message (
+            'ApplicationWarningMs must be lower than ApplicationAlertMs.'
+        )
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($SiteAddress) -and [Environment]::UserInteractive) {
+        $script:SiteAddressFromPrompt = Read-Host 'Enter the D4A site address(es), separated by commas (default: hostname:1200)'
+    }
+    else {
+        $script:SiteAddressFromPrompt = $SiteAddress
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:SiteAddressFromPrompt)) {
+        $script:SiteAddressFromPrompt = 'hostname:1200'
+    }
+    $resolvedMonitoringName = if ([string]::IsNullOrWhiteSpace($MonitoringName)) { $env:COMPUTERNAME } else { $MonitoringName.Trim() }
+    $monitorEndpoints = [System.Collections.Generic.List[object]]::new()
+    try {
+        foreach ($frontendUri in @(ConvertTo-HttpUris -Addresses $script:SiteAddressFromPrompt)) {
+            $apiUri = Get-D4AApiUri -FrontendUri $frontendUri
+            $monitorEndpoints.Add([pscustomobject]@{
+                FrontendUri = $frontendUri
+                ApiUri      = $apiUri
+                Label       = Get-MonitorEndpointLabel -Uri $frontendUri
+            }) | Out-Null
+        }
+        Write-RunLog -Category Configuration -Message ('MonitoringName={0}; Sites={1}; APIs={2}; recipient={3}; test email={4}; daily summary={5}' -f
+            $resolvedMonitoringName,
+            (($monitorEndpoints | ForEach-Object { $_.FrontendUri.AbsoluteUri }) -join ', '),
+            (($monitorEndpoints | ForEach-Object { $_.ApiUri.AbsoluteUri }) -join ', '),
+            $NotificationTo,
+            $SendTestResultsEmail.IsPresent,
+            $SendDailySummaryEmail.IsPresent) -Color White
+    }
+    catch {
+        Add-MonitorResult -Severity Error -Category Configuration -Check 'Site address' -Message $_.Exception.Message
+    }
+
+    $lockPath = Join-Path (Split-Path -Parent $script:RunLogPath) 'scheduled-monitor.lock'
+    $lockStream = $null
+    try {
+        try {
+            $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
+        catch {
+            Add-MonitorResult -Severity Warning -Category Monitor -Check 'Overlap lock' -Message (
+                'Another monitor instance is running. This scan was skipped.'
+            )
+            return
+        }
+
+        foreach ($endpoint in @($monitorEndpoints)) {
+            Invoke-SafeMonitorCheck -Category Application -Check Frontend -Action {
+                Test-WebEndpoint -Name ('Frontend availability ({0})' -f $endpoint.Label) -Uri $endpoint.FrontendUri
+            }
+            Invoke-SafeMonitorCheck -Category Application -Check API -Action {
+                Test-WebEndpoint `
+                    -Name ('API health ({0})' -f $endpoint.Label) `
+                    -Uri $endpoint.ApiUri `
+                    -WarningMs $ApiHealthWarningMs `
+                    -FailureAttempts $ApiHealthFailureAttempts `
+                    -FailureRetryIntervalSeconds $ApiHealthRetryIntervalSeconds
+            }
+            Invoke-SafeMonitorCheck -Category TLS -Check Frontend -Action {
+                Test-TlsCertificate -Name ('Frontend certificate ({0})' -f $endpoint.Label) -Uri $endpoint.FrontendUri
+            }
+            Invoke-SafeMonitorCheck -Category TLS -Check API -Action {
+                Test-TlsCertificate -Name ('API certificate ({0})' -f $endpoint.Label) -Uri $endpoint.ApiUri
+            }
+            Invoke-SafeMonitorCheck -Category 'Application performance' -Check Endpoints -Action {
+                Test-ApplicationPerformance -PublicApiBaseUri (Get-AuthorityBaseUri -Uri $endpoint.ApiUri) -TargetLabel $endpoint.Label
+            }
+        }
+
+    Invoke-SafeMonitorCheck -Category Server -Check 'D4A Windows services' -Action { Test-D4AWindowsServices }
+    Invoke-SafeMonitorCheck -Category Server -Check 'Mosquitto/MQTT service' -Action { Test-MosquittoWindowsService }
+        Invoke-SafeMonitorCheck -Category Server -Check 'API listener' -Action { Test-ApiListener }
+        Invoke-SafeMonitorCheck -Category Server -Check Memory -Action { Test-MemoryHealth }
+        Invoke-SafeMonitorCheck -Category Server -Check CPU -Action { Test-CpuHealth }
+        Invoke-SafeMonitorCheck -Category Server -Check Disks -Action { Test-DiskHealth }
+        Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Nginx errors' -Action { Test-NginxErrors }
+        Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Windows events' -Action { Test-RelevantWindowsEvents }
+        Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Watchdog service logs' -Action { Test-WatchdogServiceLogs }
+
+        $activeIgnoreRules = @()
+        try {
+            $activeIgnoreRules = @(Get-ActiveIgnoreRules)
+            Apply-IgnoreRulesToResults -ActiveRules $activeIgnoreRules
+        }
+        catch {
+            Add-MonitorResult -Severity Error -Category Ignore -Check 'Ignore rules' -Message (
+                'Unable to load or apply ignore-rules.txt: {0}' -f $_.Exception.Message
+            ) -Key 'ignore-rules'
+        }
+
+        $issuesBeforeEmail = @($script:Results | Where-Object { $_.Severity -ne 'OK' })
+        $ignoredIssues = @($issuesBeforeEmail | Where-Object { $_.IgnoreActive })
+        $unignoredIssues = @($issuesBeforeEmail | Where-Object { -not $_.IgnoreActive })
+        $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
+        $dailyOnlyResults = @($unignoredIssues | Where-Object { -not $_.NotificationEligible })
+        Remove-ResolvedAutomaticIssueCooldowns -ActiveIssueKeys @($issuesBeforeEmail | Select-Object -ExpandProperty Key -Unique)
+        if ($activeIgnoreRules.Count -gt 0) {
+            Write-RunLog -Category Ignore -Color Cyan -Message ('Active ignore rules loaded: {0}; file={1}' -f $activeIgnoreRules.Count, $script:IgnoreRulesPath)
+        }
+        foreach ($ignoredIssue in $ignoredIssues) {
+            $untilText = if ($null -ne $ignoredIssue.IgnoreUntil) {
+                '; until ' + $ignoredIssue.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz')
+            }
+            else {
+                ''
+            }
+            Write-RunLog -Category Ignore -Color DarkGray -Message (
+                'Issue {0} is ignored by a {1} rule{2}.' -f $ignoredIssue.Key, $ignoredIssue.IgnoreMode, $untilText
+            )
+        }
+
+        $emailType = if ($SendTestResultsEmail.IsPresent) { 'Test' } elseif ($SendDailySummaryEmail.IsPresent) { 'Daily' } else { 'Alert' }
+        $shouldSendEmail = -not $DisableEmail.IsPresent -and (
+            $SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent -or $unignoredNotifiableIssues.Count -gt 0
+        )
+
+        if ($shouldSendEmail) {
+            $siteForEmail = if ($monitorEndpoints.Count -gt 0) {
+                (($monitorEndpoints | ForEach-Object { $_.FrontendUri.AbsoluteUri.TrimEnd('/') }) -join ', ')
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($script:SiteAddressFromPrompt)) {
+                $script:SiteAddressFromPrompt
+            }
+            else {
+                'unknown site'
+            }
+            $content = New-EmailContent `
+                -MonitoredSite $siteForEmail `
+                -MonitoringName $resolvedMonitoringName `
+                -ActiveIgnoreRules $activeIgnoreRules `
+                -EmailType $emailType
+            Write-RunLog -Category Email -Color Cyan -Message ('Sending to {0}; subject={1}' -f $NotificationTo, $content.Subject)
+            try {
+                $delivery = Send-MonitorEmail `
+                    -Subject $content.Subject `
+                    -TextBody $content.TextBody `
+                    -HtmlBody $content.HtmlBody
+                Write-RunLog -Level OK -Category Email -Color Green -Message (
+                    'Notification sent to {0} using {1}. {2}' -f $NotificationTo, $delivery.Method, $delivery.Details
+                )
+                if ($emailType -eq 'Alert' -and $unignoredNotifiableIssues.Count -gt 0) {
+                    foreach ($issueKey in @($unignoredNotifiableIssues | Select-Object -ExpandProperty Key -Unique)) {
+                        Set-AutomaticIssueCooldown -Key $issueKey -Duration '24h'
+                    }
+                }
+            }
+            catch {
+                Add-MonitorResult -Severity Error -Category Email -Check 'Notification delivery' -Message $_.Exception.Message
+            }
+        }
+        elseif ($DisableEmail.IsPresent) {
+            Write-RunLog -Category Email -Color DarkGray -Message 'Email delivery is disabled for this run.'
+        }
+        elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredIssues.Count -eq 0) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'All detected issues are covered by active ignore rules; no notification was required.'
+            )
+        }
+        elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredNotifiableIssues.Count -eq 0 -and $dailyOnlyResults.Count -gt 0) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'Only daily-summary warning or recovery evidence was detected; it is retained for the daily monitoring results email.'
+            )
+        }
+        elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredNotifiableIssues.Count -eq 0) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'Only non-notifying diagnostic or recovered-check warnings were detected; no normal notification was required.'
+            )
+        }
+        else {
+            Write-RunLog -Category Email -Color Green -Message 'No issue was detected; no notification was required.'
+        }
+    }
+    finally {
+        if ($null -ne $lockStream) {
+            $lockStream.Dispose()
+        }
+    }
+}
+
+$finalExitCode = 2
+try {
+    Import-MonitorConfiguration
+    Test-MonitorConfigurationValues
+    $managementModes = @(@(
+            $ValidateConfiguration.IsPresent,
+            $ShowConfiguration.IsPresent,
+            -not [string]::IsNullOrWhiteSpace($AddSiteAddress),
+            -not [string]::IsNullOrWhiteSpace($SetIssueCooldown),
+            -not [string]::IsNullOrWhiteSpace($ClearIssueCooldown)
+        ) | Where-Object { $_ })
+    if ($managementModes.Count -gt 1) {
+        throw 'Use only one management command at a time: ValidateConfiguration, ShowConfiguration, AddSiteAddress, SetIssueCooldown, or ClearIssueCooldown.'
+    }
+
+    if ($ShowConfiguration.IsPresent) {
+        Show-MonitorConfiguration
+        $finalExitCode = 0
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($AddSiteAddress)) {
+        Add-MonitorConfiguredSites -Addresses $AddSiteAddress
+        $finalExitCode = 0
+    }
+    elseif ($ValidateConfiguration.IsPresent) {
+        Write-Host ('Monitoring configuration is valid. Version={0}; release date={1}; configuration={2}' -f
+            $script:MonitorVersion, $script:MonitorReleaseDate, $script:ResolvedConfigPath) -ForegroundColor Green
+        Write-Host ('MonitoringName={0}; SiteAddress={1}; NotificationTo={2}; LogRetentionDays={3}' -f
+            $MonitoringName, $SiteAddress, $NotificationTo, $LogRetentionDays) -ForegroundColor Gray
+        $finalExitCode = 0
+    }
+    else {
+        Invoke-D4AMonitor
+        $finalExitCode = Get-ExitCode
+    }
+}
+catch {
+    $fatalMessage = $_.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) {
+        $fatalMessage = '{0} | Stack: {1}' -f $fatalMessage, (($_.ScriptStackTrace -replace '[\r\n]+', ' ').Trim())
+    }
+    if ($script:LoggingReady) {
+        Write-RunLog -Level Error -Category Monitor -Color Red -Message ('Fatal monitor failure: {0}' -f $fatalMessage)
+        Write-ErrorLog -Level Error -Category Monitor -Message ('Fatal monitor failure: {0}' -f $fatalMessage)
+    }
+    else {
+        Write-Host ('[FATAL] Unable to initialize or run the monitor: {0}' -f $fatalMessage) -ForegroundColor Red
+    }
+    $finalExitCode = 2
+}
+finally {
+    if ($script:LoggingReady) {
+        $counts = [ordered]@{
+            OK      = @($script:Results | Where-Object { $_.Severity -eq 'OK' }).Count
+            Warning = @($script:Results | Where-Object { $_.Severity -eq 'Warning' }).Count
+            Alert   = @($script:Results | Where-Object { $_.Severity -eq 'Alert' }).Count
+            Error   = @($script:Results | Where-Object { $_.Severity -eq 'Error' }).Count
+        }
+        Write-RunLog -Category Summary -Color Cyan -Message (
+            'Completed in {0:N1} seconds. OK={1}; Warning={2}; Alert={3}; Error={4}; exit code={5}.' -f
+                ((Get-Date) - $script:RunStartedAt).TotalSeconds,
+                $counts.OK,
+                $counts.Warning,
+                $counts.Alert,
+                $counts.Error,
+                $finalExitCode
+        )
+        Write-RunLog -Category Summary -Color DarkGray -Message ('Monitoring logs: {0}' -f $script:MonitorLogDirectory)
+        Write-RunLog -Category Summary -Color DarkGray -Message ('Monitor summary log: {0}' -f $script:RunLogPath)
+    }
+    [Environment]::ExitCode = $finalExitCode
+}
+
+# Task Scheduler normally launches this script with powershell.exe -File. In
+# that mode an explicit exit is required for the process to return the monitor
+# severity. Interactive invocation keeps the current PowerShell host open.
+$commandLineArguments = @([Environment]::GetCommandLineArgs())
+if (@($commandLineArguments | Where-Object { $_ -ieq '-File' }).Count -gt 0) {
+    exit $finalExitCode
+}
