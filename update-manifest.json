@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "version": "7.0.0",
+  "releaseDate": "2026-08-11",
+  "files": [
+    {
+      "path": "AssemblyRules_Luleburgas.sql",
+      "sha256": "7ECE62EAC989B599C3A717D4B730CD8ED4B7230C5EA5EFFCFD94022741B83335"
+    },
+    {
+      "path": "D4A-DiskSpaceAnalyzer.ps1",
+      "sha256": "A741BC234F7E1A9668566E7F5BF5355D3F704C5EF5E19828E7CA2FAA0E46E3E5"
+    },
+    {
+      "path": "D4A-ScheduledMonitor-v5.ps1",
+      "sha256": "4BBA42DDD4F8CDBC0DE1640EE91CB62DD1B61CA90EA336958819BF3CEB53DF28"
+    },
+    {
+      "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
+      "sha256": "EFB45F01DC813A1C7187F5BEEDEAAD48560F7E49B38348B2D9B7EBA9A2BB4B2D"
+    },
+    {
+      "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",
+      "sha256": "60B089596AC6F04A81EF67F0C8401E6F08A69A4FD513E3DE0D0B9A9EA73FDA36"
+    }
+  ]
+}
