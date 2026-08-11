@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.1'
+$Script:ToolVersion = [version]'7.0.2'
 $Script:ToolReleaseDate = '2026-08-11'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -278,25 +278,44 @@ function Invoke-ITToolsAutomaticUpdate {
             throw "The update manifest must contain $($Script:ToolMainScriptFileName)."
         }
 
+        $filesToInstall = @()
+        $missingCompanionFiles = @()
+        foreach ($file in $manifestFiles) {
+            $relativePath = [string]$file.path
+            $expectedHash = ([string]$file.sha256).ToUpperInvariant()
+            if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath -match '(?i)(\.\.|^[\\/]|^[A-Za-z]:)') {
+                throw "Unsafe update file path: $relativePath"
+            }
+            if ($expectedHash -notmatch '^[A-F0-9]{64}$') {
+                throw "Invalid SHA-256 value for $relativePath."
+            }
+
+            if ($relativePath -eq $Script:ToolMainScriptFileName -or (Test-Path -LiteralPath (Join-Path $scriptFolder $relativePath) -PathType Leaf)) {
+                $filesToInstall += $file
+            }
+            else {
+                $missingCompanionFiles += $relativePath
+            }
+        }
+
+        if ($missingCompanionFiles.Count -gt 0) {
+            Write-Host "Missing companion files will not be downloaded during the version update: $($missingCompanionFiles -join ', ')." -ForegroundColor DarkGray
+            Write-Host 'They will be downloaded only when you select the feature that requires them.' -ForegroundColor DarkGray
+        }
+
         $stagingFolder = Join-Path ([IO.Path]::GetTempPath()) ('ITToolsUpdate_{0}' -f [guid]::NewGuid().ToString('N'))
         [void](New-Item -Path $stagingFolder -ItemType Directory -Force -ErrorAction Stop)
         try {
             $fileIndex = 0
-            foreach ($file in $manifestFiles) {
+            foreach ($file in $filesToInstall) {
                 $fileIndex++
                 $relativePath = [string]$file.path
                 $expectedHash = ([string]$file.sha256).ToUpperInvariant()
-                if ([string]::IsNullOrWhiteSpace($relativePath) -or $relativePath -match '(?i)(\.\.|^[\\/]|^[A-Za-z]:)') {
-                    throw "Unsafe update file path: $relativePath"
-                }
-                if ($expectedHash -notmatch '^[A-F0-9]{64}$') {
-                    throw "Invalid SHA-256 value for $relativePath."
-                }
 
                 $downloadPath = Join-Path $stagingFolder $relativePath
                 $downloadFolder = Split-Path -Parent $downloadPath
                 [void](New-Item -Path $downloadFolder -ItemType Directory -Force -ErrorAction Stop)
-                $percent = [Math]::Min(75, 10 + [int](($fileIndex / $manifestFiles.Count) * 65))
+                $percent = [Math]::Min(75, 10 + [int](($fileIndex / $filesToInstall.Count) * 65))
                 Write-StreamingLog -Percent $percent -Step 'Update' -Description "Downloading and verifying $relativePath."
                 Invoke-WebRequest -Uri (Get-ITToolsUpdateUri -RelativePath $relativePath) -OutFile $downloadPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
                 $actualHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
@@ -315,7 +334,7 @@ function Invoke-ITToolsAutomaticUpdate {
 
             Write-StreamingLog -Percent 80 -Step 'Backup' -Description 'Saving the current IT Tools script on the Desktop.'
             $backupPath = New-ITToolsScriptBackup -ScriptPath $scriptPath
-            $orderedFiles = @($manifestFiles | Sort-Object @{ Expression = { if ($_.path -eq $Script:ToolMainScriptFileName) { 1 } else { 0 } } })
+            $orderedFiles = @($filesToInstall | Sort-Object @{ Expression = { if ($_.path -eq $Script:ToolMainScriptFileName) { 1 } else { 0 } } })
             foreach ($file in $orderedFiles) {
                 $relativePath = [string]$file.path
                 $sourcePath = Join-Path $stagingFolder $relativePath

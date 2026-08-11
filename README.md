@@ -18,10 +18,12 @@ Developer: Khaled Barbar
    selected tool requires elevated access.
 
 The main script checks `version.txt` when it starts. When a newer release is
-available, it downloads the files listed in `update-manifest.json`, validates
-their SHA-256 hashes and the PowerShell syntax of the main script, keeps a copy
-of the previous main script in `Desktop\IT Tools Backups`, retains only the
-newest two backups, then restarts automatically.
+available, it updates the main script and any companion files already present
+locally, validates their SHA-256 hashes and the PowerShell syntax of the main
+script, keeps a copy of the previous main script in `Desktop\IT Tools Backups`,
+retains only the newest two backups, then restarts automatically. Missing
+companion files are downloaded only after the user selects the feature that
+requires them.
 
 Use this command only when an update check must be skipped temporarily:
 
