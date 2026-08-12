@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.4'
+$Script:ToolVersion = [version]'7.0.5'
 $Script:ToolReleaseDate = '2026-08-12'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1807,43 +1807,13 @@ function Invoke-SiteMonitoringFirstTest {
 
 function Show-AddSiteMonitoring {
     Clear-Host
-    Show-SectionTitle "Add Site Monitoring"
+    Show-SectionTitle "Add New Site Monitoring"
     Write-Host "Create a scheduled D4A site and server health monitor that sends email notifications when issues are detected." -ForegroundColor Cyan
     Write-Host "The monitor checks selected frontend site(s), their API endpoint(s), local D4A services, performance, disk space, logs, and relevant Windows events." -ForegroundColor Gray
     Write-Host "Type q at any prompt to return to the previous menu." -ForegroundColor DarkGray
     if (-not $Script:IsAdmin) {
         Write-Host "Note: Administrator rights are required when creating scheduled tasks that run silently as SYSTEM." -ForegroundColor Yellow
     }
-    try {
-        $availableMonitorTemplate = Get-SiteMonitoringTemplatePath
-        $availableMonitorMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $availableMonitorTemplate
-        Write-Host "Available monitoring version: $($availableMonitorMetadata.VersionText) | Release date: $($availableMonitorMetadata.ReleaseDate)" -ForegroundColor Green
-    }
-    catch {
-        Write-Host 'Available monitoring version could not be determined. Deployment and updates will report the detailed error.' -ForegroundColor Yellow
-    }
-
-    Write-Host ""
-    Write-Host "1) Deploy a new site monitor"
-    Write-Host "2) Update monitoring script version"
-    Write-Host "3) Update existing monitor tasks to run silently in the background"
-    Write-Host "q) Back to the main menu"
-    $monitoringChoice = Read-Host "Choose an option"
-    if (Test-IsBack $monitoringChoice) { return }
-    if ($monitoringChoice -eq '2') {
-        Show-UpdateSiteMonitoringVersion
-        return
-    }
-    if ($monitoringChoice -eq '3') {
-        Show-UpdateSiteMonitoringTasks
-        return
-    }
-    if ($monitoringChoice -ne '1') {
-        Write-Host "That is not a valid choice. Try again." -ForegroundColor Yellow
-        Pause-Screen
-        return
-    }
-
     try {
         $templatePath = Get-SiteMonitoringTemplatePath
         $templateMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $templatePath
@@ -1961,6 +1931,140 @@ function Show-AddSiteMonitoring {
     }
 
     Pause-Screen
+}
+
+function Show-UpdateExistingMonitoringConfiguration {
+    Clear-Host
+    Show-SectionTitle 'Update Existing Monitoring Settings'
+    Write-Host 'Updates the selected monitor JSON configuration without replacing its script, logs, ignore rules, or Scheduled Tasks.' -ForegroundColor Cyan
+    Write-Host 'Type q at any prompt to return to Site Monitoring.' -ForegroundColor DarkGray
+
+    try {
+        $target = Select-SiteMonitoringCommandTarget
+        if ($null -eq $target) { return }
+        if (-not $target.ConfigExists) {
+            throw "The monitoring configuration file was not found: $($target.ConfigPath). Use Monitoring Version Update to migrate a legacy installation first."
+        }
+
+        $configuration = Get-Content -LiteralPath $target.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $currentSites = (@($configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
+        $currentName = ([string]$configuration.MonitoringName).Trim()
+        $currentRecipients = (@($configuration.NotificationTo | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
+        if ([string]::IsNullOrWhiteSpace($currentSites) -or [string]::IsNullOrWhiteSpace($currentName) -or [string]::IsNullOrWhiteSpace($currentRecipients)) {
+            throw "The selected configuration is missing required site, name, or notification settings: $($target.ConfigPath)"
+        }
+
+        Write-Host ''
+        Write-Host 'Current settings:' -ForegroundColor Cyan
+        [pscustomobject]@{
+            MonitorFile            = $target.ScriptPath
+            ConfigurationFile      = $target.ConfigPath
+            FrontendSites          = $currentSites
+            MonitoringName         = $currentName
+            NotificationRecipients = $currentRecipients
+        } | Format-List
+
+        while ($true) {
+            $siteInput = Read-Host "New site address(es), comma-separated (Enter keeps: $currentSites; q to go back)"
+            if (Test-IsBack $siteInput) { return }
+            if ([string]::IsNullOrWhiteSpace($siteInput)) { $newSites = $currentSites; break }
+            $siteInput = Normalize-UserPath $siteInput
+            if (Test-SiteMonitoringHostList -Hosts $siteInput) {
+                $newSites = (($siteInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique) -join ',')
+                break
+            }
+            Write-Host 'Enter valid site names, for example hostname:1200,akbou.decide4action.com.' -ForegroundColor Yellow
+        }
+
+        while ($true) {
+            $nameInput = Read-Host "New friendly monitoring name (Enter keeps: $currentName; q to go back)"
+            if (Test-IsBack $nameInput) { return }
+            if ([string]::IsNullOrWhiteSpace($nameInput)) { $newName = $currentName; break }
+            $nameInput = $nameInput.Trim()
+            if ($nameInput -notmatch '[\r\n]') { $newName = $nameInput; break }
+            Write-Host 'The monitoring name cannot contain a line break.' -ForegroundColor Yellow
+        }
+
+        while ($true) {
+            $recipientInput = Read-Host "New notification email(s), comma-separated (Enter keeps: $currentRecipients; q to go back)"
+            if (Test-IsBack $recipientInput) { return }
+            if ([string]::IsNullOrWhiteSpace($recipientInput)) { $newRecipients = $currentRecipients; break }
+            $recipientInput = $recipientInput.Trim()
+            if (Test-SiteMonitoringEmailAddresses -Addresses $recipientInput) {
+                $newRecipients = (($recipientInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ',')
+                break
+            }
+            Write-Host 'Enter valid email addresses separated by commas.' -ForegroundColor Yellow
+        }
+
+        Show-SectionTitle 'Monitoring Settings Update Summary'
+        Write-Host "Monitor file: $($target.ScriptPath)" -ForegroundColor White
+        Write-Host "Configuration: $($target.ConfigPath)" -ForegroundColor White
+        Write-Host "Site address(es): $newSites" -ForegroundColor White
+        Write-Host "Friendly monitoring name: $newName" -ForegroundColor White
+        Write-Host "Notification email(s): $newRecipients" -ForegroundColor White
+        Write-Host 'The current JSON configuration will be backed up before it is changed. Scheduled Tasks and monitor code are not changed.' -ForegroundColor Yellow
+        $confirmation = Read-Host 'Type SAVE to back up and apply these monitoring settings (q to go back)'
+        if (Test-IsBack $confirmation -or $confirmation -cne 'SAVE') {
+            Write-Host 'Settings update cancelled. No monitoring files or tasks were changed.' -ForegroundColor Cyan
+            Pause-Screen
+            return
+        }
+
+        $deploymentFolder = Split-Path -Parent $target.ScriptPath
+        $backupFolder = Join-Path (Join-Path $deploymentFolder 'monitor-backups') ('settings_{0}' -f (Get-Date -Format 'yyyyMMddHHmmss'))
+        New-Item -ItemType Directory -Path $backupFolder -Force -ErrorAction Stop | Out-Null
+        $backupPath = Join-Path $backupFolder ([IO.Path]::GetFileName($target.ConfigPath))
+        Write-StreamingLog -Percent 35 -Step 'Backup' -Description "Backing up the current monitoring configuration to $backupFolder."
+        Copy-Item -LiteralPath $target.ConfigPath -Destination $backupPath -ErrorAction Stop
+
+        $configuration.SiteAddress = @($newSites -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $configuration.MonitoringName = $newName
+        $configuration.NotificationTo = @($newRecipients -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($null -eq $configuration.PSObject.Properties['LastSettingsUpdate']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name LastSettingsUpdate -Value (Get-Date).ToString('o')
+        }
+        else {
+            $configuration.LastSettingsUpdate = (Get-Date).ToString('o')
+        }
+
+        Write-StreamingLog -Percent 75 -Step 'Save' -Description 'Saving the updated site, recipient, and monitoring name settings.'
+        Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $target.ConfigPath -AllowOverwrite | Out-Null
+        Write-StreamingLog -Percent 100 -Step 'Done' -Description 'Monitoring settings update completed.'
+        Write-Host 'Success: the monitoring settings were updated.' -ForegroundColor Green
+        Write-Host "Configuration backup: $backupPath" -ForegroundColor Green
+        Write-Host 'Scheduled Tasks and monitor code were not changed.' -ForegroundColor Green
+    }
+    catch {
+        Show-LoggedError -Prefix 'Monitoring settings update did not complete' -Context 'Site Monitoring - update existing monitoring settings' -ErrorRecord $_
+    }
+
+    Pause-Screen
+}
+
+function Show-UpdateExistingMonitoringMenu {
+    while ($true) {
+        Clear-Host
+        Show-SectionTitle 'Update Existing Monitoring Settings'
+        Write-Host 'Select an update for an installed monitor. No new monitor is deployed from this menu.' -ForegroundColor Cyan
+        Write-Host '1) Update sites, monitoring name, and notification emails'
+        Write-Host '2) Update monitoring script version'
+        Write-Host '3) Update Scheduled Tasks to run silently as SYSTEM'
+        Write-Host 'q) Back to Site Monitoring'
+        Write-Host '------------------------------------------------------------------------'
+        $choice = Read-Host 'Choose an option'
+        if (Test-IsBack $choice) { return }
+
+        switch ($choice) {
+            '1' { Show-UpdateExistingMonitoringConfiguration }
+            '2' { Show-UpdateSiteMonitoringVersion }
+            '3' { Show-UpdateSiteMonitoringTasks }
+            default {
+                Write-Host 'That is not a valid choice. Try again.' -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
 }
 
 function Get-SiteMonitoringCommandTargets {
@@ -2257,16 +2361,18 @@ function Show-SiteMonitoringMenu {
         Write-Host '========================================================================' -ForegroundColor DarkGray
         Write-Host '                           SITE MONITORING' -ForegroundColor Cyan
         Write-Host '========================================================================' -ForegroundColor DarkGray
-        Write-Host '1) Add or update Site Monitoring'
-        Write-Host '2) Execute Monitoring Commands'
+        Write-Host '1) Add New Site Monitoring'
+        Write-Host '2) Update Existing Monitoring Settings'
+        Write-Host '3) Execute Monitoring Commands'
         Write-Host 'q) Back to main menu'
         Write-Host '------------------------------------------------------------------------'
         $choice = Read-Host 'Choose an option'
         if (Test-IsBack $choice) { return }
 
         switch ($choice) {
-            '1' { Invoke-LoggedToolAction -Context 'Site Monitoring - Add or update monitor' -Action { Show-AddSiteMonitoring } }
-            '2' { Invoke-LoggedToolAction -Context 'Site Monitoring - Execute Monitoring Commands' -Action { Show-ExecuteMonitoringCommandsMenu } }
+            '1' { Invoke-LoggedToolAction -Context 'Site Monitoring - add new monitor' -Action { Show-AddSiteMonitoring } }
+            '2' { Invoke-LoggedToolAction -Context 'Site Monitoring - update existing monitoring settings' -Action { Show-UpdateExistingMonitoringMenu } }
+            '3' { Invoke-LoggedToolAction -Context 'Site Monitoring - Execute Monitoring Commands' -Action { Show-ExecuteMonitoringCommandsMenu } }
             default {
                 Write-Host 'That is not a valid choice. Try again.' -ForegroundColor Yellow
                 Start-Sleep -Seconds 1
