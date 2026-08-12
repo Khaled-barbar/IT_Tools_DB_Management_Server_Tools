@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.4.0
+# D4A-Monitor-Version: 6.5.0
 # D4A-Monitor-Release-Date: 2026-08-12
 
 <#
@@ -87,6 +87,10 @@ param(
 
     # Friendly identifier used in email subjects, for example "Akbou".
     [string]$MonitoringName = 'D4A site',
+
+    # Comma-separated friendly names aligned with SiteAddress. This is normally
+    # maintained by IT Tools and lets each configured site be identified clearly.
+    [string]$SiteDisplayNames = '',
 
     # Default notification recipient. Change this value if the monitor should
     # always use another mailbox, or override it with -NotificationTo.
@@ -312,6 +316,7 @@ function Import-MonitorConfiguration {
 
     $settingMap = [ordered]@{
         SiteAddress                = 'StringList'
+        SiteDisplayNames           = 'StringList'
         MonitoringName             = 'String'
         NotificationTo             = 'StringList'
         LogDirectory               = 'Path'
@@ -416,7 +421,13 @@ function Test-MonitorConfigurationValues {
         }
     }
 
-    [void]@(ConvertTo-HttpUris -Addresses $SiteAddress)
+    $configuredUris = @(ConvertTo-HttpUris -Addresses $SiteAddress)
+    if (-not [string]::IsNullOrWhiteSpace($SiteDisplayNames)) {
+        $configuredNames = @($SiteDisplayNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($configuredNames.Count -ne $configuredUris.Count) {
+            throw 'SiteDisplayNames must contain one friendly name for each SiteAddress entry.'
+        }
+    }
 }
 
 function Get-UniqueMonitorSiteAddresses {
@@ -433,6 +444,27 @@ function Get-UniqueMonitorSiteAddresses {
     }
 
     return @($uniqueAddresses)
+}
+
+function Get-MonitorSiteDisplayNames {
+    param([Parameter(Mandatory = $true)][Uri[]]$FrontendUris)
+
+    $configuredNames = @($SiteDisplayNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $configuredUris = @(ConvertTo-HttpUris -Addresses $SiteAddress)
+    $isConfiguredSiteSet = $configuredNames.Count -eq $FrontendUris.Count -and $configuredUris.Count -eq $FrontendUris.Count
+    if ($isConfiguredSiteSet) {
+        for ($index = 0; $index -lt $FrontendUris.Count; $index++) {
+            if ($configuredUris[$index].AbsoluteUri.TrimEnd('/') -ine $FrontendUris[$index].AbsoluteUri.TrimEnd('/')) {
+                $isConfiguredSiteSet = $false
+                break
+            }
+        }
+    }
+    if ($isConfiguredSiteSet) {
+        return @($configuredNames)
+    }
+
+    return @($FrontendUris | ForEach-Object { Get-MonitorEndpointLabel -Uri $_ })
 }
 
 function Get-MonitorConfigurationForManagement {
@@ -470,6 +502,24 @@ function Add-MonitorConfiguredSites {
     }
 
     $configuration.SiteAddress = @($allAddresses)
+    $existingNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($existingNames.Count -ne $existingNormalizedAddresses.Count) {
+        $existingNames = @($existingNormalizedAddresses | ForEach-Object {
+            $frontendUri = (ConvertTo-HttpUris -Addresses $_ | Select-Object -First 1)
+            Get-MonitorEndpointLabel -Uri $frontendUri
+        })
+    }
+    $addedNames = @($addedAddresses | ForEach-Object {
+        $frontendUri = (ConvertTo-HttpUris -Addresses $_ | Select-Object -First 1)
+        Get-MonitorEndpointLabel -Uri $frontendUri
+    })
+    if ($null -eq $configuration.PSObject.Properties['SiteDisplayNames']) {
+        $configuration | Add-Member -MemberType NoteProperty -Name SiteDisplayNames -Value @($existingNames + $addedNames)
+    }
+    else {
+        $configuration.SiteDisplayNames = @($existingNames + $addedNames)
+    }
+    $configuration.MonitoringName = (@($configuration.SiteDisplayNames) -join ', ')
     $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
     $configurationDirectory = Split-Path -Parent $script:ResolvedConfigPath
     $backupPath = Join-Path $configurationDirectory ('{0}_{1}.bak.json' -f ([IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath)), $timestamp)
@@ -490,6 +540,10 @@ function Add-MonitorConfiguredSites {
 function Show-MonitorConfiguration {
     $configuration = Get-MonitorConfigurationForManagement
     $configuredSites = @(Get-UniqueMonitorSiteAddresses -Addresses @($configuration.SiteAddress | ForEach-Object { [string]$_ }))
+    $configuredNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($configuredNames.Count -ne $configuredSites.Count) {
+        $configuredNames = @($configuredSites | ForEach-Object { $_ })
+    }
     $apiSites = @(
         foreach ($site in $configuredSites) {
             $frontendUri = (ConvertTo-HttpUris -Addresses $site | Select-Object -First 1)
@@ -506,7 +560,7 @@ function Show-MonitorConfiguration {
         MonitorVersion       = $script:MonitorVersion
         ReleaseDate          = $script:MonitorReleaseDate
         ConfigurationFile    = $script:ResolvedConfigPath
-        MonitoringName       = $MonitoringName
+        SiteNames            = (@(for ($index = 0; $index -lt $configuredSites.Count; $index++) { '{0} = {1}' -f $configuredSites[$index], $configuredNames[$index] }) -join '; ')
         FrontendSites        = ($configuredSites -join ', ')
         AutomaticApiSites    = ($apiSites -join ', ')
         NotificationAddresses = $NotificationTo
@@ -3307,12 +3361,16 @@ function Invoke-D4AMonitor {
     $resolvedMonitoringName = if ([string]::IsNullOrWhiteSpace($MonitoringName)) { $env:COMPUTERNAME } else { $MonitoringName.Trim() }
     $monitorEndpoints = [System.Collections.Generic.List[object]]::new()
     try {
-        foreach ($frontendUri in @(ConvertTo-HttpUris -Addresses $script:SiteAddressFromPrompt)) {
+        $frontendUris = @(ConvertTo-HttpUris -Addresses $script:SiteAddressFromPrompt)
+        $resolvedSiteNames = @(Get-MonitorSiteDisplayNames -FrontendUris $frontendUris)
+        $resolvedMonitoringName = if ($resolvedSiteNames.Count -gt 0) { $resolvedSiteNames -join ', ' } elseif ([string]::IsNullOrWhiteSpace($MonitoringName)) { $env:COMPUTERNAME } else { $MonitoringName.Trim() }
+        for ($index = 0; $index -lt $frontendUris.Count; $index++) {
+            $frontendUri = $frontendUris[$index]
             $apiUri = Get-D4AApiUri -FrontendUri $frontendUri
             $monitorEndpoints.Add([pscustomobject]@{
                 FrontendUri = $frontendUri
                 ApiUri      = $apiUri
-                Label       = Get-MonitorEndpointLabel -Uri $frontendUri
+                Label       = $resolvedSiteNames[$index]
             }) | Out-Null
         }
         Write-RunLog -Category Configuration -Message ('MonitoringName={0}; Sites={1}; APIs={2}; recipient={3}; test email={4}; daily summary={5}' -f

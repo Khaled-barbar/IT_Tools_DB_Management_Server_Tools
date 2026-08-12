@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.7'
+$Script:ToolVersion = [version]'7.0.8'
 $Script:ToolReleaseDate = '2026-08-12'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -975,14 +975,68 @@ function Read-SiteMonitoringHosts {
     }
 }
 
-function Read-SiteMonitoringName {
-    while ($true) {
-        $name = Read-Host "Enter a friendly monitoring name for email subjects, for example Akbou (q to go back)"
-        if (Test-IsBack $name) { return $null }
-        $name = $name.Trim()
-        if (-not [string]::IsNullOrWhiteSpace($name) -and $name -notmatch '[\r\n]') { return $name }
-        Write-Host "A friendly monitoring name is required." -ForegroundColor Yellow
+function Read-SiteMonitoringNames {
+    param([Parameter(Mandatory = $true)][string]$Hosts)
+
+    $hostList = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $siteNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($host in $hostList) {
+        while ($true) {
+            $name = Read-Host "Enter a friendly name for $host, for example Akbou (q to go back)"
+            if (Test-IsBack $name) { return $null }
+            $name = $name.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($name) -and $name -notmatch '[,\r\n]') {
+                $siteNames.Add($name) | Out-Null
+                break
+            }
+            Write-Host "A friendly monitoring name is required for each site and cannot contain a comma." -ForegroundColor Yellow
+        }
     }
+
+    return $siteNames.ToArray()
+}
+
+function Format-SiteMonitoringNameAssignments {
+    param(
+        [Parameter(Mandatory = $true)][string]$Hosts,
+        [Parameter(Mandatory = $true)][string[]]$SiteNames
+    )
+
+    $hostList = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    return (@(
+        for ($index = 0; $index -lt $hostList.Count; $index++) {
+            '{0} = {1}' -f $hostList[$index], $SiteNames[$index]
+        }
+    ) -join '; ')
+}
+
+function Read-SiteMonitoringNamesForSettings {
+    param(
+        [Parameter(Mandatory = $true)][string]$Hosts,
+        [string[]]$CurrentSiteNames
+    )
+
+    $hostList = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $siteNames = [System.Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $hostList.Count; $index++) {
+        $defaultName = if ($index -lt $CurrentSiteNames.Count -and -not [string]::IsNullOrWhiteSpace($CurrentSiteNames[$index])) { $CurrentSiteNames[$index] } else { $hostList[$index] }
+        while ($true) {
+            $name = Read-Host "Friendly name for $($hostList[$index]) (Enter keeps: $defaultName; q to go back)"
+            if (Test-IsBack $name) { return $null }
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                $siteNames.Add($defaultName) | Out-Null
+                break
+            }
+            $name = $name.Trim()
+            if ($name -notmatch '[,\r\n]') {
+                $siteNames.Add($name) | Out-Null
+                break
+            }
+            Write-Host 'The friendly name cannot contain a comma or line break.' -ForegroundColor Yellow
+        }
+    }
+
+    return $siteNames.ToArray()
 }
 
 function Read-SiteMonitoringFolder {
@@ -1131,18 +1185,24 @@ function Get-SiteMonitoringInstallRoot {
 function New-SiteMonitoringConfigurationObject {
     param(
         [Parameter(Mandatory = $true)][string]$Hosts,
-        [Parameter(Mandatory = $true)][string]$MonitoringName,
+        [Parameter(Mandatory = $true)][string[]]$SiteNames,
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
         [Parameter(Mandatory = $true)][string]$MonitorVersion
     )
 
+    $siteAddresses = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($siteAddresses.Count -ne $SiteNames.Count) {
+        throw 'Each monitored site must have one friendly monitoring name.'
+    }
+
     $installRoot = Get-SiteMonitoringInstallRoot -ConfigurationFolder $DeploymentFolder
     $logDirectory = Join-Path $DeploymentFolder 'monitor-logs'
     [ordered]@{
         ConfigurationVersion = 1
-        MonitoringName       = $MonitoringName
-        SiteAddress          = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        MonitoringName       = ($SiteNames -join ', ')
+        SiteAddress          = $siteAddresses
+        SiteDisplayNames     = $SiteNames
         NotificationTo       = @($NotificationAddresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         D4AInstallRoot       = $installRoot
         LogDirectory        = $logDirectory
@@ -1189,7 +1249,7 @@ function Set-SiteMonitoringDeploymentConfiguration {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [Parameter(Mandatory = $true)][string]$Hosts,
-        [Parameter(Mandatory = $true)][string]$MonitoringName,
+        [Parameter(Mandatory = $true)][string[]]$SiteNames,
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder
     )
@@ -1201,7 +1261,7 @@ function Set-SiteMonitoringDeploymentConfiguration {
     $configurationPath = Get-SiteMonitoringConfigurationPath -DeploymentFolder $DeploymentFolder
     $configuration = New-SiteMonitoringConfigurationObject `
         -Hosts $Hosts `
-        -MonitoringName $MonitoringName `
+        -SiteNames $SiteNames `
         -NotificationAddresses $NotificationAddresses `
         -DeploymentFolder $DeploymentFolder `
         -MonitorVersion $metadata.VersionText
@@ -1451,9 +1511,10 @@ function Get-SiteMonitoringLegacySettings {
     $hosts = if ([string]::IsNullOrWhiteSpace([string]$defaults.SiteAddress)) { 'hostname:1200' } else { [string]$defaults.SiteAddress }
     $monitoringName = if ([string]::IsNullOrWhiteSpace([string]$defaults.MonitoringName)) { $env:COMPUTERNAME } else { [string]$defaults.MonitoringName }
     $notificationTo = if ([string]::IsNullOrWhiteSpace([string]$defaults.NotificationTo)) { 'techsupport@decide4action.com' } else { [string]$defaults.NotificationTo }
+    $siteNames = @($hosts -split ',' | ForEach-Object { $monitoringName })
     $configuration = New-SiteMonitoringConfigurationObject `
         -Hosts $hosts `
-        -MonitoringName $monitoringName `
+        -SiteNames $siteNames `
         -NotificationAddresses $notificationTo `
         -DeploymentFolder $DeploymentFolder `
         -MonitorVersion $MonitorVersion
@@ -1778,8 +1839,9 @@ function Show-AddSiteMonitoring {
 
         $hosts = Read-SiteMonitoringHosts
         if ($null -eq $hosts) { return }
-        $monitoringName = Read-SiteMonitoringName
-        if ($null -eq $monitoringName) { return }
+        $siteNames = Read-SiteMonitoringNames -Hosts $hosts
+        if ($null -eq $siteNames) { return }
+        $siteNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $hosts -SiteNames $siteNames
 
         Write-StreamingLog -Percent 10 -Step "Detect" -Description "Looking for the Decide4Action Configuration folder from the Windows service."
         $defaultFolder = Get-DefaultD4AConfigurationFolder
@@ -1795,7 +1857,7 @@ function Show-AddSiteMonitoring {
         Write-Host "Monitor version: $($templateMetadata.VersionText)" -ForegroundColor White
         Write-Host "Monitor release date: $($templateMetadata.ReleaseDate)" -ForegroundColor White
         Write-Host "Site address(es): $hosts" -ForegroundColor White
-        Write-Host "Friendly monitoring name: $monitoringName" -ForegroundColor White
+        Write-Host "Friendly site name(s): $siteNameAssignments" -ForegroundColor White
         Write-Host "Notification email(s): $emailAddresses" -ForegroundColor White
         Write-Host "Deployment folder: $deploymentFolder" -ForegroundColor White
         Write-Host "Monitor file: $targetScriptPath" -ForegroundColor White
@@ -1817,7 +1879,7 @@ function Show-AddSiteMonitoring {
         Copy-Item -LiteralPath $templatePath -Destination $targetScriptPath -ErrorAction Stop
         Unblock-File -LiteralPath $targetScriptPath -ErrorAction Stop
         Write-StreamingLog -Percent 30 -Step "Configure" -Description "Creating the site-specific JSON configuration under monitor-logs."
-        $configurationPath = Set-SiteMonitoringDeploymentConfiguration -ScriptPath $targetScriptPath -Hosts $hosts -MonitoringName $monitoringName -NotificationAddresses $emailAddresses -DeploymentFolder $deploymentFolder
+        $configurationPath = Set-SiteMonitoringDeploymentConfiguration -ScriptPath $targetScriptPath -Hosts $hosts -SiteNames $siteNames -NotificationAddresses $emailAddresses -DeploymentFolder $deploymentFolder
         Install-SiteMonitoringNodemailer -DeploymentFolder $deploymentFolder
 
         Write-Host "Site monitoring script created successfully: $targetScriptPath" -ForegroundColor Green
@@ -1907,6 +1969,11 @@ function Show-UpdateExistingMonitoringConfiguration {
         $configuration = Get-Content -LiteralPath $target.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         $currentSites = (@($configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
         $currentName = ([string]$configuration.MonitoringName).Trim()
+        $currentSiteNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        $currentSiteCount = @($currentSites -split ',' | Where-Object { $_ }).Count
+        if ($currentSiteNames.Count -ne $currentSiteCount) {
+            $currentSiteNames = @($currentSites -split ',' | ForEach-Object { $currentName })
+        }
         $currentRecipients = (@($configuration.NotificationTo | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
         if ([string]::IsNullOrWhiteSpace($currentSites) -or [string]::IsNullOrWhiteSpace($currentName) -or [string]::IsNullOrWhiteSpace($currentRecipients)) {
             throw "The selected configuration is missing required site, name, or notification settings: $($target.ConfigPath)"
@@ -1918,7 +1985,7 @@ function Show-UpdateExistingMonitoringConfiguration {
             MonitorFile            = $target.ScriptPath
             ConfigurationFile      = $target.ConfigPath
             FrontendSites          = $currentSites
-            MonitoringName         = $currentName
+            SiteNames              = (Format-SiteMonitoringNameAssignments -Hosts $currentSites -SiteNames $currentSiteNames)
             NotificationRecipients = $currentRecipients
         } | Format-List
 
@@ -1934,14 +2001,9 @@ function Show-UpdateExistingMonitoringConfiguration {
             Write-Host 'Enter valid site names, for example hostname:1200,akbou.decide4action.com.' -ForegroundColor Yellow
         }
 
-        while ($true) {
-            $nameInput = Read-Host "New friendly monitoring name (Enter keeps: $currentName; q to go back)"
-            if (Test-IsBack $nameInput) { return }
-            if ([string]::IsNullOrWhiteSpace($nameInput)) { $newName = $currentName; break }
-            $nameInput = $nameInput.Trim()
-            if ($nameInput -notmatch '[\r\n]') { $newName = $nameInput; break }
-            Write-Host 'The monitoring name cannot contain a line break.' -ForegroundColor Yellow
-        }
+        $newSiteNames = Read-SiteMonitoringNamesForSettings -Hosts $newSites -CurrentSiteNames $currentSiteNames
+        if ($null -eq $newSiteNames) { return }
+        $newNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $newSites -SiteNames $newSiteNames
 
         while ($true) {
             $recipientInput = Read-Host "New notification email(s), comma-separated (Enter keeps: $currentRecipients; q to go back)"
@@ -1959,7 +2021,7 @@ function Show-UpdateExistingMonitoringConfiguration {
         Write-Host "Monitor file: $($target.ScriptPath)" -ForegroundColor White
         Write-Host "Configuration: $($target.ConfigPath)" -ForegroundColor White
         Write-Host "Site address(es): $newSites" -ForegroundColor White
-        Write-Host "Friendly monitoring name: $newName" -ForegroundColor White
+        Write-Host "Friendly site name(s): $newNameAssignments" -ForegroundColor White
         Write-Host "Notification email(s): $newRecipients" -ForegroundColor White
         Write-Host 'The current JSON configuration will be backed up before it is changed. Scheduled Tasks and monitor code are not changed.' -ForegroundColor Yellow
         $confirmation = Read-Host 'Type SAVE to back up and apply these monitoring settings (q to go back)'
@@ -1977,7 +2039,13 @@ function Show-UpdateExistingMonitoringConfiguration {
         Copy-Item -LiteralPath $target.ConfigPath -Destination $backupPath -ErrorAction Stop
 
         $configuration.SiteAddress = @($newSites -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        $configuration.MonitoringName = $newName
+        $configuration.MonitoringName = ($newSiteNames -join ', ')
+        if ($null -eq $configuration.PSObject.Properties['SiteDisplayNames']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name SiteDisplayNames -Value @($newSiteNames)
+        }
+        else {
+            $configuration.SiteDisplayNames = @($newSiteNames)
+        }
         $configuration.NotificationTo = @($newRecipients -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         if ($null -eq $configuration.PSObject.Properties['LastSettingsUpdate']) {
             $configuration | Add-Member -MemberType NoteProperty -Name LastSettingsUpdate -Value (Get-Date).ToString('o')
