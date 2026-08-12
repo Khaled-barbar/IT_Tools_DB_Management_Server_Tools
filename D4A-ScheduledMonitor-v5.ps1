@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.3.0
-# D4A-Monitor-Release-Date: 2026-07-28
+# D4A-Monitor-Version: 6.4.0
+# D4A-Monitor-Release-Date: 2026-08-12
 
 <#
 .SYNOPSIS
@@ -25,12 +25,10 @@
     issues have their automatic cooldown removed so a recurrence is reported.
     Test and daily-summary modes send the complete scan report even when healthy.
 
-    API health warnings use a separate 4000 ms threshold. When API health is
-    initially unavailable, the monitor retries twice at five-second intervals
-    and alerts only when all three attempts fail. NSSM server.log rotation
-    events 1063 and 1077 are permanently excluded. Windows-event warnings and
-    Watchdog evidence of a successful service restart are retained for the
-    daily summary and do not send normal alert emails.
+    Frontend and API endpoints alert only when unavailable. Responses above
+    4500 ms are recorded in error_log without an email alert. CPU and RAM alert
+    only after two consecutive monitor runs at 90% or more. NSSM server.log
+    rotation events, plus harmless pipe-ended output-read events, are excluded.
 
     To change an automatic cooldown, use -SetIssueCooldown with
     -IssueCooldownDuration. The command rewrites both the duration and its
@@ -144,14 +142,16 @@ param(
     [ValidateRange(1, 10)]
     [int]$ApplicationAttempts = 2,
 
+    # Retained for compatibility with existing configuration files. Endpoint
+    # latency is now logged only above 4500 ms and never sends an email.
     [ValidateRange(1, 60000)]
     [int]$ApplicationWarningMs = 2000,
 
     [ValidateRange(1, 120000)]
     [int]$ApplicationAlertMs = 5000,
 
-    # API /health has its own latency threshold and only alerts after its
-    # configured in-run retry sequence has failed consecutively.
+    # Retained for compatibility with existing configuration files. Endpoint
+    # latency no longer triggers an email notification.
     [ValidateRange(1, 60000)]
     [int]$ApiHealthWarningMs = 4000,
 
@@ -208,8 +208,11 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.3.0'
-$script:MonitorReleaseDate = '2026-07-28'
+$script:MonitorVersion = '6.4.0'
+$script:MonitorReleaseDate = '2026-08-12'
+$script:EndpointSlowLogMs = 4500
+$script:ResourceAlertPercent = 90
+$script:ResourceConsecutiveRunsRequired = 2
 $script:CommandLineParameterNames = @($PSBoundParameters.Keys)
 $script:ResolvedConfigPath = $null
 $script:ConfigurationLoaded = $false
@@ -392,12 +395,6 @@ function Test-MonitorConfigurationValues {
         }
     }
 
-    if ($ApplicationWarningMs -ge $ApplicationAlertMs) {
-        throw 'ApplicationWarningMs must be lower than ApplicationAlertMs.'
-    }
-    if ($ApiHealthWarningMs -ge $ApplicationAlertMs) {
-        throw 'ApiHealthWarningMs must be lower than ApplicationAlertMs.'
-    }
     $null = Get-NssmExcludedLogRotationEventIds
     if ($DataCollectorLastHealthyWarningMinutes -ge $DataCollectorLastHealthyCriticalMinutes) {
         throw 'DataCollectorLastHealthyWarningMinutes must be lower than DataCollectorLastHealthyCriticalMinutes.'
@@ -523,9 +520,9 @@ function Show-MonitorConfiguration {
     Write-Host 'Important thresholds' -ForegroundColor Cyan
     [pscustomobject]@{
         HttpTimeoutSeconds                  = $HttpTimeoutSeconds
-        ApplicationWarningMs                = $ApplicationWarningMs
-        ApplicationAlertMs                  = $ApplicationAlertMs
-        ApiHealthWarningMs                  = $ApiHealthWarningMs
+        EndpointSlowLogMs                   = $script:EndpointSlowLogMs
+        ResourceAlertPercent                = $script:ResourceAlertPercent
+        ResourceConsecutiveRunsRequired     = $script:ResourceConsecutiveRunsRequired
         ApiHealthFailureAttempts            = $ApiHealthFailureAttempts
         NginxErrorsPerMinuteThreshold       = $NginxErrorsPerMinuteThreshold
         NginxConsecutiveMinutes             = $NginxConsecutiveMinutes
@@ -558,6 +555,29 @@ function Get-IgnoreRulesDescriptionHeader {
 '@
 }
 
+function Get-IgnoreRulesTemplate {
+    return @'
+# D4A Scheduled Monitor ignore rules
+# Format: rule-key|temporary|duration|ignore-until
+#         rule-key|permanent||
+#         rule-key|automatic|duration|ignore-until
+#
+# Temporary durations: 30m, 2h, 3d, or 1w. Leave ignore-until empty when
+# adding a temporary rule. The monitor calculates and writes the end time.
+# Automatic rules are created after a notification and removed when that
+# specific issue is no longer detected. Expired temporary rules are commented
+# out automatically.
+#
+# On the 3rd, 13th, and 23rd of each month the current file is archived and a
+# clean file is created with only active rules. The three newest archives are
+# retained.
+#
+# Examples:
+# application-frontend-availability|temporary|2h|
+# server-api-listener|permanent||
+'@
+}
+
 function Get-MonitorLogsReadme {
     return @'
 D4A SCHEDULED MONITOR - MONITOR LOGS README
@@ -586,9 +606,10 @@ site name, frontend addresses, notification recipients, installation paths,
 log retention, and optional thresholds. Scheduled Task frequency is recorded
 there as deployment metadata but remains controlled by Windows Task Scheduler.
 Command-line parameters override JSON values for temporary manual tests.
-The optional API reliability settings are ApiHealthWarningMs (default 4000),
+Endpoint latency is logged only above 4500 ms and never triggers an email.
 ApiHealthFailureAttempts (default 3), ApiHealthRetryIntervalSeconds (default
-5), and NssmExcludedLogRotationEventIds (default 1063,1077).
+5), and NssmExcludedLogRotationEventIds (default 1063,1077) remain available
+through the configuration file.
 
 DAILY LOG FILES AND WATCHDOG EVIDENCE
 =====================================
@@ -604,7 +625,9 @@ error_log_yyyyMMdd.txt
 
 ignore-rules.txt
   The single persistent file for notification suppression and automatic
-  cooldowns. It is never removed by the dated-log retention process.
+  cooldowns. On the 3rd, 13th, and 23rd of each month, active rules are kept
+  in a fresh file and the previous file is archived. Only three archives are
+  retained.
 
 Watchdog evidence
   Recent Watchdog TaskSchedulerOutput service logs are read only and added to
@@ -627,11 +650,13 @@ Nginx upstream errors notify only when the rate is more than 20 matching errors
 per minute for two consecutive minutes. Lower or isolated bursts are recorded
 without an email alert.
 
-API /health warnings use a 4000 ms threshold. After an initial availability
-failure, the monitor makes at most two retries at five-second intervals and
-alerts only if all three attempts fail. A recovered retry is included in daily
-results but does not send a normal notification. NSSM output-file rotation
-events 1063 and 1077 are excluded. Windows-event warnings appear only in the
+Frontend and API endpoints notify only when they are unreachable. Slow
+responses over 4500 ms are retained in error_log without an email alert. CPU
+and memory readings are also retained in error_log; they alert only after two
+consecutive monitor runs at 90% or higher. A recovered API retry is included
+in daily results but does not send a normal notification. NSSM output-file
+rotation events 1063 and 1077, and the known harmless "Failed to read output"
+pipe-ended event, are excluded. Windows-event warnings appear only in the
 daily monitoring results email. Watchdog evidence that a service was
 successfully restarted is also daily-only; Windows-event alerts and unresolved
 Watchdog failures still notify immediately.
@@ -645,7 +670,10 @@ ignore-rules.txt
     rule-key|permanent||
     rule-key|automatic|duration|ignore-until
   Automatic rules are maintained by the monitor. Temporary and permanent rules
-  may be maintained manually. Comments begin with # and are ignored.
+  may be maintained manually. Comments begin with # and are ignored. On the
+  3rd, 13th, and 23rd the monitor archives the current file (for example,
+  ignore-rules-aug13.txt), rebuilds ignore-rules.txt with active rules only,
+  and retains no more than three archives.
 
 README.txt
   This guide. The monitor creates it only when it is missing, so local notes in
@@ -731,7 +759,8 @@ The monitor uses one daily run log and one daily error log:
   ignore-rules.txt - the single persistent ignore and cooldown rules file.
 
 Only the current day and the prior four days are retained. README.txt and
-ignore-rules.txt remain untouched. The monitor reads Watchdog
+ignore-rules.txt remain untouched by daily log retention, but ignore rules are
+rotated on the 3rd, 13th, and 23rd of each month. The monitor reads Watchdog
 TaskSchedulerOutput logs when available to provide root-cause evidence, but it
 does not restart services or change the Watchdog state.
 
@@ -741,11 +770,12 @@ Data Collector LastEventTime SQL timeouts are retried while the Windows service
 is Running: log only on failure 1, diagnostics on failure 2, and alert on
 failure 3. LastHealthy older than 5 minutes is a warning; older than 10 minutes
 is critical. Nginx alerts require more than 20 matching errors per minute for
-two consecutive minutes. API /health warns at 4000 ms and retries an initial
-availability failure twice at five-second intervals before alerting. NSSM
-server.log rotation events 1063 and 1077 are excluded; Windows-event warnings
-and successful Watchdog restart evidence are included only in daily monitoring
-results.
+two consecutive minutes. Frontend and API endpoints notify only when
+unreachable; responses over 4500 ms are logged without an email. CPU and RAM
+notify only after two consecutive monitor runs at 90% or higher. NSSM
+server.log rotation events 1063 and 1077, and the harmless pipe-ended output
+read event, are excluded; Windows-event warnings and successful Watchdog
+restart evidence are included only in daily monitoring results.
 '@
 }
 
@@ -840,36 +870,25 @@ function Initialize-MonitorLogging {
     $isNewIgnoreRulesFile = Ensure-MonitorLogDocumentation -Directory $directory -IgnoreRulesPath $script:IgnoreRulesPath
 
     if ($isNewIgnoreRulesFile) {
-        $template = @'
-# D4A Scheduled Monitor ignore rules
-# Format: rule-key|temporary|duration|ignore-until
-#         rule-key|permanent||
-#         rule-key|automatic|duration|ignore-until
-#
-# Temporary durations: 30m, 2h, 3d, or 1w. Leave ignore-until empty when
-# adding a temporary rule. The monitor calculates and writes the end time.
-# Automatic rules are created after a notification and removed when that
-# specific issue is no longer detected. Expired temporary rules are commented
-# out automatically.
-#
-# Examples:
-# application-frontend-availability|temporary|2h|
-# server-api-listener|permanent||
-'@
-        [IO.File]::AppendAllText($script:IgnoreRulesPath, $template, $script:Utf8NoBom)
+        [IO.File]::AppendAllText($script:IgnoreRulesPath, (Get-IgnoreRulesTemplate), $script:Utf8NoBom)
     }
 
     $script:LoggingReady = $true
+    Rotate-IgnoreRulesIfDue
 }
 
 function Get-MonitorRuntimeState {
     $defaultState = [pscustomobject]@{
-        StateVersion = 1
+        StateVersion = 2
         DataCollectorLastEvent = [pscustomobject]@{
             ConsecutiveFailures = 0
             LastHealthy         = $null
             LastProcessedFailureId = $null
             LastDiagnosticsFailureId = $null
+        }
+        ResourceUtilization = [pscustomobject]@{
+            CpuConsecutiveHigh    = 0
+            MemoryConsecutiveHigh = 0
         }
     }
     if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath) -or -not (Test-Path -LiteralPath $script:MonitorStatePath -PathType Leaf)) {
@@ -885,6 +904,20 @@ function Get-MonitorRuntimeState {
             if ($null -eq $state.DataCollectorLastEvent.PSObject.Properties[$propertyName]) {
                 $state.DataCollectorLastEvent | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.DataCollectorLastEvent.$propertyName
             }
+        }
+        if ($null -eq $state.ResourceUtilization) {
+            $state | Add-Member -MemberType NoteProperty -Name ResourceUtilization -Value $defaultState.ResourceUtilization
+        }
+        foreach ($propertyName in @('CpuConsecutiveHigh', 'MemoryConsecutiveHigh')) {
+            if ($null -eq $state.ResourceUtilization.PSObject.Properties[$propertyName]) {
+                $state.ResourceUtilization | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.ResourceUtilization.$propertyName
+            }
+        }
+        if ($null -eq $state.PSObject.Properties['StateVersion']) {
+            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 2
+        }
+        else {
+            $state.StateVersion = 2
         }
         return $state
     }
@@ -1145,7 +1178,7 @@ function Get-ActiveIgnoreRules {
             continue
         }
 
-        $normalizedTemporaryLine = '{0}|temporary|{1}|{2}' -f $key, $duration, $ignoreUntil.ToString('o')
+        $normalizedTemporaryLine = '{0}|{1}|{2}|{3}' -f $key, $mode, $duration, $ignoreUntil.ToString('o')
         if ($ignoreUntil.LocalDateTime -le $now) {
             $expiredLine = '# EXPIRED {0} | {1}' -f $now.ToString('o'), $normalizedTemporaryLine
             $updatedLines.Add($expiredLine) | Out-Null
@@ -1169,6 +1202,85 @@ function Get-ActiveIgnoreRules {
     }
 
     return @($activeRules.ToArray())
+}
+
+function ConvertTo-ActiveIgnoreRuleLine {
+    param([Parameter(Mandatory = $true)][object]$Rule)
+
+    if ([string]$Rule.Mode -eq 'permanent') {
+        return ('{0}|permanent||' -f $Rule.Key)
+    }
+    return ('{0}|{1}|{2}|{3}' -f $Rule.Key, $Rule.Mode, $Rule.Duration, $Rule.IgnoreUntil.ToString('o'))
+}
+
+function Rotate-IgnoreRulesIfDue {
+    if ([string]::IsNullOrWhiteSpace($script:IgnoreRulesPath) -or -not (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf)) {
+        return
+    }
+
+    $now = Get-Date
+    if ($now.Day -notin @(3, 13, 23)) { return }
+
+    $month = $now.ToString('MMM', [Globalization.CultureInfo]::InvariantCulture).ToLowerInvariant()
+    $archivePath = Join-Path (Split-Path -Parent $script:IgnoreRulesPath) ('ignore-rules-{0}{1}.txt' -f $month, $now.Day)
+    if (Test-Path -LiteralPath $archivePath -PathType Leaf) { return }
+
+    try {
+        # Normalize expired entries before archiving, then keep only active rules
+        # in the fresh file so comments and historical entries cannot accumulate.
+        $activeRules = @(Get-ActiveIgnoreRules)
+        Copy-Item -LiteralPath $script:IgnoreRulesPath -Destination $archivePath -ErrorAction Stop
+
+        $freshLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in @((Get-IgnoreRulesDescriptionHeader) -split "\r?\n")) {
+            $freshLines.Add($line) | Out-Null
+        }
+        foreach ($line in @((Get-IgnoreRulesTemplate) -split "\r?\n")) {
+            $freshLines.Add($line) | Out-Null
+        }
+        foreach ($rule in $activeRules) {
+            $freshLines.Add((ConvertTo-ActiveIgnoreRuleLine -Rule $rule)) | Out-Null
+        }
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $freshLines.ToArray(), $script:Utf8NoBom)
+
+        $archives = @(Get-ChildItem -LiteralPath (Split-Path -Parent $script:IgnoreRulesPath) -File -Filter 'ignore-rules-*.txt' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^ignore-rules-[a-z]{3}\d{1,2}\.txt$' } |
+                Sort-Object -Property LastWriteTime -Descending)
+        foreach ($oldArchive in @($archives | Select-Object -Skip 3)) {
+            Remove-Item -LiteralPath $oldArchive.FullName -Force -ErrorAction Stop
+        }
+
+        Write-RunLog -Category Ignore -Color Cyan -Message (
+            'Ignore rules rotated to {0}; active rules retained={1}; archives retained={2}.' -f
+                $archivePath, $activeRules.Count, [Math]::Min($archives.Count, 3)
+        )
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+            'Unable to rotate ignore rules: {0}' -f $_.Exception.Message
+        )
+        Write-ErrorLog -Level Warning -Category Ignore -Message (
+            'Unable to rotate ignore rules: {0}' -f $_.Exception.Message
+        )
+    }
+}
+
+function Update-MonitorResourceConsecutiveHigh {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Cpu', 'Memory')][string]$Resource,
+        [Parameter(Mandatory = $true)][bool]$IsHigh
+    )
+
+    $state = Get-MonitorRuntimeState
+    $propertyName = '{0}ConsecutiveHigh' -f $Resource
+    $property = $state.ResourceUtilization.PSObject.Properties[$propertyName]
+    if ($null -eq $property) {
+        throw "Monitor state does not contain $propertyName."
+    }
+
+    $property.Value = if ($IsHigh) { [int]$property.Value + 1 } else { 0 }
+    Save-MonitorRuntimeState -State $state
+    return [int]$property.Value
 }
 
 function Apply-IgnoreRulesToResults {
@@ -1527,8 +1639,6 @@ function Test-WebEndpoint {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][Uri]$Uri,
-        [int]$WarningMs = $ApplicationWarningMs,
-        [int]$AlertMs = $ApplicationAlertMs,
         [ValidateRange(1, 5)][int]$FailureAttempts = 1,
         [ValidateRange(0, 60)][int]$FailureRetryIntervalSeconds = 0
     )
@@ -1578,15 +1688,10 @@ function Test-WebEndpoint {
         return
     }
 
-    if ($result.Millis -ge $AlertMs) {
-        Add-MonitorResult -Severity Alert -Category Application -Check $Name -Message (
-            '{0}; alert threshold={1} ms' -f $message, $AlertMs
-        )
-    }
-    elseif ($result.Millis -ge $WarningMs) {
+    if ($result.Millis -gt $script:EndpointSlowLogMs) {
         Add-MonitorResult -Severity Warning -Category Application -Check $Name -Message (
-            '{0}; warning threshold={1} ms' -f $message, $WarningMs
-        )
+            '{0}; response time exceeded the log-only threshold of {1} ms; no email notification is sent for latency.' -f $message, $script:EndpointSlowLogMs
+        ) -NotificationEligible:$false
     }
     else {
         Add-MonitorResult -Severity OK -Category Application -Check $Name -Message $message
@@ -1645,17 +1750,14 @@ function Test-ApplicationPerformance {
                 $uri.AbsoluteUri, $successful.Count, $attemptResults.Count, $averageMs, $maximumMs
 
             if ($failedCount -gt 0) {
-                Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message $message
-            }
-            elseif ($averageMs -ge $ApplicationAlertMs) {
-                Add-MonitorResult -Severity Alert -Category 'Application performance' -Check $checkName -Message (
-                    '{0}; alert threshold={1} ms' -f $message, $ApplicationAlertMs
-                )
-            }
-            elseif ($averageMs -ge $ApplicationWarningMs) {
                 Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
-                    '{0}; warning threshold={1} ms' -f $message, $ApplicationWarningMs
-                )
+                    '{0}; partial availability failure recorded without an email because at least one request reached the endpoint.' -f $message
+                ) -NotificationEligible:$false
+            }
+            elseif ($maximumMs -gt $script:EndpointSlowLogMs) {
+                Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
+                    '{0}; response time exceeded the log-only threshold of {1} ms; no email notification is sent for latency.' -f $message, $script:EndpointSlowLogMs
+                ) -NotificationEligible:$false
             }
             else {
                 Add-MonitorResult -Severity OK -Category 'Application performance' -Check $checkName -Message $message
@@ -1914,13 +2016,29 @@ function Test-MemoryHealth {
     $totalGb = [Math]::Round($totalKb / 1MB, 2)
     $message = '{0}% used ({1} GB of {2} GB)' -f $usedPercent, $usedGb, $totalGb
 
-    if ($usedPercent -ge 92) {
-        Add-MonitorResult -Severity Alert -Category Server -Check Memory -Message ('{0}; alert threshold=92%' -f $message)
+    if ($usedPercent -ge $script:ResourceAlertPercent) {
+        $consecutiveHigh = Update-MonitorResourceConsecutiveHigh -Resource Memory -IsHigh $true
+        if ($consecutiveHigh -ge $script:ResourceConsecutiveRunsRequired) {
+            Add-MonitorResult -Severity Alert -Category Server -Check Memory -Message (
+                '{0}; alert threshold={1}%; consecutive high runs={2}; email notification is eligible.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh
+            )
+        }
+        else {
+            Add-MonitorResult -Severity Warning -Category Server -Check Memory -Message (
+                '{0}; threshold={1}%; consecutive high runs={2}/{3}; logged without an email notification.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh, $script:ResourceConsecutiveRunsRequired
+            ) -NotificationEligible:$false
+        }
     }
     elseif ($usedPercent -ge 85) {
-        Add-MonitorResult -Severity Warning -Category Server -Check Memory -Message ('{0}; warning threshold=85%' -f $message)
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Memory -IsHigh $false)
+        Add-MonitorResult -Severity Warning -Category Server -Check Memory -Message (
+            '{0}; warning threshold=85%; logged without an email notification.' -f $message
+        ) -NotificationEligible:$false
     }
     else {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Memory -IsHigh $false)
         Add-MonitorResult -Severity OK -Category Server -Check Memory -Message $message
     }
 }
@@ -1974,18 +2092,35 @@ function Test-CpuHealth {
     $message = 'Average={0}%; maximum={1}%; successful samples={2}/{3}' -f
         $average, $maximum, $samples.Count, $sampleCount
 
-    if ($average -ge 85) {
-        Add-MonitorResult -Severity Alert -Category Server -Check CPU -Message ('{0}; alert threshold=85%' -f $message)
+    if ($average -ge $script:ResourceAlertPercent) {
+        $consecutiveHigh = Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $true
+        if ($consecutiveHigh -ge $script:ResourceConsecutiveRunsRequired) {
+            Add-MonitorResult -Severity Alert -Category Server -Check CPU -Message (
+                '{0}; alert threshold={1}%; consecutive high runs={2}; email notification is eligible.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh
+            )
+        }
+        else {
+            Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message (
+                '{0}; threshold={1}%; consecutive high runs={2}/{3}; logged without an email notification.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh, $script:ResourceConsecutiveRunsRequired
+            ) -NotificationEligible:$false
+        }
     }
     elseif ($average -ge 70) {
-        Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message ('{0}; warning threshold=70%' -f $message)
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $false)
+        Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message (
+            '{0}; warning threshold=70%; logged without an email notification.' -f $message
+        ) -NotificationEligible:$false
     }
     elseif ($errors.Count -gt 0) {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $false)
         Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message (
             '{0}; failed samples={1}' -f $message, $errors.Count
-        )
+        ) -NotificationEligible:$false
     }
     else {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $false)
         Add-MonitorResult -Severity OK -Category Server -Check CPU -Message $message
     }
 }
@@ -2174,6 +2309,18 @@ function Test-IsExcludedNssmLogRotationEvent {
     return [string]$Event.Message -match '(?i)(?:rotated output file|failed to rotate output file).*server\.log'
 }
 
+function Test-IsExcludedNssmPipeEndedOutputEvent {
+    param([Parameter(Mandatory = $true)][psobject]$Event)
+
+    if ([string]$Event.ProviderName -notmatch '(?i)^nssm$') {
+        return $false
+    }
+
+    # NSSM can emit this after a child process ends its output pipe. It is not
+    # evidence that the D4A service is unavailable and must not create alerts.
+    return [string]$Event.Message -match '(?is)failed\s+to\s+read\s+output\s+for\s+service\b.*readfile\(\):\s*the\s+pipe\s+has\s+been\s+ended'
+}
+
 function Test-RelevantWindowsEvents {
     if ($null -eq (Get-Command -Name Get-WinEvent -ErrorAction SilentlyContinue)) {
         throw 'Get-WinEvent is unavailable.'
@@ -2189,6 +2336,12 @@ function Test-RelevantWindowsEvents {
             if (Test-IsExcludedNssmLogRotationEvent -Event $event -ExcludedEventIds $excludedNssmEventIds) {
                 Write-RunLog -Category Diagnostics -Color DarkGray -Message (
                     'Excluded safe NSSM server.log rotation event: ID={0}; time={1}.' -f $event.Id, $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                )
+                continue
+            }
+            if (Test-IsExcludedNssmPipeEndedOutputEvent -Event $event) {
+                Write-RunLog -Category Diagnostics -Color DarkGray -Message (
+                    'Excluded non-actionable NSSM pipe-ended output event: ID={0}; time={1}.' -f $event.Id, $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
                 )
                 continue
             }
@@ -2258,10 +2411,12 @@ function Resolve-WatchdogLogRoot {
 
 function Get-WatchdogLogEntryTime {
     param(
-        [Parameter(Mandatory = $true)][string]$Line,
+        # Blank separator lines are valid in TaskSchedulerOutput logs.
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
         [datetime]$FallbackTime
     )
 
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $FallbackTime }
     if ($Line -match '^\[(?<Timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]') {
         $parsedTime = [DateTime]::MinValue
         if ([DateTime]::TryParseExact($matches.Timestamp, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsedTime)) {
@@ -3139,13 +3294,6 @@ function Invoke-D4AMonitor {
         Set-AutomaticIssueCooldown -Key $ClearIssueCooldown -Remove
         return
     }
-    if ($ApplicationWarningMs -ge $ApplicationAlertMs) {
-        Add-MonitorResult -Severity Error -Category Configuration -Check Thresholds -Message (
-            'ApplicationWarningMs must be lower than ApplicationAlertMs.'
-        )
-        return
-    }
-
     if ([string]::IsNullOrWhiteSpace($SiteAddress) -and [Environment]::UserInteractive) {
         $script:SiteAddressFromPrompt = Read-Host 'Enter the D4A site address(es), separated by commas (default: hostname:1200)'
     }
@@ -3200,7 +3348,6 @@ function Invoke-D4AMonitor {
                 Test-WebEndpoint `
                     -Name ('API health ({0})' -f $endpoint.Label) `
                     -Uri $endpoint.ApiUri `
-                    -WarningMs $ApiHealthWarningMs `
                     -FailureAttempts $ApiHealthFailureAttempts `
                     -FailureRetryIntervalSeconds $ApiHealthRetryIntervalSeconds
             }
