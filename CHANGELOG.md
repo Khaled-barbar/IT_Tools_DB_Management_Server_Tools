@@ -1,0 +1,139 @@
+# Changelog
+
+This file records significant changes to the D4A IT Automation and Operations Toolkit. Small wording, formatting, and other minor adjustments are intentionally omitted.
+
+The main IT Tools script and the scheduled monitoring component use separate versions because monitor code can be upgraded independently while preserving site-specific configuration and Scheduled Tasks.
+
+## 7.0.9 - 2026-08-12
+
+### Added
+
+- Introduced a three-layer documentation model:
+  - project case study for recruiters, managers, and non-technical readers;
+  - technical architecture and engineering design reference;
+  - Level 1/Level 2 operator guide with workflows, expected results, troubleshooting, and escalation boundaries.
+- Reworked the root README into a concise repository landing page.
+- Documented the project's evolution from recurring manual tasks to a centralized team-enablement toolkit.
+
+### Corrected
+
+- Corrected the main script header to state that the toolkit contains three tool groups.
+- Synchronized the monitoring script's runtime version with its machine-readable header.
+
+### Monitoring 6.5.1
+
+- Corrected runtime version reporting so configuration, validation, and logs identify the installed monitor accurately.
+
+## 7.0.8 - 2026-08-12
+
+### Added
+
+- Added one friendly display name per monitored frontend site.
+- Added `SiteDisplayNames` to external monitor configuration while preserving compatibility with older installations.
+- Updated configuration display and settings management to show site-to-name associations.
+
+### Monitoring 6.5.0
+
+- Monitoring results and email subjects can identify multiple configured sites by their individual friendly names.
+
+## 7.0.5 - 2026-08-12
+
+### Changed
+
+- Separated **Add New Site Monitoring** from **Update Existing Monitoring Settings**.
+- Added independent paths for updating site settings, monitor code, and Scheduled Tasks.
+- Preserved production configuration, logs, ignore rules, filenames, task triggers, frequency, and task identity during monitor updates.
+
+## 7.0.3 - 2026-08-12
+
+### Corrected
+
+- Reduced false endpoint alerts: frontend and API response time is logged above 4,500 ms but only unreachability can trigger email.
+- Required two consecutive executions at 90 percent or more before CPU or memory email alerts.
+- Excluded known harmless NSSM output-rotation and ended-pipe events.
+- Added retry and persistence logic for Data Collector SQL health checks while its Windows service is running.
+- Added LastHealthy warning and critical evaluation for Data Collector evidence.
+- Required a sustained Nginx error rate above 20 errors per minute for two consecutive minutes before alerting.
+
+### Monitoring 6.4.0
+
+- Added stateful alert evaluation, recovery handling, and lower-noise operational notifications.
+- Added ignore-rule rotation on the 3rd, 13th, and 23rd of each month while retaining active rules and only three archives.
+
+## 7.0.2 - 2026-08-11
+
+### Changed
+
+- Restricted companion-file downloads to the moment a user selects the feature that requires the missing file.
+- Prevented the automatic updater from downloading unused companion scripts or SQL files.
+
+## 7.0.1 - 2026-08-11
+
+### Added
+
+- Added verified on-demand download support for official companion PowerShell and SQL files.
+- Required companion files to match SHA-256 values in the release manifest before being saved locally.
+- Added user-facing download progress and safe handling for non-writable script folders.
+
+## 7.0.0 - 2026-08-11
+
+### Added
+
+- Established GitHub `main` as the canonical distribution source.
+- Added automatic startup version checks using `version.txt`.
+- Added `update-manifest.json` as the release allowlist and integrity source.
+- Added HTTPS staging downloads, SHA-256 validation, PowerShell syntax validation, safe replacement, and automatic relaunch.
+- Preserved the installed version when any update validation fails.
+
+### Changed
+
+- Introduced semantic release versioning for IT Tools.
+- Kept site-specific monitoring configuration, credentials, logs, state, and ignore rules outside release payloads.
+
+## Monitoring 6.3.0 and earlier toolkit evolution
+
+Before the public `7.0.x` release workflow, the project evolved through repeated operational requirements and production corrections.
+
+### Central toolkit and user experience
+
+- Consolidated stand-alone scripts into numbered **Database Tools**, **Local server and file tools**, and **Site Monitoring** menus.
+- Standardized `q` navigation, readable results, press-any-key return behavior, and persistent timestamped progress for long operations.
+- Added clipboard-compatible hidden password entry.
+- Added daily full error logs with operation context, exception details, and stack information.
+- Added finite timeouts for deep scans and expensive WMI/CIM or SQL operations.
+
+### Database translation and import capabilities
+
+- Added language-file export for all content or only missing translations.
+- Added translated CSV staging, preview, update, and insert workflows.
+- Added case-insensitive column detection, Unicode-safe text, apostrophe handling, blank-translation skipping, invalid RootId reporting, and duplicate RootId consolidation.
+- Corrected SQL connection failures caused by wrapped PowerShell objects being passed to connection-string builders.
+- Corrected duplicate-key migration failures caused by duplicate RootIds in source data.
+- Added identity-column detection for environments where `TranslationId` is database-generated.
+- Added generic CSV/XLSX staging imports and controlled table-to-table migrations.
+
+### Database safety and diagnostics
+
+- Standardized timestamped table backups using `TableNameyyyyMMddHHmmss`.
+- Added transactions, previews, explicit confirmation words, post-change validation, and blank-value protection.
+- Added a global rollback menu that discovers and restores backups created by toolkit features while first backing up current state.
+- Added database text, column-name, and stored-procedure searches.
+- Added table-size, SQL error-log, pending-query, heavy-query, cached-resource, and SQL CPU diagnostics.
+- Added activity copying between machines with duplicate avoidance.
+- Added Line Detailed View configuration and Luleburgas system-settings and role-permission workflows.
+
+### Server and file operations
+
+- Added system health reports, recent-file discovery, recursive text search, TCP port tests, and SQL backup-folder permission management.
+- Added Data Collector log tracing by date, time range, required text, and exclusions.
+- Corrected active-log access by opening files with read/write sharing.
+- Integrated the stand-alone visual disk analyzer while keeping it independently executable.
+
+### Site monitoring
+
+- Added scheduled monitoring for frontend sites, derived API endpoints, TLS certificates, D4A services, Mosquitto/MQTT, API listeners, CPU, memory, disks, Nginx, Windows events, and Watchdog evidence.
+- Added silent Scheduled Tasks running as `SYSTEM` when no user is logged in.
+- Moved site-specific settings to `monitor-logs\D4A-ScheduledMonitor.config.json`.
+- Added test, normal, daily-summary, validation, temporary-site, no-email, and cooldown management commands.
+- Added daily run/error logs, five-day retention, monitoring state, recovery detection, and issue cooldowns.
+- Added monitor version updates that back up code, configuration, and Scheduled Task definitions before replacement.

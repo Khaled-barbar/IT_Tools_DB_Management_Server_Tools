@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.5.0
+# D4A-Monitor-Version: 6.5.1
 # D4A-Monitor-Release-Date: 2026-08-12
 
 <#
@@ -212,7 +212,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.4.0'
+$script:MonitorVersion = '6.5.1'
 $script:MonitorReleaseDate = '2026-08-12'
 $script:EndpointSlowLogMs = 4500
 $script:ResourceAlertPercent = 90

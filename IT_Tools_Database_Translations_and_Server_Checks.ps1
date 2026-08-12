@@ -8,7 +8,7 @@
 # | . \ | | | | (_| | |  __/ (_| | | | |_) | (_| | |  | |_) | (_| | |
 # |_|\_\__| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
 # ==============================================================================
-# This script contains two groups of tools:
+# This script contains three groups of tools:
 #   1. Database tools:
 #      - Export language files
 #      - Import new languages with translated CSV files
@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.8'
+$Script:ToolVersion = [version]'7.0.9'
 $Script:ToolReleaseDate = '2026-08-12'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
