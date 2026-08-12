@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.3'
+$Script:ToolVersion = [version]'7.0.4'
 $Script:ToolReleaseDate = '2026-08-12'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -173,7 +173,44 @@ function Show-ITToolsDeveloperBanner {
 |_|\_\_| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
 '@
     Write-Host $banner -ForegroundColor Green
-    Write-Host "Developer: Khaled Barbar | IT Tools version $($Script:ToolVersion) | Release date: $($Script:ToolReleaseDate)" -ForegroundColor Cyan
+    Write-Host 'Developer: ⇓⇓⇓⇓' -ForegroundColor Cyan
+    Write-Host "IT Tools version $($Script:ToolVersion) | Release date: $($Script:ToolReleaseDate)" -ForegroundColor Cyan
+    Write-Host ''
+}
+
+function Show-ITToolsDescription {
+    Write-Host 'This script contains three groups of tools:' -ForegroundColor White
+    Write-Host '  1. Database tools:' -ForegroundColor Cyan
+    foreach ($item in @(
+        'Export language files',
+        'Import new languages with translated CSV files',
+        'Import CSV or Excel files into staging tables',
+        'Migrate data between database tables',
+        'Copy P4A activities between machines',
+        'Enable Line Detailed View',
+        'Roll back script changes from timestamped backups',
+        'Review database performance and SQL diagnostics',
+        'Find text that needs translation',
+        'Find missing translations',
+        'Review or remove disconnected translation rows'
+    )) {
+        Write-Host "     - $item" -ForegroundColor Gray
+    }
+
+    Write-Host '  2. Local server and file tools:' -ForegroundColor Cyan
+    foreach ($item in @(
+        'Search for text in files',
+        'Check basic system health',
+        'Show recently created or changed files',
+        'Launch the visual disk usage analyzer',
+        'Manage SQL backup folder permissions',
+        'Check whether a TCP port is open'
+    )) {
+        Write-Host "     - $item" -ForegroundColor Gray
+    }
+
+    Write-Host '  3. Site Monitoring:' -ForegroundColor Cyan
+    Write-Host '     - Deploy and schedule the D4A health and performance monitor' -ForegroundColor Gray
     Write-Host ''
 }
 
@@ -252,7 +289,11 @@ function Invoke-ITToolsAutomaticUpdate {
         if ($remoteVersion -le $Script:ToolVersion) { return }
         $updateAvailable = $true
 
-        Write-Host "A new IT Tools version is available: $remoteVersion." -ForegroundColor Green
+        Clear-Host
+        Show-SectionTitle 'Automatic IT Tools Update'
+        Write-Host "A recent IT Tools version is available. Current version: $($Script:ToolVersion) | Available version: $remoteVersion" -ForegroundColor Green
+        Write-Host 'IT Tools is attempting to download, verify, and install the update automatically. Please keep this window open.' -ForegroundColor Cyan
+        Write-Host ''
         $scriptPath = $PSCommandPath
         if ([string]::IsNullOrWhiteSpace($scriptPath)) { $scriptPath = $MyInvocation.MyCommand.Path }
         if ([string]::IsNullOrWhiteSpace($scriptPath)) {
@@ -345,8 +386,12 @@ function Invoke-ITToolsAutomaticUpdate {
             }
 
             Write-StreamingLog -Percent 100 -Step 'Update' -Description "IT Tools version $remoteVersion was installed."
+            Write-Host ''
             Write-Host "Update installed successfully. Previous script backup: $backupPath" -ForegroundColor Green
-            Start-Sleep -Seconds 1
+            Write-Host ''
+            Show-ITToolsDeveloperBanner
+            Show-ITToolsDescription
+            Pause-Screen -Message 'Press any key to relaunch IT Tools with the new version...'
             $quotedScriptPath = '"{0}"' -f $scriptPath.Replace('"', '""')
             Start-Process -FilePath 'powershell.exe' -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
             exit
@@ -8325,13 +8370,12 @@ function Show-ServerInfrastructureSuite {
 function Show-MasterMainMenu {
     while ($true) {
         Clear-Host
-        Show-ITToolsDeveloperBanner
         Write-Host "========================================================================" -ForegroundColor DarkGray
         Write-Host "                              IT TOOLS" -ForegroundColor Green
         Write-Host "========================================================================" -ForegroundColor DarkGray
         Write-Host "1) Database Tools"
         Write-Host "2) Local server and file tools"
-        Write-Host "3) Add Site Monitoring"
+        Write-Host "3) Site Monitoring"
         Write-Host "q) Quit"
         Write-Host "------------------------------------------------------------------------"
         $MainChoice = Read-Host "Choose an option"
