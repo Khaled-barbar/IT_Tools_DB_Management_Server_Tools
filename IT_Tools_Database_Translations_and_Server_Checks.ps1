@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.6'
+$Script:ToolVersion = [version]'7.0.7'
 $Script:ToolReleaseDate = '2026-08-12'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -165,6 +165,7 @@ function Get-CurrentScriptFolder {
 }
 
 function Show-ITToolsDeveloperBanner {
+    Write-Host 'Developer: ⇓⇓⇓⇓' -ForegroundColor Cyan
     $banner = @'
  _  __ _           _          _   _ ___              _
 | |/ /| |__   __ _| | ___  __| | | |__ )  __ _ _ ___| |__   __ _ _ __
@@ -172,7 +173,6 @@ function Show-ITToolsDeveloperBanner {
 | . \ | | | | (_| | |  __/ (_| | | | |_) | (_| | |  | |_) | (_| | |
 |_|\_\|_| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
 '@
-    Write-Host 'Developer: ⇓⇓⇓⇓' -ForegroundColor Cyan
     Write-Host $banner -ForegroundColor Green
     Write-Host "IT Tools version $($Script:ToolVersion) | Release date: $($Script:ToolReleaseDate)" -ForegroundColor Cyan
     Write-Host ''
