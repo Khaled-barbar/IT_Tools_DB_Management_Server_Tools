@@ -51,7 +51,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.5'
+$Script:ToolVersion = [version]'7.0.6'
 $Script:ToolReleaseDate = '2026-08-12'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -172,8 +172,8 @@ function Show-ITToolsDeveloperBanner {
 | . \| | | | (_| | |  __/ (_| | | | |_) | (_| | |  | |_) | (_| | |
 |_|\_\_| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
 '@
-    Write-Host $banner -ForegroundColor Green
     Write-Host 'Developer: ⇓⇓⇓⇓' -ForegroundColor Cyan
+    Write-Host $banner -ForegroundColor Green
     Write-Host "IT Tools version $($Script:ToolVersion) | Release date: $($Script:ToolReleaseDate)" -ForegroundColor Cyan
     Write-Host ''
 }
@@ -247,38 +247,6 @@ function Test-ITToolsScriptFolderWritable {
     }
 }
 
-function Get-ITToolsDesktopBackupFolder {
-    $desktopPath = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
-    if ([string]::IsNullOrWhiteSpace($desktopPath)) {
-        $desktopPath = Join-Path $env:USERPROFILE 'Desktop'
-    }
-    return (Join-Path $desktopPath 'IT Tools Backups')
-}
-
-function New-ITToolsScriptBackup {
-    param([Parameter(Mandatory = $true)][string]$ScriptPath)
-
-    $backupFolder = Get-ITToolsDesktopBackupFolder
-    [void](New-Item -Path $backupFolder -ItemType Directory -Force -ErrorAction Stop)
-    $baseName = [IO.Path]::GetFileNameWithoutExtension($ScriptPath)
-    $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
-    $backupPath = Join-Path $backupFolder ('{0}_{1}.ps1' -f $baseName, $timestamp)
-    while (Test-Path -LiteralPath $backupPath) {
-        Start-Sleep -Seconds 1
-        $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
-        $backupPath = Join-Path $backupFolder ('{0}_{1}.ps1' -f $baseName, $timestamp)
-    }
-
-    Copy-Item -LiteralPath $ScriptPath -Destination $backupPath -Force -ErrorAction Stop
-    $oldBackups = @(Get-ChildItem -LiteralPath $backupFolder -File -Filter "$($baseName)_*.ps1" -ErrorAction Stop |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -Skip 2)
-    foreach ($oldBackup in $oldBackups) {
-        Remove-Item -LiteralPath $oldBackup.FullName -Force -ErrorAction Stop
-    }
-    return $backupPath
-}
-
 function Invoke-ITToolsAutomaticUpdate {
     if ($SkipAutomaticUpdate.IsPresent) { return }
 
@@ -320,7 +288,6 @@ function Invoke-ITToolsAutomaticUpdate {
         }
 
         $filesToInstall = @()
-        $missingCompanionFiles = @()
         foreach ($file in $manifestFiles) {
             $relativePath = [string]$file.path
             $expectedHash = ([string]$file.sha256).ToUpperInvariant()
@@ -334,14 +301,6 @@ function Invoke-ITToolsAutomaticUpdate {
             if ($relativePath -eq $Script:ToolMainScriptFileName -or (Test-Path -LiteralPath (Join-Path $scriptFolder $relativePath) -PathType Leaf)) {
                 $filesToInstall += $file
             }
-            else {
-                $missingCompanionFiles += $relativePath
-            }
-        }
-
-        if ($missingCompanionFiles.Count -gt 0) {
-            Write-Host "Missing companion files will not be downloaded during the version update: $($missingCompanionFiles -join ', ')." -ForegroundColor DarkGray
-            Write-Host 'They will be downloaded only when you select the feature that requires them.' -ForegroundColor DarkGray
         }
 
         $stagingFolder = Join-Path ([IO.Path]::GetTempPath()) ('ITToolsUpdate_{0}' -f [guid]::NewGuid().ToString('N'))
@@ -373,8 +332,7 @@ function Invoke-ITToolsAutomaticUpdate {
                 throw ('The downloaded IT Tools script has syntax errors: {0}' -f (($parserErrors | Select-Object -First 1).Message))
             }
 
-            Write-StreamingLog -Percent 80 -Step 'Backup' -Description 'Saving the current IT Tools script on the Desktop.'
-            $backupPath = New-ITToolsScriptBackup -ScriptPath $scriptPath
+            Write-StreamingLog -Percent 80 -Step 'Install' -Description 'Installing the verified IT Tools update.'
             $orderedFiles = @($filesToInstall | Sort-Object @{ Expression = { if ($_.path -eq $Script:ToolMainScriptFileName) { 1 } else { 0 } } })
             foreach ($file in $orderedFiles) {
                 $relativePath = [string]$file.path
@@ -387,7 +345,7 @@ function Invoke-ITToolsAutomaticUpdate {
 
             Write-StreamingLog -Percent 100 -Step 'Update' -Description "IT Tools version $remoteVersion was installed."
             Write-Host ''
-            Write-Host "Update installed successfully. Previous script backup: $backupPath" -ForegroundColor Green
+            Write-Host 'Update installed successfully.' -ForegroundColor Green
             Write-Host ''
             Show-ITToolsDeveloperBanner
             Show-ITToolsDescription
