@@ -34,6 +34,7 @@ flowchart TD
 | `D4A-DiskSpaceAnalyzer.ps1` | Stand-alone or delegated disk scanning and visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone log timestamp-gap analysis with read sharing |
 | Companion SQL files | Site-standard configuration data executed only by their selected feature |
+| `CHANGELOG.md` | Human-readable record of significant releases, features, and production corrections |
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
@@ -226,6 +227,8 @@ sequenceDiagram
 
 The updater always includes the main script and refreshes companion files only when they already exist locally. If an official companion is missing, the selected feature downloads only that file, validates it against the manifest, and then saves it beside IT Tools. Site configuration, credentials, monitoring state, logs, and ignore rules are never release payloads.
 
+`CHANGELOG.md` complements this mechanism but is not an updater input. It explains meaningful changes to technicians and reviewers, while `version.txt` determines whether an update exists and `update-manifest.json` defines and verifies the downloadable release payload.
+
 ## Maintainability rules
 
 Standing maintenance conditions require every enhancement to preserve common behavior:
@@ -289,6 +292,7 @@ The next maturity step is automated tests for pure helper functions, SQL generat
 ```text
 IT_Tools_DB_Management_Server_Tools/
 |-- README.md
+|-- CHANGELOG.md
 |-- docs/
 |   |-- 01-project-overview.md
 |   |-- 02-technical-design.md

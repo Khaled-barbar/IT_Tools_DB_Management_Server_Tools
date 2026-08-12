@@ -72,6 +72,7 @@ This toolkit supports operational work; it does not replace change-management ap
 | `Find-LogGaps.ps1` | Stand-alone timestamp-gap analyzer for text logs |
 | `AssemblyRules_Luleburgas.sql` | Companion data for the Luleburgas system-settings workflow |
 | `RoleAdminLuleburgaz-DanoneStandard-090426.sql` | Companion data for the Luleburgas roles workflow |
+| `CHANGELOG.md` | Human-readable history of significant releases, features, and corrections |
 | `version.txt` | Public IT Tools release version |
 | `update-manifest.json` | Release file list and SHA-256 integrity hashes |
 

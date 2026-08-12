@@ -46,6 +46,8 @@ At startup, IT Tools compares its embedded version with `version.txt` on GitHub.
 
 If the script folder is not writable, run PowerShell as Administrator or move the full toolkit to a user-owned folder. Do not manually combine files from different releases.
 
+Before a planned production rollout, review [`CHANGELOG.md`](../CHANGELOG.md) for significant new features, behavior changes, and corrections. The changelog is informational; the updater relies on `version.txt` and `update-manifest.json` for version and integrity decisions.
+
 To skip the network update check for one troubleshooting run:
 
 ```powershell

@@ -209,7 +209,7 @@ Future impact tracking can add the number of active users, automated workflows, 
 ## Future improvements
 
 - add automated unit and integration tests for pure helpers and SQL-generation logic;
-- introduce a formal changelog and tagged GitHub releases;
+- continue maintaining the changelog and add tagged GitHub releases;
 - add signed releases or Authenticode signatures;
 - collect opt-in, non-sensitive usage and outcome metrics;
 - continue extracting large feature areas into modules;

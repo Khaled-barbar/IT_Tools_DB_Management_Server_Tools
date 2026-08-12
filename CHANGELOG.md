@@ -4,6 +4,8 @@ This file records significant changes to the D4A IT Automation and Operations To
 
 The main IT Tools script and the scheduled monitoring component use separate versions because monitor code can be upgraded independently while preserving site-specific configuration and Scheduled Tasks.
 
+For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
+
 ## 7.0.9 - 2026-08-12
 
 ### Added
