@@ -2,6 +2,13 @@
 
 An interactive Windows PowerShell toolkit for repeatable database administration, server diagnostics, application monitoring, and support operations in Decide4Action environments.
 
+## Documentation
+
+- 📘 **[Project Overview](docs/01-project-overview.md)** - Story, problem, solution, evolution, and impact
+- 🏗️ **[Technical Design](docs/02-technical-design.md)** - Architecture, implementation, safety, and monitoring
+- 🛠️ **[User Guide](docs/03-user-guide.md)** - Installation, workflows, commands, and troubleshooting
+- 📋 **[Changelog](CHANGELOG.md)** - Project evolution and significant release history
+
 Developer: Khaled Barbar
 
 ## Project at a glance
@@ -20,13 +27,6 @@ Developer: Khaled Barbar
 This project began as a collection of scripts for recurring support tasks. After moving into Level 2 Support, I was asked to help delegate more work safely to Level 1 Support. The scripts evolved into a centralized toolkit that turns complex interventions into guided, validated, and recoverable workflows.
 
 The goal is not simply to save commands. It is to reduce dependence on individual expertise, make procedures consistent, lower the risk of manual error, and give Level 1 technicians enough context and safeguards to complete appropriate operations independently.
-
-## Documentation
-
-- [Project overview](docs/01-project-overview.md): the operational problem, project story, impact, and lessons learned.
-- [Technical design](docs/02-technical-design.md): architecture, safety model, monitoring design, and update mechanism.
-- [Technical user guide](docs/03-user-guide.md): installation, menu reference, common workflows, troubleshooting, and escalation guidance.
-- [Changelog](CHANGELOG.md): significant releases, new capabilities, and production corrections.
 
 ## Main capabilities
 
