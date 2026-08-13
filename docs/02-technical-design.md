@@ -229,6 +229,21 @@ The updater always includes the main script and refreshes companion files only w
 
 `CHANGELOG.md` complements this mechanism but is not an updater input. It explains meaningful changes to technicians and reviewers, while `version.txt` determines whether an update exists and `update-manifest.json` defines and verifies the downloadable release payload.
 
+## Publication and confidentiality boundary
+
+Release integrity and public-repository safety are different controls. The manifest verifies that downloaded files match the published release; it does not prove that tracked content is authorized for public disclosure.
+
+Before sharing the repository externally or using it as a portfolio artifact, an authorized reviewer should inspect both the current tree and Git history for:
+
+- credentials, tokens, passwords, connection strings, and SMTP secrets;
+- real hostnames, private IP addresses, production URLs, email addresses, database names, usernames, and internal paths;
+- customer, site, machine, or environment identifiers;
+- exported data, logs, screenshots, configuration, state, and ignore rules;
+- proprietary SQL data or operational details in companion files;
+- deleted or corrected values that may remain in earlier commits.
+
+Automated pattern scanning is useful for triage but is not sufficient on its own. If sensitive material is found, removing it from the current file may not be enough; affected credentials may require rotation and repository history may require an approved cleanup. The repository intentionally excludes generated configuration and logs, but every release still requires this publication review.
+
 ## Maintainability rules
 
 Standing maintenance conditions require every enhancement to preserve common behavior:

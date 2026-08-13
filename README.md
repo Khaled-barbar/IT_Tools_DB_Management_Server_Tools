@@ -62,6 +62,8 @@ Database-writing features create timestamped backups of target tables, show prev
 
 This toolkit supports operational work; it does not replace change-management approval, environment-specific authorization, or escalation when results are unexpected.
 
+Before using this repository as a public portfolio artifact, complete an authorized confidentiality review of the current files and Git history. Operational examples, companion SQL, paths, URLs, email addresses, and environment names require human review even when automated pattern scans report no obvious secret. See the [publication and confidentiality boundary](docs/02-technical-design.md#publication-and-confidentiality-boundary).
+
 ## Repository contents
 
 | File | Purpose |
@@ -77,6 +79,8 @@ This toolkit supports operational work; it does not replace change-management ap
 | `update-manifest.json` | Release file list and SHA-256 integrity hashes |
 
 ## Versioning
+
+The current public releases are shown in **Project at a glance**. Version `7.0.0` established the current GitHub distribution and automatic-update release line; it is not the latest toolkit version.
 
 Patch releases are used for changes in the same release week, minor releases for a later release cycle, and major releases for substantial or breaking changes. The monitoring component has its own version because it can be updated while preserving each site's local configuration and Scheduled Tasks.
 

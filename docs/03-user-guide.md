@@ -86,6 +86,17 @@ Before confirming a database change:
 
 Do not manually delete timestamped backup tables until the retention and rollback need has been reviewed.
 
+## Quick recipes
+
+Use these routes when the goal is known but the menu path is not. Review the detailed workflow and safety prompts before committing a change.
+
+| Goal | Start with | Continue with |
+|---|---|---|
+| Translate missing content | Database Tools > Import/Export operations > Export Language File | Export missing translations only, translate without changing `RootId`, then use Import new Language with a translated CSV file. See [Translate missing French content](#translate-missing-french-content). |
+| Investigate database slowness | Database Tools > Database Performance | Check pending and heavy queries, SQL CPU history, and table disk usage. See [Investigate a slow application](#investigate-a-slow-application). |
+| Investigate a monitoring alert | Site Monitoring > Execute Monitoring Commands | Show and validate configuration, review matching run/error logs, then verify the reported service or endpoint. See [Monitoring reports an alert](#monitoring-reports-an-alert). |
+| Recover a toolkit database change | Database Tools > Rollback script changes | Select the feature/table and timestamp, compare the preview, obtain approval, and confirm the rollback. See [Recover a toolkit database change](#recover-a-toolkit-database-change). |
+
 ## Database Tools
 
 ### 1. Import/Export operations
@@ -417,7 +428,7 @@ Normal endpoint behavior:
 
 The monitor reports and collects evidence. It does not restart services.
 
-## Common workflows
+## Detailed workflows
 
 ### Translate missing French content
 
@@ -540,6 +551,7 @@ Stop and escalate when:
 ## Security and operational notes
 
 - Do not commit passwords, SMTP credentials, customer configuration, logs, state, or ignore rules to the repository.
+- Before external sharing, review both current files and Git history for environment identifiers, internal paths, URLs, email addresses, exported data, and proprietary SQL; automated scans do not replace an authorized human review.
 - Store credential files according to the site's approved access controls.
 - Prefer least-privilege SQL and Windows accounts.
 - Treat generated CSV and Excel files as potentially sensitive database exports.

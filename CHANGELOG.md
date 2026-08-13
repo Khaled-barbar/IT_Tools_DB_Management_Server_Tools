@@ -1,8 +1,12 @@
 # Changelog
 
+## How to read this changelog
+
 This file records significant changes to the D4A IT Automation and Operations Toolkit. Small wording, formatting, and other minor adjustments are intentionally omitted.
 
-The main IT Tools script and the scheduled monitoring component use separate versions because monitor code can be upgraded independently while preserving site-specific configuration and Scheduled Tasks.
+Entries reflect both feature development and production-driven refinement. Corrections that reduce operational risk, improve recovery, or make alerts more actionable are recorded alongside new capabilities.
+
+The main IT Tools script and the scheduled monitoring component use separate versions because monitor code can be upgraded independently while preserving site-specific configuration and Scheduled Tasks. A monitoring version listed under an IT Tools release identifies the monitor delivered with that toolkit release; it does not merge the two version histories.
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
