@@ -169,12 +169,6 @@ Representative improvement cycles include:
 | Single timeouts or brief resource spikes caused alerts | Consecutive-failure state, retries, thresholds, and cooldowns | Lower false-positive volume |
 | Scripts had to be redistributed manually | Manifest-based automatic updates | Scalable delivery of fixes and new capabilities |
 
-### Monitoring refinement as operational learning
-
-The monitoring component illustrates the project's production-feedback cycle particularly well. Early checks could report technically abnormal events that were not yet operationally actionable, such as one SQL timeout, a brief resource spike, or a slow but reachable endpoint. Instead of treating every signal as a failure, the monitoring design was refined to distinguish transient degradation from sustained incidents.
-
-Service state is now evaluated before dependent health evidence, selected checks retry, CPU and memory alerts require consecutive high readings, Data Collector health tracks persistence and recovery, and noisy known events are filtered. Diagnostics are still recorded even when no email is sent. This preserves evidence while reducing alert fatigue and making notifications more actionable.
-
 ## Impact and results
 
 The repository does not yet contain measured hours-saved or adoption statistics, so this project does not claim unverified numbers. Its demonstrated operational impact is qualitative:
@@ -188,25 +182,7 @@ The repository does not yet contain measured hours-saved or adoption statistics,
 - updates can be deployed centrally while preserving local settings;
 - new features inherit standing maintenance rules instead of inventing behavior each time.
 
-### Impact measurement plan
-
-The next evaluation step is to collect a small set of defensible operational measures rather than estimate benefits retrospectively:
-
-| Measure | Evidence to collect | Intended use |
-|---|---|---|
-| Technicians enabled | Approved Level 1 and Level 2 users by release | Measure adoption and knowledge distribution |
-| Recurring procedures standardized | Supported workflows mapped to approved procedures | Show automation coverage |
-| Toolkit executions | Non-sensitive aggregate monthly runs by feature | Identify usage and training needs |
-| Handling effort | Median steps or elapsed time before and after automation | Quantify efficiency without inventing hours saved |
-| Monitoring quality | Sites covered, actionable alerts, and suppressed false positives | Measure reliability and alert-noise improvement |
-
-These measures should be reported only after collection and validation. Repository size or function counts describe technical scope, not business impact.
-
-## Knowledge transfer and team enablement
-
-The toolkit converts tacit Level 2 operational knowledge into guided workflows that Level 1 technicians can follow within approved boundaries. Each workflow combines the command with the context that makes it safe: target validation, prerequisites, previews, typed confirmations, backups, progress, diagnostic evidence, and escalation conditions.
-
-This approach institutionalizes knowledge instead of merely storing scripts. Procedures become repeatable, corrections benefit every user through automatic updates, and experienced technicians can focus on exceptions while retaining clear stop points for work that still requires escalation.
+Future impact tracking can add the number of active users, automated workflows, sites monitored, monthly executions, avoided manual steps, and estimated handling time before and after automation.
 
 ## What this project demonstrates
 
@@ -243,5 +219,4 @@ This approach institutionalizes knowledge instead of merely storing scripts. Pro
 
 ## Resume-ready summary
 
-- Designed and evolved an internal PowerShell toolkit that standardizes database administration, server diagnostics, monitoring, and recurring support workflows while enabling Level 1 technicians to perform approved interventions through validation, backups, rollback, logging, and escalation safeguards.
-- Implemented configuration-preserving monitoring updates and a GitHub release workflow with version checks, safe-path validation, SHA-256 verification, PowerShell parsing, and automatic distribution across differently configured sites.
+Designed and developed an internal PowerShell automation toolkit to standardize database administration, server diagnostics, monitoring, and recurring technical-support workflows, with guided safeguards, recoverable changes, and verified automatic updates for team-wide use.
