@@ -86,6 +86,53 @@ Before confirming a database change:
 
 Do not manually delete timestamped backup tables until the retention and rollback need has been reviewed.
 
+## Common workflows
+
+### Translate missing French content
+
+1. Database Tools > Import/Export operations > Export Language File.
+2. Select French and choose missing translations only.
+3. Translate the target column without changing RootId.
+4. Return to Import new Language with a translated CSV file.
+5. Select French, choose the translated CSV, review counts, and type `IMPORT`.
+6. Review the preview and commit only when the sample is correct.
+
+### Investigate a slow application
+
+1. Run Database Performance > Pending SQL queries.
+2. Inspect heavy queries in a relevant time window.
+3. Review SQL Server CPU history and table disk usage.
+4. Run Local server and file tools > Check system health.
+5. Review the monitor's current run/error logs and Nginx evidence.
+6. Collect timestamps, session IDs, query text, resource readings, and relevant log samples before escalation.
+
+### Investigate a monitoring alert
+
+1. Read the issue key and timestamp in the notification.
+2. Review the matching `error_log` and `run_log` entries.
+3. Check the current monitoring configuration and state.
+4. Verify the reported site, API, service, or resource independently.
+5. Review Watchdog or application-log evidence when referenced.
+6. Use a temporary cooldown only for a known issue under active management; otherwise collect the evidence and escalate.
+
+### Investigate missing Data Collector events
+
+1. Trace events in Data Collector for the affected date.
+2. Set the incident time window.
+3. Search the machine, event, or activity identifier.
+4. Exclude known noisy terms if needed.
+5. Run `Find-LogGaps.ps1` separately when checking for timestamp gaps over 60 seconds.
+6. Compare with monitor and Watchdog evidence before escalation.
+
+### Recover a toolkit database change
+
+1. Stop further changes to the target table.
+2. Open Database Tools > Rollback script changes.
+3. Select the source feature/table and the correct timestamp.
+4. Compare counts and preview.
+5. Obtain approval and type `ROLLBACK`.
+6. Record the restored backup and the new safety backup.
+
 ## Database Tools
 
 ### 1. Import/Export operations
@@ -416,44 +463,6 @@ Normal endpoint behavior:
 - Nginx errors: alert only above 20 errors/minute for two consecutive minutes.
 
 The monitor reports and collects evidence. It does not restart services.
-
-## Common workflows
-
-### Translate missing French content
-
-1. Database Tools > Import/Export operations > Export Language File.
-2. Select French and choose missing translations only.
-3. Translate the target column without changing RootId.
-4. Return to Import new Language with a translated CSV file.
-5. Select French, choose the translated CSV, review counts, and type `IMPORT`.
-6. Review the preview and commit only when the sample is correct.
-
-### Investigate a slow application
-
-1. Run Database Performance > Pending SQL queries.
-2. Inspect heavy queries in a relevant time window.
-3. Review SQL Server CPU history and table disk usage.
-4. Run Local server and file tools > Check system health.
-5. Review the monitor's current run/error logs and Nginx evidence.
-6. Collect timestamps, session IDs, query text, resource readings, and relevant log samples before escalation.
-
-### Investigate missing Data Collector events
-
-1. Trace events in Data Collector for the affected date.
-2. Set the incident time window.
-3. Search the machine, event, or activity identifier.
-4. Exclude known noisy terms if needed.
-5. Run `Find-LogGaps.ps1` separately when checking for timestamp gaps over 60 seconds.
-6. Compare with monitor and Watchdog evidence before escalation.
-
-### Recover a toolkit database change
-
-1. Stop further changes to the target table.
-2. Open Database Tools > Rollback script changes.
-3. Select the source feature/table and the correct timestamp.
-4. Compare counts and preview.
-5. Obtain approval and type `ROLLBACK`.
-6. Record the restored backup and the new safety backup.
 
 ## Troubleshooting
 

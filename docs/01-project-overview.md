@@ -155,6 +155,8 @@ flowchart LR
     H --> I["Alert-noise reduction and ongoing refinement"]
 ```
 
+Monitoring became its own production-feedback loop. Early versions collected useful signals but could treat a single SQL timeout, a brief resource spike, or a slow yet reachable endpoint as an alert. Reviewing real notifications led to service-first checks, retries, consecutive-run thresholds, `LastHealthy` tracking, Nginx rate windows, cooldowns, and recovery cleanup. Degraded conditions are still logged for troubleshooting, while email is reserved for unreachable endpoints, stopped services, and failures that meet their alert criteria. This progression from detection to actionable alerting is one of the clearest examples of how production feedback shaped the toolkit.
+
 Representative improvement cycles include:
 
 | Observed problem | Improvement introduced | Operational benefit |
@@ -181,6 +183,8 @@ The repository does not yet contain measured hours-saved or adoption statistics,
 - site monitoring detects issues without restarting services or changing application state;
 - updates can be deployed centrally while preserving local settings;
 - new features inherit standing maintenance rules instead of inventing behavior each time.
+
+Knowledge transfer is also an operational result, not only a design objective. The toolkit captures the sequence, validation, safeguards, diagnostic output, logging, and escalation boundaries that previously depended on experienced technicians. This turns tacit Level 2 knowledge into repeatable procedures while keeping authorization and exception handling explicit.
 
 Future impact tracking can add the number of active users, automated workflows, sites monitored, monthly executions, avoided manual steps, and estimated handling time before and after automation.
 
@@ -219,4 +223,4 @@ Future impact tracking can add the number of active users, automated workflows, 
 
 ## Resume-ready summary
 
-Designed and developed an internal PowerShell automation toolkit to standardize database administration, server diagnostics, monitoring, and recurring technical-support workflows, with guided safeguards, recoverable changes, and verified automatic updates for team-wide use.
+Designed and evolved a PowerShell-based IT operations toolkit that standardized recurring database, server, and monitoring procedures, embedded backup and rollback safeguards, and enabled Level 1 Support to complete approved tasks through guided workflows distributed by verified automatic updates.
