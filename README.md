@@ -39,10 +39,13 @@ The goal is not simply to save commands. It is to reduce dependence on individua
 
 ## Quick start
 
-1. Download or clone the repository to a user-writable folder such as `Desktop\IT Tools` or `Documents\IT Tools`.
-2. Run `IT_Tools_Database_Translations_and_Server_Checks.ps1` in Windows PowerShell 5.1.
-3. Run as Administrator when the selected server, permissions, monitoring, or Scheduled Task operation requires elevation.
-4. Use the numbered menus. Every workflow supports `q` to return to the previous menu.
+1. [Download the latest IT Tools PowerShell script](https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/IT_Tools_Database_Translations_and_Server_Checks.ps1), or clone the complete repository.
+2. Save it in a user-writable folder such as `Desktop\IT Tools` or `Documents\IT Tools`.
+3. To run the tool as the current Windows user, right-click `IT_Tools_Database_Translations_and_Server_Checks.ps1` and select **Run with PowerShell**.
+4. Run PowerShell as Administrator only when the selected server, permissions, monitoring, or Scheduled Task operation requires elevation.
+5. Use the numbered menus. Every workflow supports `q` to return to the previous menu.
+
+You can also start the tool from Windows PowerShell 5.1:
 
 ```powershell
 .\IT_Tools_Database_Translations_and_Server_Checks.ps1
