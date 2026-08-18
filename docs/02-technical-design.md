@@ -40,7 +40,7 @@ flowchart TD
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
-At release 7.1.2, the main script contains approximately 9,200 lines and 237 PowerShell functions. The monitor contains approximately 3,800 lines and 88 functions. These counts describe implementation scope, not business impact.
+At release 7.1.3, the main script contains approximately 9,200 lines and 237 PowerShell functions. The monitor contains approximately 3,800 lines and 88 functions. These counts describe implementation scope, not business impact.
 
 ## Main script architecture
 
@@ -147,7 +147,7 @@ The disk analyzer remains a separate script. In elevated MFT mode it enumerates 
 
 IT Tools locates the D4A Configuration folder from Windows service metadata or accepts an explicit folder. Before creating monitor files, it resolves Node.js/npm through the command path, standard installation folders, environment variables, and registry data. If absent, an administrator can approve installation of the official Node.js LTS WinGet package with persistent progress. The tool then installs nodemailer, copies and unblocks the monitor, creates the external JSON configuration under `monitor-logs`, and can register silent recurring and daily-summary Scheduled Tasks under `SYSTEM`.
 
-The configuration records the absolute `node.exe` and nodemailer paths so tasks running as `SYSTEM` do not depend on the interactive user's `PATH`. A prior deployment that stopped specifically between configuration creation and nodemailer installation can be identified from the matching template hash, valid JSON, missing module, and absence of related Scheduled Tasks. The operator can safely resume that deployment; its configuration is backed up before the runtime paths are repaired.
+The configuration records the absolute `node.exe` and nodemailer paths so tasks running as `SYSTEM` do not depend on the interactive user's `PATH`. npm executes in a background job, but informational stderr such as `npm notice` is treated as output rather than a PowerShell failure; the native npm exit code determines success. A prior deployment that stopped before scheduling can be identified from the matching template hash, valid JSON, and absence of related Scheduled Tasks, whether nodemailer is still missing or completed before an earlier false failure. The operator can safely resume that deployment; its configuration is backed up before the runtime paths are repaired.
 
 Each frontend site has a friendly display name. The corresponding API health endpoint is derived automatically. Multiple site addresses and names remain aligned in configuration.
 

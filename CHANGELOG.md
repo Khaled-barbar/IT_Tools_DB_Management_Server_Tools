@@ -6,6 +6,14 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.3 - 2026-08-18
+
+### Corrected
+
+- Corrected the PowerShell 5.1 nodemailer installation job so informational `npm notice` output on stderr does not become a false failure when npm returns exit code `0`.
+- npm installation success and failure are now determined from the native exit code; real failures retain a concise portion of npm output in the full daily error log.
+- Extended safe `RESUME` detection to a deployment where nodemailer completed before the false job failure but Scheduled Tasks were not yet created.
+
 ## 7.1.2 - 2026-08-18
 
 ### Corrected

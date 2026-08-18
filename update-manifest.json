@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "7.1.2",
+  "version": "7.1.3",
   "releaseDate": "2026-08-18",
   "files": [
     {
@@ -17,7 +17,7 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "B36F046828F8EA162A15546D6B967AE71CF6240201B7E95F01310490B0F66884"
+      "sha256": "4DB37CEDA7F0DE2F4A96F495762FB14C5B69D1994E513FBF1C59988D13AD0D6A"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",

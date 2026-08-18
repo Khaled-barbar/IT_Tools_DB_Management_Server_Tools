@@ -414,7 +414,7 @@ Expected result:
 - Scheduled Task runs silently, including when users are logged out;
 - test email confirms delivery.
 
-If an earlier deployment stopped after creating the monitor/configuration but before nodemailer was installed, the tool can identify that specific incomplete state. It displays **Resume incomplete deployment** and requires `RESUME`; the existing JSON is preserved and backed up while the missing runtime paths are repaired. An active or modified monitor is never treated as an incomplete deployment and must be managed through **Update Existing Monitoring Settings**.
+If an earlier deployment stopped after creating the monitor/configuration but before Scheduled Tasks were created, the tool can identify that specific incomplete state even when nodemailer finished installing before the error appeared. It displays **Resume incomplete deployment** and requires `RESUME`; the existing JSON is preserved and backed up while runtime paths are repaired. An active or modified monitor is never treated as an incomplete deployment and must be managed through **Update Existing Monitoring Settings**.
 
 ### Update Existing Monitoring Settings
 

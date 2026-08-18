@@ -53,7 +53,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.2'
+$Script:ToolVersion = [version]'7.1.3'
 $Script:ToolReleaseDate = '2026-08-18'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1707,12 +1707,43 @@ function Install-SiteMonitoringNodemailer {
         param([pscustomobject]$InstallSettings)
         $ErrorActionPreference = 'Stop'
         Set-Location -LiteralPath $InstallSettings.WorkingFolder
-        if (-not (Test-Path -LiteralPath (Join-Path $InstallSettings.WorkingFolder 'package.json') -PathType Leaf)) {
-            & $InstallSettings.NpmExecutable 'init' '-y'
-            if ($LASTEXITCODE -ne 0) { throw "npm init failed with exit code $LASTEXITCODE." }
+
+        function Invoke-NpmInstallationCommand {
+            param(
+                [Parameter(Mandatory = $true)][string]$Executable,
+                [Parameter(Mandatory = $true)][string[]]$Arguments,
+                [Parameter(Mandatory = $true)][string]$Operation
+            )
+
+            # Windows PowerShell 5.1 exposes native stderr as ErrorRecord objects.
+            # npm notices are harmless when npm itself returns exit code 0.
+            $previousPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $commandOutput = @(& $Executable @Arguments 2>&1)
+                $exitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $previousPreference
+            }
+
+            if ($null -eq $exitCode -or $exitCode -ne 0) {
+                $outputText = (@($commandOutput | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ' ')
+                if ($outputText.Length -gt 1500) { $outputText = $outputText.Substring(0, 1500) + '...' }
+                throw "$Operation failed with npm exit code $exitCode. Output: $outputText"
+            }
         }
-        & $InstallSettings.NpmExecutable 'install' 'nodemailer' '--save'
-        if ($LASTEXITCODE -ne 0) { throw "npm install nodemailer failed with exit code $LASTEXITCODE." }
+
+        if (-not (Test-Path -LiteralPath (Join-Path $InstallSettings.WorkingFolder 'package.json') -PathType Leaf)) {
+            Invoke-NpmInstallationCommand `
+                -Executable ([string]$InstallSettings.NpmExecutable) `
+                -Arguments @('init', '-y') `
+                -Operation 'npm init'
+        }
+        Invoke-NpmInstallationCommand `
+            -Executable ([string]$InstallSettings.NpmExecutable) `
+            -Arguments @('install', 'nodemailer', '--save', '--no-audit', '--no-fund') `
+            -Operation 'npm install nodemailer'
     } -Argument ([pscustomobject]@{ WorkingFolder = $DeploymentFolder; NpmExecutable = $NpmExecutable })
 
     $modulePath = Join-Path $DeploymentFolder 'node_modules\nodemailer'
@@ -1726,13 +1757,11 @@ function Test-IsIncompleteSiteMonitoringDeployment {
     param(
         [Parameter(Mandatory = $true)][string]$TemplatePath,
         [Parameter(Mandatory = $true)][string]$TargetScriptPath,
-        [Parameter(Mandatory = $true)][string]$ConfigurationPath,
-        [Parameter(Mandatory = $true)][string]$DeploymentFolder
+        [Parameter(Mandatory = $true)][string]$ConfigurationPath
     )
 
     if (-not (Test-Path -LiteralPath $TargetScriptPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf) -or
-        (Test-Path -LiteralPath (Join-Path $DeploymentFolder 'node_modules\nodemailer') -PathType Container)) {
+        -not (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf)) {
         return $false
     }
 
@@ -2382,8 +2411,7 @@ function Show-AddSiteMonitoring {
             $resumeIncompleteDeployment = Test-IsIncompleteSiteMonitoringDeployment `
                 -TemplatePath $templatePath `
                 -TargetScriptPath $targetScriptPath `
-                -ConfigurationPath $configurationPath `
-                -DeploymentFolder $deploymentFolder
+                -ConfigurationPath $configurationPath
             if (-not $resumeIncompleteDeployment) {
                 throw "A monitor file already exists at $targetScriptPath. Use Update Existing Monitoring Settings so an active deployment is not overwritten."
             }
