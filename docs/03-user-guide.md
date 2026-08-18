@@ -56,11 +56,12 @@ To skip the network update check for one troubleshooting run:
 
 ## Navigation and common behavior
 
-The main menu has three areas:
+The main menu has four areas:
 
 1. Database Tools
 2. Local server and file tools
 3. Site Monitoring
+4. Logs
 
 Type the displayed number to select an action. Type `q` at a visible prompt to return to the previous menu. After results or errors, press any key when prompted.
 
@@ -73,6 +74,8 @@ For a database session, the script asks for:
 
 Always verify the `Connected to: server / database` line before continuing.
 
+Before the first persistent database write in an action, enter your full name when prompted. The tool will not perform the write unless it can append the intervention result to `C:\Users\edit_log.txt`. Read-only searches and diagnostics do not request a name.
+
 ## Safety rules for operators
 
 Before confirming a database change:
@@ -83,6 +86,8 @@ Before confirming a database change:
 4. Record the backup table name shown after the operation.
 5. Review the final counts or sample rows.
 6. If an error occurs after a backup or staging table is created, leave it in place and review the daily error log before retrying.
+
+After a database-writing action, verify the confirmation that the intervention was recorded. Use **Logs > Last Actions done by this script** to display the ten newest entries, including operator, action, selected variables, and result.
 
 Do not manually delete timestamped backup tables until the retention and rollback need has been reviewed.
 
@@ -418,6 +423,8 @@ This menu separates three operations:
 
 The configuration update creates a settings backup. Version update also backs up the installed monitor and Scheduled Task definitions. Do not delete `monitor-backups` until the new version has completed normal runs.
 
+The monitor also checks GitHub for its own newer verified version whenever it runs, including Scheduled Task and stand-alone executions. It validates the release manifest, SHA-256, version metadata, release date, and PowerShell syntax; then backs up the installed script, configuration, and related task definitions before replacement. The current health check continues with the loaded version, and the new code is used on the next run. Use `-SkipAutomaticUpdate` only for a temporary troubleshooting execution.
+
 ### Execute Monitoring Commands
 
 The menu exposes common management and test commands:
@@ -435,6 +442,7 @@ The menu exposes common management and test commands:
 | Run without email | `-DisableEmail` |
 | Set cooldown | `-SetIssueCooldown 'issue-key' -IssueCooldownDuration '12h'` |
 | Clear cooldown | `-ClearIssueCooldown 'issue-key'` |
+| Skip monitor update check once | `-SkipAutomaticUpdate` |
 
 Use the IT Tools menu when possible because it discovers installed monitors, displays the exact command, and records command failures in the main daily error log.
 
@@ -463,6 +471,12 @@ Normal endpoint behavior:
 - Nginx errors: alert only above 20 errors/minute for two consecutive minutes.
 
 The monitor reports and collects evidence. It does not restart services.
+
+## Logs
+
+### Last Actions done by this script
+
+This read-only menu displays the ten newest lines from `C:\Users\edit_log.txt`. Each database intervention line includes its date/time, the operator name entered before execution, the intervention name, selected non-sensitive variables, and a `Success` or `Failed` result. The daily detailed error files remain under the IT Tools `Logs` folder and provide stack traces when troubleshooting is required.
 
 ## Troubleshooting
 

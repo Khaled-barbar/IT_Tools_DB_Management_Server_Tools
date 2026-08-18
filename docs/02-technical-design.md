@@ -15,6 +15,7 @@ flowchart TD
     Main --> DB["Database feature functions"]
     Main --> Server["Server and file feature functions"]
     Main --> Deploy["Monitoring deployment and management"]
+    Main --> Audit["Database intervention log viewer"]
     Main --> Disk["D4A Disk Space Analyzer"]
     Main --> SQLFiles["Verified companion SQL files"]
     Deploy --> Monitor["D4A Scheduled Monitor"]
@@ -23,14 +24,15 @@ flowchart TD
     DB --> SqlServer["SQL Server"]
     Server --> Windows["Windows Server and filesystem"]
     Monitor --> App["D4A sites, APIs, services, and diagnostics"]
+    DB --> EditLog["C:/Users/edit_log.txt"]
 ```
 
 ## Component map
 
 | Component | Responsibility |
 |---|---|
-| `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main menus, input collection, shared helpers, database workflows, server tools, monitor deployment, and updates |
-| `D4A-ScheduledMonitor-v5.ps1` | Unattended checks, stateful alert evaluation, email delivery, logs, retention, and monitor management commands |
+| `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main menus, input collection, shared helpers, database workflows, intervention audit, server tools, monitor deployment, and updates |
+| `D4A-ScheduledMonitor-v5.ps1` | Unattended checks, autonomous verified updates, stateful alert evaluation, email delivery, logs, retention, and monitor management commands |
 | `D4A-DiskSpaceAnalyzer.ps1` | Stand-alone or delegated disk scanning and visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone log timestamp-gap analysis with read sharing |
 | Companion SQL files | Site-standard configuration data executed only by their selected feature |
@@ -38,7 +40,7 @@ flowchart TD
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
-At release 7.1.0, the main script contains approximately 8,500 lines and 219 PowerShell functions. The monitor contains approximately 3,600 lines and 81 functions. These counts describe implementation scope, not business impact.
+At release 7.1.1, the main script contains approximately 8,900 lines and 230 PowerShell functions. The monitor contains approximately 3,800 lines and 88 functions. These counts describe implementation scope, not business impact.
 
 ## Main script architecture
 
@@ -46,7 +48,7 @@ The main script is organized around shared services and feature suites:
 
 1. Startup initializes shared state, checks the release version, and invokes the automatic updater when needed.
 2. Shared helpers provide navigation, logging, progress, timeouts, password input, SQL access, validation, backup creation, and result formatting.
-3. The main menu routes to Database Tools, Local server and file tools, or Site Monitoring.
+3. The main menu routes to Database Tools, Local server and file tools, Site Monitoring, or Logs.
 4. Feature functions collect and validate inputs before invoking SQL, filesystem, service, or child-script operations.
 5. Exceptions are caught at feature boundaries and written to a daily log before control returns to the menu.
 
@@ -88,6 +90,12 @@ This naming convention lets the global rollback feature discover backups, group 
 ### Preview and confirmation
 
 Broad or destructive workflows show the target and a sample or diagnostic preview, then require a typed action such as `IMPORT`, `MIGRATE`, `COMMIT`, `DELETE`, `RESTORE`, or `ROLLBACK`. A mismatched response cancels the change.
+
+### Operator intervention audit
+
+The shared SQL execution boundaries classify persistent database-write statements separately from read-only queries and writes limited to temporary tables or table variables. Immediately before the first persistent write in an action, the tool verifies that `C:\Users\edit_log.txt` is writable and requires the operator's full name. If the audit file cannot be opened, the database change is blocked.
+
+One line is appended when the action completes. It contains the intervention timestamp, operator, menu/action context, selected non-sensitive variables, and `Success` or `Failed` with a concise reason. Passwords, credentials, connection strings, tokens, full SQL text, and other secrets are excluded. The fourth main menu exposes the ten newest entries without changing the file.
 
 ### Transactions and data rules
 
@@ -188,7 +196,7 @@ Monitoring logic was refined using observed production alerts:
 
 ### Monitoring files and lifecycle
 
-The monitor keeps daily `run_log_yyyyMMdd.txt` and `error_log_yyyyMMdd.txt` files, a single active `ignore-rules.txt`, a state JSON file for consecutive-run decisions, a configuration JSON file, and a locally generated README. Dated logs retain the current day and prior four days by default. Ignore rules rotate on the 3rd, 13th, and 23rd, retain the three newest archives, and carry active rules into the new file.
+The monitor keeps daily `run_log_yyyyMMdd.txt` and `error_log_yyyyMMdd.txt` files, a single active `ignore-rules.txt`, a state JSON file for consecutive-run decisions, a configuration JSON file, and a locally generated README. Dated logs retain the current day and prior four days by default. Ignore rules rotate on the 3rd, 13th, and 23rd, retain the three newest archives, and carry active rules into the new file. Verified monitor-update backups are stored below `monitor-update-backups`.
 
 ## Logging and error handling
 
@@ -199,6 +207,8 @@ Logs\tools_script_error_log_yyyyMMdd.txt
 ```
 
 The entry includes timestamp, context, selected SQL server/database when relevant, exception type, category, invocation, script stack, and exception details. Short messages are displayed directly; long messages are abbreviated and point the user to the log.
+
+Database-change accountability is kept separately in `C:\Users\edit_log.txt`. This concise audit file records successful and failed write interventions and is readable through **Logs > Last Actions done by this script**.
 
 Long operations use persistent timestamped progress lines with percentage, step, and description. This avoids the transient behavior of `Write-Progress` and makes module installation, imports, backups, searches, and deployment understandable in remote support sessions.
 
@@ -227,6 +237,8 @@ sequenceDiagram
 
 The updater always includes the main script and refreshes companion files only when they already exist locally. If an official companion is missing, the selected feature downloads only that file, validates it against the manifest, and then saves it beside IT Tools. Site configuration, credentials, monitoring state, logs, and ignore rules are never release payloads.
 
+The monitoring script independently performs the same release check on every execution unless `-SkipAutomaticUpdate` is supplied. It validates the manifest entry, SHA-256, monitor version and release-date headers, and PowerShell syntax. Before replacing its installed file, it backs up the current script, external JSON configuration, and matching Scheduled Task definitions. The installed filename and task settings remain unchanged; the current process finishes with the already loaded code and the verified update starts on the next execution. Update failure is logged and does not prevent the health check from continuing.
+
 `CHANGELOG.md` complements this mechanism but is not an updater input. It explains meaningful changes to technicians and reviewers, while `version.txt` determines whether an update exists and `update-manifest.json` defines and verifies the downloadable release payload.
 
 ## Maintainability rules
@@ -238,11 +250,13 @@ Standing maintenance conditions require every enhancement to preserve common beh
 - `q` at visible prompts;
 - progress for long-running work;
 - full daily error logs;
+- operator attribution and concise database intervention results in `C:\Users\edit_log.txt`;
 - finite timeouts for deep scans and heavy system queries;
 - safe SQL identifier handling;
 - syntax validation before publication;
 - synchronized release version and manifest hashes;
 - preservation of local monitoring configuration during updates.
+- autonomous verified monitor update checks that fail safely without stopping health monitoring.
 
 These rules convert lessons from earlier defects into constraints for future features.
 

@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.5.1
-# D4A-Monitor-Release-Date: 2026-08-12
+# D4A-Monitor-Version: 6.6.0
+# D4A-Monitor-Release-Date: 2026-08-18
 
 <#
 .SYNOPSIS
@@ -38,6 +38,12 @@
     the JSON configuration. Their matching D4A API endpoints are derived and
     checked automatically during each normal monitoring run.
 
+    Every execution checks the official GitHub release for a newer monitoring
+    version. A newer script is installed only after manifest, SHA-256, and
+    PowerShell syntax validation. Local configuration, logs, script filename,
+    and Scheduled Task definitions are preserved and backed up. Use
+    -SkipAutomaticUpdate only for a temporary troubleshooting run.
+
 .EXAMPLE
     .\D4A-ScheduledMonitor-v5.ps1 -SiteAddress 'https://akbou.decide4action.com'
 
@@ -71,6 +77,8 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath,
+
+    [switch]$SkipAutomaticUpdate,
 
     [switch]$ValidateConfiguration,
 
@@ -212,8 +220,11 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.5.1'
-$script:MonitorReleaseDate = '2026-08-12'
+$script:MonitorVersion = '6.6.0'
+$script:MonitorReleaseDate = '2026-08-18'
+$script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
+$script:MonitorUpdateManifestFileName = 'update-manifest.json'
+$script:MonitorReleaseScriptFileName = 'D4A-ScheduledMonitor-v5.ps1'
 $script:EndpointSlowLogMs = 4500
 $script:ResourceAlertPercent = 90
 $script:ResourceConsecutiveRunsRequired = 2
@@ -235,6 +246,192 @@ $script:MonitorLogDirectory = $null
 $script:MonitorStatePath = $null
 $script:LoggingReady = $false
 $script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
+
+function Get-MonitorAutomaticUpdateUri {
+    param([Parameter(Mandatory = $true)][string]$RelativePath)
+
+    if ($RelativePath -match '(?i)(\.\.|^[\\/]|^[A-Za-z]:)') {
+        throw "Unsafe monitoring update path: $RelativePath"
+    }
+    $encodedPath = (@($RelativePath -split '[\\/]' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
+    return "$($script:MonitorRepositoryRawRoot)/$encodedPath"
+}
+
+function Get-MonitorScriptReleaseMetadata {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $content = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    if ($content -notmatch '(?m)^# D4A-Monitor-Version:\s*([^\r\n]+)\s*$') {
+        throw "Monitoring version metadata is missing from $Path"
+    }
+    $version = [version]$matches[1].Trim()
+    if ($content -notmatch '(?m)^# D4A-Monitor-Release-Date:\s*([^\r\n]+)\s*$') {
+        throw "Monitoring release-date metadata is missing from $Path"
+    }
+    $releaseDate = $matches[1].Trim()
+
+    $tokens = $null
+    $parseErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) {
+        throw "Downloaded monitoring script failed PowerShell syntax validation: $($parseErrors[0].Message)"
+    }
+
+    return [pscustomobject]@{
+        Version     = $version
+        ReleaseDate = $releaseDate
+    }
+}
+
+function Test-MonitorScriptFolderWritable {
+    $testPath = Join-Path $script:ScriptDirectory ('.monitor_update_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($testPath, 'monitor update permission check', $script:Utf8NoBom)
+        Remove-Item -LiteralPath $testPath -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Remove-Item -LiteralPath $testPath -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+
+function Get-MonitorRelatedScheduledTasks {
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Export-ScheduledTask -ErrorAction SilentlyContinue)) {
+        throw 'Scheduled Task cmdlets are unavailable, so monitoring task definitions cannot be backed up safely.'
+    }
+
+    return @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $task = $_
+        @($task.Actions | Where-Object {
+            $arguments = [string]$_.Arguments
+            -not [string]::IsNullOrWhiteSpace($arguments) -and
+            $arguments.IndexOf($script:ScriptPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        }).Count -gt 0
+    })
+}
+
+function New-MonitorAutomaticUpdateBackup {
+    param([Parameter(Mandatory = $true)][version]$TargetVersion)
+
+    $backupRoot = Join-Path $script:MonitorLogDirectory 'monitor-update-backups'
+    $backupFolder = Join-Path $backupRoot ('{0}_to_{1}' -f (Get-Date -Format 'yyyyMMddHHmmss'), $TargetVersion)
+    [void](New-Item -Path $backupFolder -ItemType Directory -Force -ErrorAction Stop)
+
+    Copy-Item -LiteralPath $script:ScriptPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ScriptPath))) -ErrorAction Stop
+    if (-not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -and
+        (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ResolvedConfigPath))) -ErrorAction Stop
+    }
+
+    $relatedTasks = @(Get-MonitorRelatedScheduledTasks)
+    if ($relatedTasks.Count -eq 0) {
+        [IO.File]::WriteAllText((Join-Path $backupFolder 'scheduled-tasks.txt'), 'No related Scheduled Tasks were found.', $script:Utf8NoBom)
+    }
+    else {
+        foreach ($task in $relatedTasks) {
+            $safeTaskName = ('{0}{1}' -f $task.TaskPath.Trim('\').Replace('\', '_'), $task.TaskName) -replace '[^A-Za-z0-9_.-]', '_'
+            $taskXml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+            [IO.File]::WriteAllText((Join-Path $backupFolder ($safeTaskName + '.xml')), [string]$taskXml, $script:Utf8NoBom)
+        }
+    }
+
+    $metadata = @(
+        'BackupTime={0}' -f (Get-Date).ToString('o'),
+        'InstalledScript={0}' -f $script:ScriptPath,
+        'PreviousVersion={0}' -f $script:MonitorVersion,
+        'TargetVersion={0}' -f $TargetVersion,
+        'Configuration={0}' -f $script:ResolvedConfigPath,
+        'ScheduledTasks={0}' -f $relatedTasks.Count
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText((Join-Path $backupFolder 'update-details.txt'), $metadata, $script:Utf8NoBom)
+    return $backupFolder
+}
+
+function Invoke-MonitorAutomaticUpdate {
+    if ($SkipAutomaticUpdate.IsPresent) {
+        Write-RunLog -Category Update -Color DarkGray -Message 'Automatic monitoring update check was skipped for this run.'
+        return
+    }
+
+    $temporaryFolder = $null
+    $backupFolder = $null
+    try {
+        Write-RunLog -Category Update -Color DarkGray -Message ('Checking GitHub for a monitoring update. Current version={0}.' -f $script:MonitorVersion)
+        $manifestResponse = Invoke-WebRequest `
+            -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorUpdateManifestFileName) `
+            -UseBasicParsing `
+            -TimeoutSec 15 `
+            -ErrorAction Stop
+        $manifest = ([string]$manifestResponse.Content) | ConvertFrom-Json -ErrorAction Stop
+        $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $script:MonitorReleaseScriptFileName })
+        if ($entries.Count -ne 1) {
+            throw "The release manifest does not contain one unique entry for $($script:MonitorReleaseScriptFileName)."
+        }
+        $expectedHash = ([string]$entries[0].sha256).Trim().ToUpperInvariant()
+        if ($expectedHash -notmatch '^[A-F0-9]{64}$') { throw 'The monitoring manifest SHA-256 value is invalid.' }
+
+        $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorUpdate_{0}' -f [guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
+        $downloadedScript = Join-Path $temporaryFolder $script:MonitorReleaseScriptFileName
+        Invoke-WebRequest `
+            -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorReleaseScriptFileName) `
+            -OutFile $downloadedScript `
+            -UseBasicParsing `
+            -TimeoutSec 60 `
+            -ErrorAction Stop
+
+        $downloadedHash = (Get-FileHash -LiteralPath $downloadedScript -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        if ($downloadedHash -ne $expectedHash) { throw 'The downloaded monitoring script failed SHA-256 verification.' }
+        $remoteMetadata = Get-MonitorScriptReleaseMetadata -Path $downloadedScript
+        $currentVersion = [version]$script:MonitorVersion
+        if ($remoteMetadata.Version -le $currentVersion) {
+            Write-RunLog -Category Update -Color DarkGray -Message ('Monitoring version {0} is current; no update was required.' -f $currentVersion)
+            return
+        }
+        if (-not (Test-MonitorScriptFolderWritable)) {
+            throw "A newer monitoring version $($remoteMetadata.Version) is available, but the script folder is not writable: $($script:ScriptDirectory)"
+        }
+
+        Write-RunLog -Category Update -Color Cyan -Message ('Verified monitoring update {0}, released {1}. Creating backups before installation.' -f $remoteMetadata.Version, $remoteMetadata.ReleaseDate)
+        $backupFolder = New-MonitorAutomaticUpdateBackup -TargetVersion $remoteMetadata.Version
+        $replacementPath = Join-Path $script:ScriptDirectory ('.monitor_verified_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        try {
+            Copy-Item -LiteralPath $downloadedScript -Destination $replacementPath -Force -ErrorAction Stop
+            Copy-Item -LiteralPath $replacementPath -Destination $script:ScriptPath -Force -ErrorAction Stop
+        }
+        finally {
+            Remove-Item -LiteralPath $replacementPath -Force -ErrorAction SilentlyContinue
+        }
+
+        $installedHash = (Get-FileHash -LiteralPath $script:ScriptPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        if ($installedHash -ne $expectedHash) { throw 'The installed monitoring script failed post-update integrity verification.' }
+        Write-RunLog -Level OK -Category Update -Color Green -Message (
+            'Monitoring version {0} was installed successfully. Backup={1}. The current process will finish with version {2}; the new version starts on the next execution.' -f
+                $remoteMetadata.Version, $backupFolder, $script:MonitorVersion
+        )
+    }
+    catch {
+        $updateError = $_
+        if (-not [string]::IsNullOrWhiteSpace($backupFolder)) {
+            $backupScript = Join-Path $backupFolder ([IO.Path]::GetFileName($script:ScriptPath))
+            if (Test-Path -LiteralPath $backupScript -PathType Leaf) {
+                try { Copy-Item -LiteralPath $backupScript -Destination $script:ScriptPath -Force -ErrorAction Stop }
+                catch { Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic update restore also failed: {0}' -f $_.Exception.Message) }
+            }
+        }
+        Write-RunLog -Level Warning -Category Update -Color Yellow -Message (
+            'Automatic monitoring update was not applied; this monitoring run will continue with version {0}. Reason: {1}' -f
+                $script:MonitorVersion, $updateError.Exception.Message
+        )
+    }
+    finally {
+        if (-not [string]::IsNullOrWhiteSpace($temporaryFolder)) {
+            Remove-Item -LiteralPath $temporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
 
 function Resolve-MonitorConfigurationPath {
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
@@ -665,6 +862,16 @@ ApiHealthFailureAttempts (default 3), ApiHealthRetryIntervalSeconds (default
 5), and NssmExcludedLogRotationEventIds (default 1063,1077) remain available
 through the configuration file.
 
+Automatic updates
+-----------------
+Each execution checks the official GitHub release. A newer monitor is installed
+only after update-manifest.json, SHA-256, and PowerShell syntax validation.
+Before replacement, the current script, JSON configuration, and related
+Scheduled Task definitions are saved under monitor-update-backups. The local
+script filename and all site settings remain unchanged. The installed update
+takes effect on the next execution. Use -SkipAutomaticUpdate only for a
+temporary troubleshooting run.
+
 DAILY LOG FILES AND WATCHDOG EVIDENCE
 =====================================
 run_log_yyyyMMdd.txt
@@ -833,6 +1040,21 @@ restart evidence are included only in daily monitoring results.
 '@
 }
 
+function Get-MonitorLogsReadmeAutomaticUpdate {
+    return @'
+
+AUTOMATIC MONITOR UPDATES
+========================
+Every execution checks the official GitHub release for a newer monitor. The
+downloaded script must match update-manifest.json, pass SHA-256 verification,
+and parse successfully as PowerShell before it can replace the installed file.
+The current script, JSON configuration, and related Scheduled Task definitions
+are backed up under monitor-update-backups. Site settings, logs, task schedules,
+and the installed script filename are preserved. The new code runs on the next
+execution. Use -SkipAutomaticUpdate only for a temporary troubleshooting run.
+'@
+}
+
 function Ensure-MonitorLogDocumentation {
     param(
         [Parameter(Mandatory = $true)][string]$Directory,
@@ -859,6 +1081,10 @@ function Ensure-MonitorLogDocumentation {
         $existingReadme = [IO.File]::ReadAllText($readmePath)
         if ($existingReadme -notmatch '(?m)^RELIABILITY ALERT POLICY$') {
             [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeUpdate), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^AUTOMATIC MONITOR UPDATES$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeAutomaticUpdate), $script:Utf8NoBom)
         }
     }
 
@@ -3317,7 +3543,7 @@ function Get-ExitCode {
 }
 
 function Invoke-D4AMonitor {
-    Initialize-MonitorLogging
+    if (-not $script:LoggingReady) { Initialize-MonitorLogging }
     Write-RunLog -Category Monitor -Color Cyan -Message (
         'D4A monitoring run started. Version={0}; release date={1}; script={2}' -f
             $script:MonitorVersion, $script:MonitorReleaseDate, $script:ScriptPath
@@ -3534,6 +3760,8 @@ $finalExitCode = 2
 try {
     Import-MonitorConfiguration
     Test-MonitorConfigurationValues
+    Initialize-MonitorLogging
+    Invoke-MonitorAutomaticUpdate
     $managementModes = @(@(
             $ValidateConfiguration.IsPresent,
             $ShowConfiguration.IsPresent,

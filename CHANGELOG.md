@@ -6,6 +6,20 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.1 - 2026-08-18
+
+### Added
+
+- Added a mandatory operator-name prompt before persistent database changes and a centralized intervention audit at `C:\Users\edit_log.txt` with timestamp, operator, action, selected non-sensitive variables, and success or failure result.
+- Added a fourth main menu, **Logs**, with a **Last Actions done by this script** view for the ten newest database intervention entries.
+- Added autonomous monitoring updates on every execution, with manifest and SHA-256 verification, release metadata validation, PowerShell syntax validation, and safe continuation when an update cannot be applied.
+
+### Monitoring 6.6.0
+
+- The monitor now checks its own GitHub release independently of IT Tools and safely installs newer verified monitor code.
+- Before replacement, the monitor backs up its installed script, external JSON configuration, and related Scheduled Task definitions while preserving the deployed filename and all site-specific behavior.
+- Added `-SkipAutomaticUpdate` for a temporary troubleshooting run without a network update check.
+
 ## 7.1.0 - 2026-08-18
 
 ### Corrected

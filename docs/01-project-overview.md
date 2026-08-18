@@ -60,11 +60,12 @@ Those issues led to reusable patterns rather than one-off fixes:
 
 ### Evolution into a toolkit
 
-As more recurring work was added, disconnected scripts became a maintenance problem of their own. The solution evolved into one central interface with three operational areas:
+As more recurring work was added, disconnected scripts became a maintenance problem of their own. The solution evolved into one central interface with four operational areas:
 
 - Database Tools for translations, imports, migrations, D4A configuration, diagnostics, and recovery.
 - Local server and file tools for health checks, searches, disk analysis, permissions, ports, and Data Collector logs.
 - Site Monitoring for deployment, configuration, scheduled execution, updates, testing, alert controls, and diagnostics.
+- Logs for reviewing the latest operator-attributed database interventions performed by the toolkit.
 
 Production feedback continued to shape the design. Examples include clipboard-safe password entry, optional SQL certificate trust, automatic module installation, locked-log reading, SQL duplicate handling, global rollback discovery, execution timeouts, silent Scheduled Tasks, configuration separation, log retention, and false-alert reduction.
 
@@ -84,6 +85,7 @@ The project was designed to:
 - make troubleshooting evidence easier to collect and escalate;
 - centralize tools behind one predictable interface;
 - preserve backups and recovery paths before data changes;
+- retain a concise audit trail identifying who performed each database intervention and its outcome;
 - make long-running actions visible rather than appearing stalled;
 - distribute improvements without manually replacing scripts on every server;
 - keep production-specific configuration separate from versioned code;
@@ -97,12 +99,15 @@ flowchart TD
     Main --> DB["Database Tools"]
     Main --> Server["Local server and file tools"]
     Main --> Monitor["Site Monitoring"]
+    Main --> Logs["Intervention Logs"]
     DB --> SQL["SQL Server and D4A data"]
     Server --> Windows["Windows Server, files, services, and ports"]
     Monitor --> Checks["Sites, APIs, services, resources, and logs"]
-    Main --> Safety["Validation, backups, confirmations, progress, and logs"]
+    Main --> Safety["Validation, backups, confirmations, progress, and error logs"]
+    Logs --> Audit["Operator, action, selected variables, and result"]
     Repo["GitHub release"] --> Update["Version, manifest, SHA-256, syntax validation"]
     Update --> Main
+    Update --> Monitor
 ```
 
 ## What the toolkit automates
