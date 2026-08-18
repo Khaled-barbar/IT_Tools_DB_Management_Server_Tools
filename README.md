@@ -20,7 +20,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.1.3, Monitoring 6.6.0 |
+| Current release | IT Tools 7.1.4, Monitoring 6.6.0 |
 
 ## Why it exists
 
@@ -34,7 +34,7 @@ The goal is not simply to save commands. It is to reduce dependence on individua
 - Guided D4A and Danone configuration operations with previews, confirmations, and timestamped backups.
 - Local server health checks, file and log searches, disk analysis, SQL backup-folder permissions, and port tests.
 - Scheduled site monitoring for application endpoints, APIs, services, resources, Nginx, Windows events, and Watchdog evidence.
-- Operator-attributed database intervention logging with selected non-sensitive variables and success or failure status.
+- Operator-attributed database intervention and monitoring-change logging with selected non-sensitive variables and success or failure status.
 - Daily error logging, progress reporting, input validation, finite timeouts, and recoverable database changes.
 - Automatic updates for both IT Tools and the stand-alone monitor with HTTPS download, manifest validation, SHA-256 verification, and PowerShell syntax checks.
 
@@ -62,7 +62,7 @@ The script can offer to install the `SqlServer` or `ImportExcel` PowerShell modu
 
 ## Safe operation
 
-Database-writing features create timestamped backups of target tables, show previews where practical, require explicit confirmation, and ask for the operator's name before the first persistent write. Database interventions are appended to `C:\Users\edit_log.txt`; full errors are written to the daily file under `Logs`. Site-specific monitoring configuration, credentials, logs, state, and ignore rules remain outside the release files and are preserved during monitor updates.
+Database-writing features create timestamped backups of target tables, show previews where practical, require explicit confirmation, and ask for the operator's name before the first persistent write. Database interventions and confirmed monitoring creation or configuration changes are appended to `C:\Users\edit_log.txt`; full errors are written to the daily file under `Logs`. Site-specific monitoring configuration, credentials, logs, state, and ignore rules remain outside the release files and are preserved during monitor updates.
 
 This toolkit supports operational work; it does not replace change-management approval, environment-specific authorization, or escalation when results are unexpected.
 
@@ -77,6 +77,7 @@ This toolkit supports operational work; it does not replace change-management ap
 | `AssemblyRules_Luleburgas.sql` | Companion data for the Luleburgas system-settings workflow |
 | `RoleAdminLuleburgaz-DanoneStandard-090426.sql` | Companion data for the Luleburgas roles workflow |
 | `CHANGELOG.md` | Human-readable history of significant releases, features, and corrections |
+| `IT_Tools_Script_Maintenance_Conditions.md` | Standing safety, logging, validation, and release rules for future script changes |
 | `version.txt` | Public IT Tools release version |
 | `update-manifest.json` | Release file list and SHA-256 integrity hashes |
 

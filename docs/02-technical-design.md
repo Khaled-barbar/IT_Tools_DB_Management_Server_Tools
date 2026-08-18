@@ -15,7 +15,7 @@ flowchart TD
     Main --> DB["Database feature functions"]
     Main --> Server["Server and file feature functions"]
     Main --> Deploy["Monitoring deployment and management"]
-    Main --> Audit["Database intervention log viewer"]
+    Main --> Audit["Database and monitoring action log viewer"]
     Main --> Disk["D4A Disk Space Analyzer"]
     Main --> SQLFiles["Verified companion SQL files"]
     Deploy --> Monitor["D4A Scheduled Monitor"]
@@ -25,6 +25,7 @@ flowchart TD
     Server --> Windows["Windows Server and filesystem"]
     Monitor --> App["D4A sites, APIs, services, and diagnostics"]
     DB --> EditLog["C:/Users/edit_log.txt"]
+    Deploy --> EditLog
 ```
 
 ## Component map
@@ -37,10 +38,11 @@ flowchart TD
 | `Find-LogGaps.ps1` | Stand-alone log timestamp-gap analysis with read sharing |
 | Companion SQL files | Site-standard configuration data executed only by their selected feature |
 | `CHANGELOG.md` | Human-readable record of significant releases, features, and production corrections |
+| `IT_Tools_Script_Maintenance_Conditions.md` | Standing engineering constraints applied whenever the main script is changed |
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
-At release 7.1.3, the main script contains approximately 9,200 lines and 237 PowerShell functions. The monitor contains approximately 3,800 lines and 88 functions. These counts describe implementation scope, not business impact.
+At release 7.1.4, the main script contains approximately 9,400 lines and 244 PowerShell functions. The monitor contains approximately 3,800 lines and 88 functions. These counts describe implementation scope, not business impact.
 
 ## Main script architecture
 
@@ -95,7 +97,7 @@ Broad or destructive workflows show the target and a sample or diagnostic previe
 
 The shared SQL execution boundaries classify persistent database-write statements separately from read-only queries and writes limited to temporary tables or table variables. Immediately before the first persistent write in an action, the tool verifies that `C:\Users\edit_log.txt` is writable and requires the operator's full name. If the audit file cannot be opened, the database change is blocked.
 
-One line is appended when the action completes. It contains the intervention timestamp, operator, menu/action context, selected non-sensitive variables, and `Success` or `Failed` with a concise reason. Passwords, credentials, connection strings, tokens, full SQL text, and other secrets are excluded. The fourth main menu exposes the ten newest entries without changing the file.
+One line is appended when the action completes. It contains the intervention timestamp, operator, menu/action context, selected non-sensitive variables, and `Success` or `Failed` with a concise reason. Passwords, credentials, connection strings, tokens, full SQL text, and other secrets are excluded. Confirmed monitoring creation and configuration changes use the same structure with the current Windows identity: creation captures hostnames, schedule frequency, and daily-monitoring status, while updates capture newly added hostnames and notification addresses. The fourth main menu exposes the ten newest entries without changing the file.
 
 ### Transactions and data rules
 
@@ -210,7 +212,7 @@ Logs\tools_script_error_log_yyyyMMdd.txt
 
 The entry includes timestamp, context, selected SQL server/database when relevant, exception type, category, invocation, script stack, and exception details. Short messages are displayed directly; long messages are abbreviated and point the user to the log.
 
-Database-change accountability is kept separately in `C:\Users\edit_log.txt`. This concise audit file records successful and failed write interventions and is readable through **Logs > Last Actions done by this script**.
+Database-change and monitoring-change accountability is kept separately in `C:\Users\edit_log.txt`. This concise audit file records successful and failed database writes, monitor deployments, and monitoring configuration updates and is readable through **Logs > Last Actions done by this script**.
 
 Long operations use persistent timestamped progress lines with percentage, step, and description. This avoids the transient behavior of `Write-Progress` and makes module installation, imports, backups, searches, and deployment understandable in remote support sessions.
 
@@ -252,7 +254,7 @@ Standing maintenance conditions require every enhancement to preserve common beh
 - `q` at visible prompts;
 - progress for long-running work;
 - full daily error logs;
-- operator attribution and concise database intervention results in `C:\Users\edit_log.txt`;
+- operator attribution and concise database-intervention or monitoring-change results in `C:\Users\edit_log.txt`;
 - finite timeouts for deep scans and heavy system queries;
 - safe SQL identifier handling;
 - syntax validation before publication;

@@ -6,6 +6,18 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.4 - 2026-08-18
+
+### Added
+
+- Added monitoring creation and configuration-update results to the shared `C:\Users\edit_log.txt` action history using the current Windows identity, timestamp, selected non-sensitive values, and success or failure status.
+- Monitoring creation entries identify the site hostnames, recurring schedule frequency, recurring-task status, and daily-monitoring status.
+- Monitoring update entries identify only newly added site hostnames and notification email addresses; persistent site additions from **Execute Monitoring Commands** are also recorded.
+
+### Changed
+
+- Generalized **Logs > Last Actions done by this script** so its ten-line view describes both database interventions and monitoring changes.
+
 ## 7.1.3 - 2026-08-18
 
 ### Corrected

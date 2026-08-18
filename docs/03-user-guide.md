@@ -89,6 +89,8 @@ Before confirming a database change:
 
 After a database-writing action, verify the confirmation that the intervention was recorded. Use **Logs > Last Actions done by this script** to display the ten newest entries, including operator, action, selected variables, and result.
 
+Confirmed monitoring deployments and configuration changes are recorded in the same action history using the current Windows identity. Monitoring creation records the selected hostnames, recurring frequency, and whether daily monitoring was created; updates record newly added hostnames and notification addresses.
+
 Do not manually delete timestamped backup tables until the retention and rollback need has been reviewed.
 
 ## Common workflows
@@ -479,7 +481,7 @@ The monitor reports and collects evidence. It does not restart services.
 
 ### Last Actions done by this script
 
-This read-only menu displays the ten newest lines from `C:\Users\edit_log.txt`. Each database intervention line includes its date/time, the operator name entered before execution, the intervention name, selected non-sensitive variables, and a `Success` or `Failed` result. The daily detailed error files remain under the IT Tools `Logs` folder and provide stack traces when troubleshooting is required.
+This read-only menu displays the ten newest lines from `C:\Users\edit_log.txt`. Database intervention entries include the date/time, operator name entered before execution, intervention name, selected non-sensitive variables, and a `Success` or `Failed` result. Monitoring creation and update entries use the current Windows identity and include the relevant hostnames, schedule or daily-monitoring status, and newly added notification addresses. The daily detailed error files remain under the IT Tools `Logs` folder and provide stack traces when troubleshooting is required.
 
 ## Troubleshooting
 

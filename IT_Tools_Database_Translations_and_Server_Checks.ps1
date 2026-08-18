@@ -31,7 +31,7 @@
 #   3. Site monitoring:
 #      - Deploy and schedule the D4A health and performance monitor
 #   4. Logs:
-#      - Review the latest database interventions performed by this script
+#      - Review the latest database and monitoring actions performed by this script
 # ==============================================================================
 
 [CmdletBinding()]
@@ -53,13 +53,14 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.3'
+$Script:ToolVersion = [version]'7.1.4'
 $Script:ToolReleaseDate = '2026-08-18'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
 $Script:ToolUpdateManifestFileName = 'update-manifest.json'
 $Script:ToolMainScriptFileName = 'IT_Tools_Database_Translations_and_Server_Checks.ps1'
-$Script:DatabaseEditLogPath = 'C:\Users\edit_log.txt'
+$Script:ActionLogPath = 'C:\Users\edit_log.txt'
+$Script:DatabaseEditLogPath = $Script:ActionLogPath
 $Script:CurrentToolActionContext = $null
 $Script:CurrentDatabaseIntervention = $null
 
@@ -573,7 +574,7 @@ function Get-DatabaseInterventionVariableSummary {
 function Assert-DatabaseEditLogWritable {
     $logFolder = Split-Path -Parent $Script:DatabaseEditLogPath
     if (-not (Test-Path -LiteralPath $logFolder -PathType Container)) {
-        throw "The database intervention log folder does not exist: $logFolder"
+        throw "The IT Tools action log folder does not exist: $logFolder"
     }
 
     $stream = $null
@@ -586,11 +587,99 @@ function Assert-DatabaseEditLogWritable {
         )
     }
     catch {
-        throw "IT Tools cannot write the required database intervention log '$($Script:DatabaseEditLogPath)'. Run PowerShell with sufficient permission before changing database data. $($_.Exception.Message)"
+        throw "IT Tools cannot write the required action log '$($Script:DatabaseEditLogPath)'. Run PowerShell with sufficient permission before changing database data or monitoring settings. $($_.Exception.Message)"
     }
     finally {
         if ($null -ne $stream) { $stream.Dispose() }
     }
+}
+
+function Get-ScriptActionOperatorName {
+    try {
+        $identityName = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        if (-not [string]::IsNullOrWhiteSpace($identityName)) { return $identityName }
+    }
+    catch {}
+
+    if (-not [string]::IsNullOrWhiteSpace($env:USERNAME)) { return $env:USERNAME }
+    return 'Unknown Windows user'
+}
+
+function New-ScriptActionAuditRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$Intervention,
+        [Parameter(Mandatory = $true)][string]$Variables
+    )
+
+    Assert-DatabaseEditLogWritable
+    return [pscustomobject]@{
+        StartedAt      = Get-Date
+        Person         = Get-ScriptActionOperatorName
+        Intervention   = $Intervention
+        Variables      = $Variables
+        FailureMessage = $null
+        Completed      = $false
+    }
+}
+
+function Set-ScriptActionAuditFailure {
+    param(
+        [Parameter(Mandatory = $true)][object]$AuditRecord,
+        [AllowNull()][object]$ErrorValue
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($AuditRecord.FailureMessage)) { return }
+    $message = if ($ErrorValue -is [Management.Automation.ErrorRecord]) {
+        $ErrorValue.Exception.Message
+    }
+    elseif ($ErrorValue -is [Exception]) {
+        $ErrorValue.Message
+    }
+    else {
+        [string]$ErrorValue
+    }
+    $AuditRecord.FailureMessage = ConvertTo-DatabaseAuditField -Value $message -MaximumLength 500
+}
+
+function Complete-ScriptActionAudit {
+    param(
+        [AllowNull()][object]$AuditRecord,
+        [AllowNull()][object]$ErrorValue
+    )
+
+    if ($null -eq $AuditRecord -or $AuditRecord.Completed) { return }
+    if ($null -ne $ErrorValue) { Set-ScriptActionAuditFailure -AuditRecord $AuditRecord -ErrorValue $ErrorValue }
+    Write-DatabaseInterventionAuditEntry -AuditRecord $AuditRecord
+    $AuditRecord.Completed = $true
+    Write-Host "Script action recorded in $($Script:ActionLogPath)" -ForegroundColor DarkGray
+}
+
+function Get-MonitoringCreationAuditVariables {
+    param(
+        [AllowNull()][string]$Hosts,
+        [AllowNull()][object]$FrequencyMinutes,
+        [AllowNull()][string]$RecurringMonitoring,
+        [AllowNull()][string]$DailyMonitoring
+    )
+
+    $frequency = if ($null -eq $FrequencyMinutes) { 'Not selected' } else { [string]$FrequencyMinutes }
+    $recurring = if ([string]::IsNullOrWhiteSpace($RecurringMonitoring)) { 'Not selected' } else { $RecurringMonitoring }
+    $daily = if ([string]::IsNullOrWhiteSpace($DailyMonitoring)) { 'Not selected' } else { $DailyMonitoring }
+    return 'SiteHostnames={0}; MonitoringScheduleFrequencyMinutes={1}; RecurringMonitoring={2}; DailyMonitoring={3}' -f
+        (ConvertTo-DatabaseAuditField -Value $Hosts -MaximumLength 500),
+        (ConvertTo-DatabaseAuditField -Value $frequency -MaximumLength 30),
+        (ConvertTo-DatabaseAuditField -Value $recurring -MaximumLength 20),
+        (ConvertTo-DatabaseAuditField -Value $daily -MaximumLength 20)
+}
+
+function Get-AddedMonitoringValues {
+    param(
+        [AllowNull()][string]$CurrentValues,
+        [AllowNull()][string]$NewValues
+    )
+
+    $current = @($CurrentValues -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    return @($NewValues -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $current -inotcontains $_ } | Select-Object -Unique)
 }
 
 function Start-DatabaseInterventionAudit {
@@ -2378,6 +2467,11 @@ function Invoke-SiteMonitoringFirstTest {
 }
 
 function Show-AddSiteMonitoring {
+    $actionAudit = $null
+    $hosts = $null
+    $frequencyMinutes = $null
+    $recurringMonitoring = 'Not selected'
+    $dailyMonitoring = 'Not selected'
     Clear-Host
     Show-SectionTitle "Add New Site Monitoring"
     Write-Host "Create a scheduled D4A site and server health monitor that sends email notifications when issues are detected." -ForegroundColor Cyan
@@ -2446,8 +2540,13 @@ function Show-AddSiteMonitoring {
             return
         }
 
+        $actionAudit = New-ScriptActionAuditRecord `
+            -Intervention 'Site Monitoring - Add New Site Monitoring' `
+            -Variables (Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring)
+
         $nodeRuntime = Ensure-SiteMonitoringNodeRuntime
         if ($null -eq $nodeRuntime) {
+            Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue 'Cancelled during Node.js/npm prerequisite validation.'
             Pause-Screen
             return
         }
@@ -2489,6 +2588,8 @@ function Show-AddSiteMonitoring {
 
         $frequencyMinutes = Read-SiteMonitoringFrequencyMinutes
         if ($null -eq $frequencyMinutes) {
+            $actionAudit.Variables = Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring
+            Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue 'Cancelled before selecting the monitoring schedule frequency.'
             Pause-Screen
             return
         }
@@ -2498,25 +2599,34 @@ function Show-AddSiteMonitoring {
             Write-StreamingLog -Percent 82 -Step "Schedule" -Description "Creating the recurring D4A monitoring task."
             $taskName = Register-SiteMonitoringTask -ScriptPath $targetScriptPath -WorkingDirectory $deploymentFolder -ConfigPath $configurationPath -FrequencyMinutes $frequencyMinutes
             Update-SiteMonitoringTaskConfiguration -ConfigPath $configurationPath -FrequencyMinutes $frequencyMinutes
+            $recurringMonitoring = 'Yes'
             Write-Host "Scheduled task created: $taskName" -ForegroundColor Green
         }
         elseif (Test-IsBack $taskConfirmation) {
+            $actionAudit.Variables = Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring
+            Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue 'Cancelled before creating the recurring monitoring task.'
             Pause-Screen
             return
         }
         else {
+            $recurringMonitoring = 'No'
             Write-Host "Recurring task creation skipped. The monitoring script remains configured and can be scheduled later." -ForegroundColor Yellow
         }
 
         $dailyChoice = Read-Host "Create a daily performance email even when healthy? Type Y to create it, or press Enter to skip"
         if (Test-IsBack $dailyChoice) {
+            $actionAudit.Variables = Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring
+            Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue 'Cancelled before selecting the daily monitoring status.'
             Pause-Screen
             return
         }
+        $dailyMonitoring = 'No'
         if ($dailyChoice -match '^(?i)y(?:es)?$') {
             while ($true) {
                 $timeInput = Read-Host "Daily email server time (default: 02:00; q to skip)"
                 if (Test-IsBack $timeInput) {
+                    $actionAudit.Variables = Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring
+                    Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue 'Cancelled before creating the daily monitoring task.'
                     Pause-Screen
                     return
                 }
@@ -2526,6 +2636,7 @@ function Show-AddSiteMonitoring {
                     Write-StreamingLog -Percent 88 -Step "Schedule" -Description "Creating the daily monitoring summary task at $($dailyTime.ToString('HH:mm'))."
                     $dailyTaskName = Register-SiteMonitoringTask -ScriptPath $targetScriptPath -WorkingDirectory $deploymentFolder -ConfigPath $configurationPath -DailySummary -DailyTime $dailyTime
                     Update-SiteMonitoringTaskConfiguration -ConfigPath $configurationPath -DailySummaryEnabled $true -DailySummaryTime $dailyTime.ToString('HH:mm')
+                    $dailyMonitoring = 'Yes'
                     Write-Host "Daily summary task created: $dailyTaskName" -ForegroundColor Green
                     break
                 }
@@ -2538,6 +2649,8 @@ function Show-AddSiteMonitoring {
             Invoke-SiteMonitoringFirstTest -ScriptPath $targetScriptPath -ConfigPath $configurationPath
         }
         elseif (Test-IsBack $testConfirmation) {
+            $actionAudit.Variables = Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring
+            Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue 'Cancelled before completing monitoring creation.'
             Pause-Screen
             return
         }
@@ -2545,16 +2658,24 @@ function Show-AddSiteMonitoring {
             Write-Host "First email test skipped. Run it later with -SendTestResultsEmail." -ForegroundColor Yellow
         }
 
+        $actionAudit.Variables = Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring
+        Complete-ScriptActionAudit -AuditRecord $actionAudit
         Write-StreamingLog -Percent 100 -Step "Done" -Description "Site monitoring deployment completed."
     }
     catch {
-        Show-LoggedError -Prefix "Site monitoring setup did not complete" -Context "Main menu - Add Site Monitoring" -ErrorRecord $_
+        $originalError = $_
+        if ($null -ne $actionAudit) {
+            $actionAudit.Variables = Get-MonitoringCreationAuditVariables -Hosts $hosts -FrequencyMinutes $frequencyMinutes -RecurringMonitoring $recurringMonitoring -DailyMonitoring $dailyMonitoring
+            try { Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue $originalError } catch { Write-Warning $_.Exception.Message }
+        }
+        Show-LoggedError -Prefix "Site monitoring setup did not complete" -Context "Main menu - Add Site Monitoring" -ErrorRecord $originalError
     }
 
     Pause-Screen
 }
 
 function Show-UpdateExistingMonitoringConfiguration {
+    $actionAudit = $null
     Clear-Host
     Show-SectionTitle 'Update Existing Monitoring Settings'
     Write-Host 'Updates the selected monitor JSON configuration without replacing its script, logs, ignore rules, or Scheduled Tasks.' -ForegroundColor Cyan
@@ -2632,6 +2753,14 @@ function Show-UpdateExistingMonitoringConfiguration {
             return
         }
 
+        $addedSites = @(Get-AddedMonitoringValues -CurrentValues $currentSites -NewValues $newSites)
+        $addedRecipients = @(Get-AddedMonitoringValues -CurrentValues $currentRecipients -NewValues $newRecipients)
+        $auditVariables = 'AddedSiteHostnames={0}; AddedNotificationEmails={1}; ConfigurationFile={2}' -f
+            $(if ($addedSites.Count -gt 0) { $addedSites -join ',' } else { 'None' }),
+            $(if ($addedRecipients.Count -gt 0) { $addedRecipients -join ',' } else { 'None' }),
+            $target.ConfigPath
+        $actionAudit = New-ScriptActionAuditRecord -Intervention 'Site Monitoring - Update Existing Monitoring Settings' -Variables $auditVariables
+
         $deploymentFolder = Split-Path -Parent $target.ScriptPath
         $backupFolder = Join-Path (Join-Path $deploymentFolder 'monitor-backups') ('settings_{0}' -f (Get-Date -Format 'yyyyMMddHHmmss'))
         New-Item -ItemType Directory -Path $backupFolder -Force -ErrorAction Stop | Out-Null
@@ -2658,12 +2787,17 @@ function Show-UpdateExistingMonitoringConfiguration {
         Write-StreamingLog -Percent 75 -Step 'Save' -Description 'Saving the updated site, recipient, and monitoring name settings.'
         Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $target.ConfigPath -AllowOverwrite | Out-Null
         Write-StreamingLog -Percent 100 -Step 'Done' -Description 'Monitoring settings update completed.'
+        Complete-ScriptActionAudit -AuditRecord $actionAudit
         Write-Host 'Success: the monitoring settings were updated.' -ForegroundColor Green
         Write-Host "Configuration backup: $backupPath" -ForegroundColor Green
         Write-Host 'Scheduled Tasks and monitor code were not changed.' -ForegroundColor Green
     }
     catch {
-        Show-LoggedError -Prefix 'Monitoring settings update did not complete' -Context 'Site Monitoring - update existing monitoring settings' -ErrorRecord $_
+        $originalError = $_
+        if ($null -ne $actionAudit) {
+            try { Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue $originalError } catch { Write-Warning $_.Exception.Message }
+        }
+        Show-LoggedError -Prefix 'Monitoring settings update did not complete' -Context 'Site Monitoring - update existing monitoring settings' -ErrorRecord $originalError
     }
 
     Pause-Screen
@@ -2785,7 +2919,9 @@ function Invoke-SiteMonitoringCommand {
         [Parameter(Mandatory = $true)][object]$Target,
         [Parameter(Mandatory = $true)][string]$Title,
         [Parameter(Mandatory = $true)][string]$Description,
-        [string[]]$ArgumentList = @()
+        [string[]]$ArgumentList = @(),
+        [string]$AuditIntervention,
+        [string]$AuditVariables
     )
 
     Clear-Host
@@ -2798,34 +2934,49 @@ function Invoke-SiteMonitoringCommand {
     $confirmation = Read-Host 'Press Enter to run this command, or type q to go back'
     if (Test-IsBack $confirmation) { return }
 
-    Write-StreamingLog -Percent 20 -Step 'Monitor command' -Description 'Running the selected monitoring command.'
-    $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Target.ScriptPath, '-ConfigPath', $Target.ConfigPath) + $ArgumentList
-    $output = @(& powershell.exe @arguments 2>&1)
-    foreach ($line in $output) { Write-Host $line }
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -eq 1) {
-        # The monitor reserves exit code 1 for completed runs containing warnings.
-        Write-Host 'Monitoring completed with warnings. Review the monitor run log for details.' -ForegroundColor Yellow
-        Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Monitoring command completed with warnings.'
-        Pause-Screen
-        return
-    }
-    $recentOutput = @($output | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 10)
-    $fatalMonitorFailure = @($recentOutput | Where-Object { $_ -match '(?i)fatal monitor failure|\[fatal\]' }).Count -gt 0
-    if ($exitCode -eq 2 -and -not $fatalMonitorFailure) {
-        # Code 2 can be a valid completed run containing alerts or errors found by the health checks.
-        Write-Host 'Monitoring completed with alerts or errors. Review the displayed results and monitor logs.' -ForegroundColor Red
-        Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Monitoring command completed with alerts or errors.'
-        Pause-Screen
-        return
-    }
-    if ($exitCode -ne 0) {
-        $detail = if ($recentOutput.Count -gt 0) { $recentOutput -join ' | ' } else { 'No monitor output was returned.' }
-        throw "The monitoring command returned exit code $exitCode. Recent monitor output: $detail"
+    $actionAudit = $null
+    if (-not [string]::IsNullOrWhiteSpace($AuditIntervention)) {
+        $actionAudit = New-ScriptActionAuditRecord -Intervention $AuditIntervention -Variables $AuditVariables
     }
 
-    Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Monitoring command completed successfully.'
-    Pause-Screen
+    try {
+        Write-StreamingLog -Percent 20 -Step 'Monitor command' -Description 'Running the selected monitoring command.'
+        $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Target.ScriptPath, '-ConfigPath', $Target.ConfigPath) + $ArgumentList
+        $output = @(& powershell.exe @arguments 2>&1)
+        foreach ($line in $output) { Write-Host $line }
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 1) {
+            # The monitor reserves exit code 1 for completed runs containing warnings.
+            Complete-ScriptActionAudit -AuditRecord $actionAudit
+            Write-Host 'Monitoring completed with warnings. Review the monitor run log for details.' -ForegroundColor Yellow
+            Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Monitoring command completed with warnings.'
+            Pause-Screen
+            return
+        }
+        $recentOutput = @($output | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 10)
+        $fatalMonitorFailure = @($recentOutput | Where-Object { $_ -match '(?i)fatal monitor failure|\[fatal\]' }).Count -gt 0
+        if ($exitCode -eq 2 -and -not $fatalMonitorFailure) {
+            # Code 2 can be a valid completed run containing alerts or errors found by the health checks.
+            Complete-ScriptActionAudit -AuditRecord $actionAudit
+            Write-Host 'Monitoring completed with alerts or errors. Review the displayed results and monitor logs.' -ForegroundColor Red
+            Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Monitoring command completed with alerts or errors.'
+            Pause-Screen
+            return
+        }
+        if ($exitCode -ne 0) {
+            $detail = if ($recentOutput.Count -gt 0) { $recentOutput -join ' | ' } else { 'No monitor output was returned.' }
+            throw "The monitoring command returned exit code $exitCode. Recent monitor output: $detail"
+        }
+
+        Complete-ScriptActionAudit -AuditRecord $actionAudit
+        Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Monitoring command completed successfully.'
+        Pause-Screen
+    }
+    catch {
+        $originalError = $_
+        try { Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue $originalError } catch { Write-Warning $_.Exception.Message }
+        throw $originalError
+    }
 }
 
 function Read-AdditionalMonitoringSites {
@@ -2892,8 +3043,16 @@ function Show-ExecuteMonitoringCommandsMenu {
                 if ($null -eq $target) { continue }
                 $sites = Read-AdditionalMonitoringSites
                 if ($null -eq $sites) { continue }
+                $currentSites = ''
+                try {
+                    $currentConfiguration = Get-Content -LiteralPath $target.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $currentSites = (@($currentConfiguration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
+                }
+                catch {}
+                $addedSites = @(Get-AddedMonitoringValues -CurrentValues $currentSites -NewValues $sites)
+                $addedSitesText = if ($addedSites.Count -gt 0) { $addedSites -join ',' } else { 'None' }
                 Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Add site' -Action {
-                    Invoke-SiteMonitoringCommand -Target $target -Title 'Add Site to Existing Monitoring' -Description 'Adds the entered frontend site(s) to the persistent JSON configuration. Matching API health checks are derived automatically.' -ArgumentList @('-AddSiteAddress', $sites)
+                    Invoke-SiteMonitoringCommand -Target $target -Title 'Add Site to Existing Monitoring' -Description 'Adds the entered frontend site(s) to the persistent JSON configuration. Matching API health checks are derived automatically.' -ArgumentList @('-AddSiteAddress', $sites) -AuditIntervention 'Site Monitoring - Add Sites to Existing Monitoring' -AuditVariables "AddedSiteHostnames=$addedSitesText; AddedNotificationEmails=None; ConfigurationFile=$($target.ConfigPath)"
                 }
             }
             '2' {
@@ -9140,19 +9299,19 @@ function Show-ServerInfrastructureSuite {
 function Show-LastScriptDatabaseActions {
     Clear-Host
     Show-SectionTitle 'Last Actions Done by This Script'
-    Write-Host "Database intervention log: $($Script:DatabaseEditLogPath)" -ForegroundColor Gray
+    Write-Host "IT Tools action log: $($Script:ActionLogPath)" -ForegroundColor Gray
     Write-Host ''
 
     try {
         if (-not (Test-Path -LiteralPath $Script:DatabaseEditLogPath -PathType Leaf)) {
-            Write-Host 'No database intervention has been recorded yet.' -ForegroundColor Yellow
+            Write-Host 'No database or monitoring action has been recorded yet.' -ForegroundColor Yellow
             Pause-Screen
             return
         }
 
         $lines = @(Get-Content -LiteralPath $Script:DatabaseEditLogPath -Tail 10 -ErrorAction Stop)
         if ($lines.Count -eq 0) {
-            Write-Host 'The database intervention log is empty.' -ForegroundColor Yellow
+            Write-Host 'The IT Tools action log is empty.' -ForegroundColor Yellow
         }
         else {
             Write-Host 'Most recent 10 log lines:' -ForegroundColor Cyan
@@ -9160,7 +9319,7 @@ function Show-LastScriptDatabaseActions {
         }
     }
     catch {
-        Show-LoggedError -Prefix 'The database intervention log could not be read' -Context 'Logs - last actions done by this script' -ErrorRecord $_
+        Show-LoggedError -Prefix 'The IT Tools action log could not be read' -Context 'Logs - last actions done by this script' -ErrorRecord $_
     }
     Pause-Screen
 }
