@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.0 - 2026-08-18
+
+### Corrected
+
+- Corrected Add New Site Monitoring so each site can receive a friendly name without attempting to overwrite PowerShell's read-only `$Host` automatic variable.
+
 ## 7.0.9 - 2026-08-12
 
 ### Added

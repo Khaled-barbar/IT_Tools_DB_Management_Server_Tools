@@ -38,7 +38,7 @@ flowchart TD
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
-At release 7.0.9, the main script contains approximately 8,500 lines and 219 PowerShell functions. The monitor contains approximately 3,600 lines and 81 functions. These counts describe implementation scope, not business impact.
+At release 7.1.0, the main script contains approximately 8,500 lines and 219 PowerShell functions. The monitor contains approximately 3,600 lines and 81 functions. These counts describe implementation scope, not business impact.
 
 ## Main script architecture
 

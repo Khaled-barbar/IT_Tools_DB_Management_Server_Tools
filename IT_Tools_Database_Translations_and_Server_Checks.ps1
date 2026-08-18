@@ -51,8 +51,8 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.0.9'
-$Script:ToolReleaseDate = '2026-08-12'
+$Script:ToolVersion = [version]'7.1.0'
+$Script:ToolReleaseDate = '2026-08-18'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
 $Script:ToolUpdateManifestFileName = 'update-manifest.json'
@@ -980,9 +980,9 @@ function Read-SiteMonitoringNames {
 
     $hostList = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $siteNames = [System.Collections.Generic.List[string]]::new()
-    foreach ($host in $hostList) {
+    foreach ($siteHost in $hostList) {
         while ($true) {
-            $name = Read-Host "Enter a friendly name for $host, for example Akbou (q to go back)"
+            $name = Read-Host "Enter a friendly name for $siteHost, for example Akbou (q to go back)"
             if (Test-IsBack $name) { return $null }
             $name = $name.Trim()
             if (-not [string]::IsNullOrWhiteSpace($name) -and $name -notmatch '[,\r\n]') {

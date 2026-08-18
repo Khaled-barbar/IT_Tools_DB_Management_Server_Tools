@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": "7.0.9",
-  "releaseDate": "2026-08-12",
+  "version": "7.1.0",
+  "releaseDate": "2026-08-18",
   "files": [
     {
       "path": "AssemblyRules_Luleburgas.sql",
@@ -17,7 +17,7 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "2DB03E954E13247D559814582A331BBF31A57800E6C0ED800FFB28E6DD0E2ADD"
+      "sha256": "6AF9B443E589E294782644176EEFB46EC42CFD4CFB6B24001A0AC2CE660161F3"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",
