@@ -53,7 +53,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.1'
+$Script:ToolVersion = [version]'7.1.2'
 $Script:ToolReleaseDate = '2026-08-18'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1458,13 +1458,150 @@ function Get-SiteMonitoringInstallRoot {
     return Split-Path -Parent $ConfigurationFolder
 }
 
+function Get-SiteMonitoringNodeSearchDirectories {
+    $directories = @()
+    foreach ($candidate in @(
+            $env:NODEJS,
+            $env:NVM_SYMLINK,
+            $(if ($env:ProgramFiles) { Join-Path $env:ProgramFiles 'nodejs' }),
+            $(if (${env:ProgramFiles(x86)}) { Join-Path ${env:ProgramFiles(x86)} 'nodejs' }),
+            $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\nodejs' })
+        )) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) { $directories += [string]$candidate }
+    }
+
+    foreach ($registryPath in @(
+            'HKLM:\SOFTWARE\Node.js',
+            'HKLM:\SOFTWARE\WOW6432Node\Node.js',
+            'HKCU:\SOFTWARE\Node.js'
+        )) {
+        try {
+            $installPath = [string](Get-ItemProperty -LiteralPath $registryPath -Name InstallPath -ErrorAction Stop).InstallPath
+            if (-not [string]::IsNullOrWhiteSpace($installPath)) { $directories += $installPath }
+        }
+        catch { }
+    }
+
+    $directories += @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $directories |
+        ForEach-Object { [Environment]::ExpandEnvironmentVariables(([string]$_).Trim().Trim('"')) } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Container) } |
+        Select-Object -Unique
+}
+
+function Resolve-SiteMonitoringExecutablePath {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$CommandNames,
+        [Parameter(Mandatory = $true)][string[]]$FileNames
+    )
+
+    foreach ($commandName in $CommandNames) {
+        $command = Get-Command $commandName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $command) { continue }
+        foreach ($propertyName in @('Source', 'Path', 'Definition')) {
+            $property = $command.PSObject.Properties[$propertyName]
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value) -and
+                (Test-Path -LiteralPath ([string]$property.Value) -PathType Leaf)) {
+                return (Get-Item -LiteralPath ([string]$property.Value) -ErrorAction Stop).FullName
+            }
+        }
+    }
+
+    foreach ($directory in @(Get-SiteMonitoringNodeSearchDirectories)) {
+        foreach ($fileName in $FileNames) {
+            $candidate = Join-Path $directory $fileName
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+            }
+        }
+    }
+    return $null
+}
+
+function Get-SiteMonitoringNodeRuntime {
+    $npmPath = Resolve-SiteMonitoringExecutablePath -CommandNames @('npm.cmd', 'npm') -FileNames @('npm.cmd', 'npm.exe')
+    $nodePath = Resolve-SiteMonitoringExecutablePath -CommandNames @('node.exe', 'node') -FileNames @('node.exe')
+    if (-not [string]::IsNullOrWhiteSpace($npmPath) -and [string]::IsNullOrWhiteSpace($nodePath)) {
+        $adjacentNodePath = Join-Path (Split-Path -Parent $npmPath) 'node.exe'
+        if (Test-Path -LiteralPath $adjacentNodePath -PathType Leaf) { $nodePath = $adjacentNodePath }
+    }
+    if ([string]::IsNullOrWhiteSpace($npmPath) -or [string]::IsNullOrWhiteSpace($nodePath)) { return $null }
+
+    return [pscustomobject]@{
+        NodePath = $nodePath
+        NpmPath  = $npmPath
+    }
+}
+
+function Ensure-SiteMonitoringNodeRuntime {
+    $runtime = Get-SiteMonitoringNodeRuntime
+    if ($null -ne $runtime) {
+        Write-StreamingLog -Percent 20 -Step 'Node.js' -Description "Detected node.exe at $($runtime.NodePath) and npm at $($runtime.NpmPath)."
+        return $runtime
+    }
+
+    Write-Host ''
+    Write-Host 'Node.js LTS and npm are required to install the monitoring email component.' -ForegroundColor Yellow
+    Write-Host 'IT Tools can install the official OpenJS.NodeJS.LTS package with Windows Package Manager.' -ForegroundColor Gray
+    Write-Host 'Command: winget install --id OpenJS.NodeJS.LTS --exact --source winget --scope machine --silent --force' -ForegroundColor DarkGray
+
+    $wingetCommand = Get-Command winget.exe, winget -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $wingetCommand) {
+        throw 'Node.js/npm were not found and Windows Package Manager (winget) is unavailable. Install Node.js LTS from https://nodejs.org/en/download, then restart IT Tools.'
+    }
+    if (-not $Script:IsAdmin) {
+        throw 'Node.js/npm were not found. Restart IT Tools as Administrator so the machine-wide Node.js LTS package can be installed before deployment.'
+    }
+
+    $installChoice = Read-Host 'Type INSTALL to install Node.js LTS now, or type q / press Enter to cancel'
+    if (Test-IsBack $installChoice -or $installChoice -cne 'INSTALL') {
+        Write-Host 'Node.js installation cancelled. No monitoring files were created or changed.' -ForegroundColor Cyan
+        return $null
+    }
+
+    $wingetPath = [string]$wingetCommand.Source
+    if ([string]::IsNullOrWhiteSpace($wingetPath)) { $wingetPath = [string]$wingetCommand.Path }
+    $wingetArguments = @(
+        'install', '--id', 'OpenJS.NodeJS.LTS', '--exact', '--source', 'winget',
+        '--scope', 'machine', '--silent', '--force',
+        '--accept-package-agreements', '--accept-source-agreements'
+    )
+    Invoke-InstallStepWithProgress -Step 'Node.js LTS' -Description 'Installing or repairing Node.js LTS and npm for this server' -StartPercent 20 -EndPercent 34 -ScriptBlock {
+        param([pscustomobject]$InstallSettings)
+        $ErrorActionPreference = 'Stop'
+        $argumentList = [string[]]@($InstallSettings.Arguments | ForEach-Object { [string]$_ })
+        $process = Start-Process `
+            -FilePath ([string]$InstallSettings.Executable) `
+            -ArgumentList $argumentList `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden `
+            -ErrorAction Stop
+        if ($process.ExitCode -ne 0) { throw "winget returned exit code $($process.ExitCode) while installing Node.js LTS." }
+    } -Argument ([pscustomobject]@{ Executable = $wingetPath; Arguments = $wingetArguments })
+
+    $runtime = Get-SiteMonitoringNodeRuntime
+    if ($null -eq $runtime) {
+        throw 'Node.js installation completed, but node.exe or npm.cmd still could not be located. Restart PowerShell and run Add Site Monitoring again.'
+    }
+
+    foreach ($directory in @((Split-Path -Parent $runtime.NodePath), (Split-Path -Parent $runtime.NpmPath))) {
+        if (($env:Path -split ';') -notcontains $directory) { $env:Path = "$directory;$env:Path" }
+    }
+    $nodeVersion = (& $runtime.NodePath '--version' 2>&1 | Select-Object -First 1)
+    $npmVersion = (& $runtime.NpmPath '--version' 2>&1 | Select-Object -First 1)
+    Write-Host "Node.js installed successfully: $nodeVersion | npm: $npmVersion" -ForegroundColor Green
+    return $runtime
+}
+
 function New-SiteMonitoringConfigurationObject {
     param(
         [Parameter(Mandatory = $true)][string]$Hosts,
         [Parameter(Mandatory = $true)][string[]]$SiteNames,
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
-        [Parameter(Mandatory = $true)][string]$MonitorVersion
+        [Parameter(Mandatory = $true)][string]$MonitorVersion,
+        [string]$NodeExecutable
     )
 
     $siteAddresses = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -1472,6 +1609,10 @@ function New-SiteMonitoringConfigurationObject {
         throw 'Each monitored site must have one friendly monitoring name.'
     }
 
+    if ([string]::IsNullOrWhiteSpace($NodeExecutable)) {
+        $detectedRuntime = Get-SiteMonitoringNodeRuntime
+        $NodeExecutable = if ($null -ne $detectedRuntime) { $detectedRuntime.NodePath } else { 'node' }
+    }
     $installRoot = Get-SiteMonitoringInstallRoot -ConfigurationFolder $DeploymentFolder
     $logDirectory = Join-Path $DeploymentFolder 'monitor-logs'
     [ordered]@{
@@ -1483,6 +1624,7 @@ function New-SiteMonitoringConfigurationObject {
         D4AInstallRoot       = $installRoot
         LogDirectory        = $logDirectory
         WatchdogLogRoot     = Join-Path $installRoot 'Log\TaskSchedulerOutput'
+        NodeExecutable      = $NodeExecutable
         NodemailerModulePath = Join-Path $DeploymentFolder 'node_modules\nodemailer'
         LogRetentionDays    = 5
         NginxErrorsPerMinuteThreshold = 20
@@ -1527,7 +1669,8 @@ function Set-SiteMonitoringDeploymentConfiguration {
         [Parameter(Mandatory = $true)][string]$Hosts,
         [Parameter(Mandatory = $true)][string[]]$SiteNames,
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
-        [Parameter(Mandatory = $true)][string]$DeploymentFolder
+        [Parameter(Mandatory = $true)][string]$DeploymentFolder,
+        [string]$NodeExecutable
     )
 
     $metadata = Get-SiteMonitoringScriptMetadata -ScriptPath $ScriptPath
@@ -1540,19 +1683,25 @@ function Set-SiteMonitoringDeploymentConfiguration {
         -SiteNames $SiteNames `
         -NotificationAddresses $NotificationAddresses `
         -DeploymentFolder $DeploymentFolder `
-        -MonitorVersion $metadata.VersionText
+        -MonitorVersion $metadata.VersionText `
+        -NodeExecutable $NodeExecutable
     return Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $configurationPath
 }
 
 function Install-SiteMonitoringNodemailer {
-    param([Parameter(Mandatory = $true)][string]$DeploymentFolder)
+    param(
+        [Parameter(Mandatory = $true)][string]$DeploymentFolder,
+        [string]$NpmExecutable
+    )
 
-    $npmCommand = Get-Command npm.cmd, npm -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $npmCommand) {
-        throw "npm was not found. Install Node.js (including npm), then run Add Site Monitoring again."
+    if ([string]::IsNullOrWhiteSpace($NpmExecutable)) {
+        $runtime = Get-SiteMonitoringNodeRuntime
+        if ($null -ne $runtime) { $NpmExecutable = $runtime.NpmPath }
+    }
+    if ([string]::IsNullOrWhiteSpace($NpmExecutable) -or -not (Test-Path -LiteralPath $NpmExecutable -PathType Leaf)) {
+        throw 'npm could not be located after the Node.js prerequisite check.'
     }
 
-    $npmPath = $npmCommand.Source
     Write-StreamingLog -Percent 35 -Step "Node.js" -Description "Preparing nodemailer in $DeploymentFolder."
     Invoke-InstallStepWithProgress -Step "nodemailer" -Description "Installing nodemailer in the selected Configuration folder" -StartPercent 40 -EndPercent 75 -ScriptBlock {
         param([pscustomobject]$InstallSettings)
@@ -1564,12 +1713,111 @@ function Install-SiteMonitoringNodemailer {
         }
         & $InstallSettings.NpmExecutable 'install' 'nodemailer' '--save'
         if ($LASTEXITCODE -ne 0) { throw "npm install nodemailer failed with exit code $LASTEXITCODE." }
-    } -Argument ([pscustomobject]@{ WorkingFolder = $DeploymentFolder; NpmExecutable = $npmPath })
+    } -Argument ([pscustomobject]@{ WorkingFolder = $DeploymentFolder; NpmExecutable = $NpmExecutable })
 
     $modulePath = Join-Path $DeploymentFolder 'node_modules\nodemailer'
     if (-not (Test-Path -LiteralPath $modulePath -PathType Container)) {
         throw "npm completed but nodemailer was not found at $modulePath."
     }
+    return $modulePath
+}
+
+function Test-IsIncompleteSiteMonitoringDeployment {
+    param(
+        [Parameter(Mandatory = $true)][string]$TemplatePath,
+        [Parameter(Mandatory = $true)][string]$TargetScriptPath,
+        [Parameter(Mandatory = $true)][string]$ConfigurationPath,
+        [Parameter(Mandatory = $true)][string]$DeploymentFolder
+    )
+
+    if (-not (Test-Path -LiteralPath $TargetScriptPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $ConfigurationPath -PathType Leaf) -or
+        (Test-Path -LiteralPath (Join-Path $DeploymentFolder 'node_modules\nodemailer') -PathType Container)) {
+        return $false
+    }
+
+    try {
+        if ((Get-FileHash -LiteralPath $TemplatePath -Algorithm SHA256 -ErrorAction Stop).Hash -ne
+            (Get-FileHash -LiteralPath $TargetScriptPath -Algorithm SHA256 -ErrorAction Stop).Hash) {
+            return $false
+        }
+        $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ([int]$configuration.ConfigurationVersion -ne 1 -or @($configuration.SiteAddress).Count -eq 0 -or
+            @($configuration.NotificationTo).Count -eq 0) {
+            return $false
+        }
+
+        if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $false }
+        $relatedTasks = @(
+            foreach ($taskName in @('D4A-ScheduledMonitor', 'D4A-ScheduledMonitor-DailySummary')) {
+                $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                if ($null -ne $task -and (Get-SiteMonitoringTaskScriptPath -Task $task) -ieq $TargetScriptPath) {
+                    $task
+                }
+            }
+        )
+        return ($relatedTasks.Count -eq 0)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-SiteMonitoringConfigurationSummary {
+    param([Parameter(Mandatory = $true)][string]$ConfigurationPath)
+
+    $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $sites = @($configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $siteNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($siteNames.Count -ne $sites.Count) {
+        $fallbackName = if ([string]::IsNullOrWhiteSpace([string]$configuration.MonitoringName)) { $env:COMPUTERNAME } else { [string]$configuration.MonitoringName }
+        $siteNames = @($sites | ForEach-Object { $fallbackName })
+    }
+    $recipients = @($configuration.NotificationTo | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($sites.Count -eq 0 -or $recipients.Count -eq 0) {
+        throw "The incomplete monitoring configuration is missing sites or notification recipients: $ConfigurationPath"
+    }
+
+    return [pscustomobject]@{
+        Hosts                 = $sites -join ','
+        SiteNames             = $siteNames
+        NotificationAddresses = $recipients -join ','
+    }
+}
+
+function Update-SiteMonitoringNodeConfiguration {
+    param(
+        [Parameter(Mandatory = $true)][string]$ConfigurationPath,
+        [Parameter(Mandatory = $true)][string]$NodeExecutable,
+        [Parameter(Mandatory = $true)][string]$NodemailerModulePath
+    )
+
+    $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    foreach ($setting in @{
+            NodeExecutable       = $NodeExecutable
+            NodemailerModulePath = $NodemailerModulePath
+        }.GetEnumerator()) {
+        $property = $configuration.PSObject.Properties[$setting.Key]
+        if ($null -eq $property) {
+            $configuration | Add-Member -MemberType NoteProperty -Name $setting.Key -Value $setting.Value
+        }
+        else {
+            $property.Value = $setting.Value
+        }
+    }
+
+    $backupPath = '{0}.pre-node-repair-{1}.json' -f ([IO.Path]::Combine((Split-Path -Parent $ConfigurationPath), [IO.Path]::GetFileNameWithoutExtension($ConfigurationPath))), (Get-Date -Format 'yyyyMMddHHmmss')
+    Copy-Item -LiteralPath $ConfigurationPath -Destination $backupPath -ErrorAction Stop
+    $temporaryPath = "$ConfigurationPath.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $json = $configuration | ConvertTo-Json -Depth 10
+        [IO.File]::WriteAllText($temporaryPath, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporaryPath -Destination $ConfigurationPath -Force -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+    return $backupPath
 }
 
 function Read-SiteMonitoringFrequencyMinutes {
@@ -2129,7 +2377,29 @@ function Show-AddSiteMonitoring {
 
         $targetScriptPath = Join-Path $deploymentFolder ([IO.Path]::GetFileName($templatePath))
         $configurationPath = Get-SiteMonitoringConfigurationPath -DeploymentFolder $deploymentFolder
+        $resumeIncompleteDeployment = $false
+        if (Test-Path -LiteralPath $targetScriptPath -PathType Leaf) {
+            $resumeIncompleteDeployment = Test-IsIncompleteSiteMonitoringDeployment `
+                -TemplatePath $templatePath `
+                -TargetScriptPath $targetScriptPath `
+                -ConfigurationPath $configurationPath `
+                -DeploymentFolder $deploymentFolder
+            if (-not $resumeIncompleteDeployment) {
+                throw "A monitor file already exists at $targetScriptPath. Use Update Existing Monitoring Settings so an active deployment is not overwritten."
+            }
+
+            $existingSummary = Get-SiteMonitoringConfigurationSummary -ConfigurationPath $configurationPath
+            $hosts = $existingSummary.Hosts
+            $siteNames = @($existingSummary.SiteNames)
+            $emailAddresses = $existingSummary.NotificationAddresses
+            $siteNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $hosts -SiteNames $siteNames
+            Write-Host ''
+            Write-Host 'An incomplete deployment from a previous nodemailer failure was detected.' -ForegroundColor Yellow
+            Write-Host 'The existing monitor and site configuration will be preserved and the missing prerequisite will be repaired.' -ForegroundColor Gray
+        }
+
         Show-SectionTitle "Monitoring Deployment Summary"
+        Write-Host "Deployment mode: $(if ($resumeIncompleteDeployment) { 'Resume incomplete deployment' } else { 'New deployment' })" -ForegroundColor White
         Write-Host "Monitor version: $($templateMetadata.VersionText)" -ForegroundColor White
         Write-Host "Monitor release date: $($templateMetadata.ReleaseDate)" -ForegroundColor White
         Write-Host "Site address(es): $hosts" -ForegroundColor White
@@ -2140,26 +2410,53 @@ function Show-AddSiteMonitoring {
         Write-Host "Configuration file: $configurationPath" -ForegroundColor White
         Write-Host "Automatic alert cooldown: 24 hours per issue; resolved issues are automatically removed." -ForegroundColor Gray
 
-        if (Test-Path -LiteralPath $targetScriptPath -PathType Leaf) {
-            throw "A monitor file already exists at $targetScriptPath. Choose another folder or move the existing monitor first; existing monitoring configuration is not overwritten."
-        }
-
-        $confirmation = Read-Host "Type DEPLOY to copy, configure, unblock the monitor, and install nodemailer"
-        if (Test-IsBack $confirmation -or $confirmation -cne 'DEPLOY') {
+        $confirmationWord = if ($resumeIncompleteDeployment) { 'RESUME' } else { 'DEPLOY' }
+        $confirmation = Read-Host "Type $confirmationWord to validate Node.js/npm, install nodemailer, and continue"
+        if (Test-IsBack $confirmation -or $confirmation -cne $confirmationWord) {
             Write-Host "Deployment cancelled. No files, packages, or tasks were changed." -ForegroundColor Cyan
             Pause-Screen
             return
         }
 
-        Write-StreamingLog -Percent 20 -Step "Copy" -Description "Copying the monitoring template to $deploymentFolder."
-        Copy-Item -LiteralPath $templatePath -Destination $targetScriptPath -ErrorAction Stop
-        Unblock-File -LiteralPath $targetScriptPath -ErrorAction Stop
-        Write-StreamingLog -Percent 30 -Step "Configure" -Description "Creating the site-specific JSON configuration under monitor-logs."
-        $configurationPath = Set-SiteMonitoringDeploymentConfiguration -ScriptPath $targetScriptPath -Hosts $hosts -SiteNames $siteNames -NotificationAddresses $emailAddresses -DeploymentFolder $deploymentFolder
-        Install-SiteMonitoringNodemailer -DeploymentFolder $deploymentFolder
+        $nodeRuntime = Ensure-SiteMonitoringNodeRuntime
+        if ($null -eq $nodeRuntime) {
+            Pause-Screen
+            return
+        }
+        $nodemailerPath = Install-SiteMonitoringNodemailer -DeploymentFolder $deploymentFolder -NpmExecutable $nodeRuntime.NpmPath
 
-        Write-Host "Site monitoring script created successfully: $targetScriptPath" -ForegroundColor Green
-        Write-Host "Site configuration created successfully: $configurationPath" -ForegroundColor Green
+        if ($resumeIncompleteDeployment) {
+            Write-StreamingLog -Percent 78 -Step 'Repair' -Description 'Recording absolute Node.js and nodemailer paths in the preserved configuration.'
+            $configurationBackupPath = Update-SiteMonitoringNodeConfiguration `
+                -ConfigurationPath $configurationPath `
+                -NodeExecutable $nodeRuntime.NodePath `
+                -NodemailerModulePath $nodemailerPath
+            Write-Host "Existing site configuration preserved. Repair backup: $configurationBackupPath" -ForegroundColor Green
+        }
+        else {
+            try {
+                Write-StreamingLog -Percent 76 -Step "Copy" -Description "Copying the monitoring template to $deploymentFolder."
+                Copy-Item -LiteralPath $templatePath -Destination $targetScriptPath -ErrorAction Stop
+                Unblock-File -LiteralPath $targetScriptPath -ErrorAction Stop
+                Write-StreamingLog -Percent 79 -Step "Configure" -Description "Creating the site-specific JSON configuration under monitor-logs."
+                $configurationPath = Set-SiteMonitoringDeploymentConfiguration `
+                    -ScriptPath $targetScriptPath `
+                    -Hosts $hosts `
+                    -SiteNames $siteNames `
+                    -NotificationAddresses $emailAddresses `
+                    -DeploymentFolder $deploymentFolder `
+                    -NodeExecutable $nodeRuntime.NodePath
+            }
+            catch {
+                Remove-Item -LiteralPath $configurationPath -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $targetScriptPath -Force -ErrorAction SilentlyContinue
+                throw
+            }
+        }
+
+        Write-Host "Site monitoring script is ready: $targetScriptPath" -ForegroundColor Green
+        Write-Host "Site configuration is ready: $configurationPath" -ForegroundColor Green
+        Write-Host "Node.js executable: $($nodeRuntime.NodePath)" -ForegroundColor Green
         Write-Host "nodemailer is installed in: $deploymentFolder" -ForegroundColor Green
 
         $frequencyMinutes = Read-SiteMonitoringFrequencyMinutes

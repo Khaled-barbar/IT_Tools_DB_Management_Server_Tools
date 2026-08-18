@@ -6,6 +6,15 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.2 - 2026-08-18
+
+### Corrected
+
+- Corrected Add New Site Monitoring so Node.js and npm are resolved from the current command path, standard Windows installation folders, environment variables, and registry installation data.
+- Added a guided, progress-visible installation or repair of the official `OpenJS.NodeJS.LTS` package through Windows Package Manager when Node.js/npm are genuinely absent.
+- Moved Node.js/npm and nodemailer validation before creation of new monitoring files, preventing the missing-npm error from leaving another partial deployment.
+- Added safe `RESUME` handling for an incomplete deployment left by the previous failure, preserving its monitor and JSON settings while backing up and recording absolute Node.js/nodemailer paths.
+
 ## 7.1.1 - 2026-08-18
 
 ### Added

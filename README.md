@@ -20,7 +20,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.1.1, Monitoring 6.6.0 |
+| Current release | IT Tools 7.1.2, Monitoring 6.6.0 |
 
 ## Why it exists
 
@@ -58,7 +58,7 @@ Use this only when an update check must be skipped temporarily:
 .\IT_Tools_Database_Translations_and_Server_Checks.ps1 -SkipAutomaticUpdate
 ```
 
-The script can offer to install the `SqlServer` or `ImportExcel` PowerShell module for the current user when a selected feature requires it. Missing official companion files are downloaded only when their feature is selected and are verified against `update-manifest.json` before use.
+The script can offer to install the `SqlServer` or `ImportExcel` PowerShell module for the current user when a selected feature requires it. Monitoring deployment can also detect or install Node.js LTS and npm before creating monitor files. Missing official companion files are downloaded only when their feature is selected and are verified against `update-manifest.json` before use.
 
 ## Safe operation
 

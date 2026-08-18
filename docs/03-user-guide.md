@@ -388,7 +388,7 @@ Purpose: deploy a configuration-driven D4A health monitor and optional Scheduled
 Prerequisites:
 
 - run IT Tools as Administrator;
-- Node.js/npm available;
+- Node.js/npm available, or Administrator access to approve its guided WinGet installation;
 - Decide4Action service installed or a known Configuration folder;
 - approved notification recipients;
 - outbound email path available.
@@ -400,10 +400,11 @@ Procedure:
 3. Confirm or select the Configuration deployment folder.
 4. Enter one or more notification addresses separated by commas.
 5. Review the complete deployment summary and type `DEPLOY`.
-6. Choose a recurring frequency; 5 minutes is the recommended default unless the site requires another interval.
-7. Type `CREATE` to register the silent recurring task under `SYSTEM`.
-8. Optionally configure the daily healthy-status email and its server-local time.
-9. Run the first test email when prompted.
+6. If Node.js/npm are absent, type `INSTALL` to install or repair the official Node.js LTS package. Node.js, npm, and nodemailer are validated before new monitor files are created.
+7. Choose a recurring frequency; 5 minutes is the recommended default unless the site requires another interval.
+8. Type `CREATE` to register the silent recurring task under `SYSTEM`.
+9. Optionally configure the daily healthy-status email and its server-local time.
+10. Run the first test email when prompted.
 
 Expected result:
 
@@ -412,6 +413,8 @@ Expected result:
 - configuration stored in `monitor-logs\D4A-ScheduledMonitor.config.json`;
 - Scheduled Task runs silently, including when users are logged out;
 - test email confirms delivery.
+
+If an earlier deployment stopped after creating the monitor/configuration but before nodemailer was installed, the tool can identify that specific incomplete state. It displays **Resume incomplete deployment** and requires `RESUME`; the existing JSON is preserved and backed up while the missing runtime paths are repaired. An active or modified monitor is never treated as an incomplete deployment and must be managed through **Update Existing Monitoring Settings**.
 
 ### Update Existing Monitoring Settings
 
