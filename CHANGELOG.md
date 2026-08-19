@@ -6,6 +6,20 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.5 - 2026-08-19
+
+### Changed
+
+- Reduced non-actionable monitoring email: relevant Windows event warnings and errors remain in `error_log` and daily/test reports, while independent Windows-service checks determine whether a service outage needs an immediate alert.
+- Removed disk-space warning notifications. Disk space now alerts only at 5 GB free or less, or 95 percent used or more.
+- Added one-time recovery emails for previously notified issues after the same check explicitly returns healthy; missing or failed checks cannot create a false recovery.
+- Updated normal alert subjects to identify the affected component and notification level, including `API Alert` and `Disk Space Critical`; more than one distinct issue uses `Multiple Alerts detected`.
+
+### Monitoring 6.7.0
+
+- Added backward-compatible notification history to the monitor state file so successful alert delivery and later recovery can be correlated without changing site configuration.
+- Added component-aware alert and recovery subjects and documented the notification policy in generated `monitor-logs\README.txt` files.
+
 ## 7.1.4 - 2026-08-18
 
 ### Added

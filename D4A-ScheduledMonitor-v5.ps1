@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.6.0
-# D4A-Monitor-Release-Date: 2026-08-18
+# D4A-Monitor-Version: 6.7.0
+# D4A-Monitor-Release-Date: 2026-08-19
 
 <#
 .SYNOPSIS
@@ -220,14 +220,16 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.6.0'
-$script:MonitorReleaseDate = '2026-08-18'
+$script:MonitorVersion = '6.7.0'
+$script:MonitorReleaseDate = '2026-08-19'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorUpdateManifestFileName = 'update-manifest.json'
 $script:MonitorReleaseScriptFileName = 'D4A-ScheduledMonitor-v5.ps1'
 $script:EndpointSlowLogMs = 4500
 $script:ResourceAlertPercent = 90
 $script:ResourceConsecutiveRunsRequired = 2
+$script:DiskCriticalFreeGb = 5
+$script:DiskCriticalUsedPercent = 95
 $script:CommandLineParameterNames = @($PSBoundParameters.Keys)
 $script:ResolvedConfigPath = $null
 $script:ConfigurationLoaded = $false
@@ -774,6 +776,8 @@ function Show-MonitorConfiguration {
         EndpointSlowLogMs                   = $script:EndpointSlowLogMs
         ResourceAlertPercent                = $script:ResourceAlertPercent
         ResourceConsecutiveRunsRequired     = $script:ResourceConsecutiveRunsRequired
+        DiskCriticalFreeGb                  = $script:DiskCriticalFreeGb
+        DiskCriticalUsedPercent             = $script:DiskCriticalUsedPercent
         ApiHealthFailureAttempts            = $ApiHealthFailureAttempts
         NginxErrorsPerMinuteThreshold       = $NginxErrorsPerMinuteThreshold
         NginxConsecutiveMinutes             = $NginxConsecutiveMinutes
@@ -844,11 +848,11 @@ endpoints, TLS certificates, local D4A Windows services, the local API listener,
 
 Email behavior
 --------------
-Normal scheduled runs send an email only when a new warning, alert, or error is
-found. After a successful notification, an automatic 24-hour cooldown is added
-for that specific issue. When the issue is no longer detected, the automatic
-cooldown is removed. Test and daily-summary runs send an email even when the
-server is healthy.
+Normal scheduled runs send an email only for a notification-eligible issue.
+After a successful notification, an automatic 24-hour cooldown is added for
+that specific issue. When a later scan explicitly confirms the check is healthy,
+the monitor sends a recovery email and removes the automatic cooldown. Test and
+daily-summary runs send an email even when the server is healthy.
 
 External configuration
 ----------------------
@@ -901,7 +905,9 @@ Data Collector LastEventTime SQL timeouts are retryable while the D4A Data
 Collector Windows service is Running. The first failure is logged only, the
 second logs diagnostics, and the third consecutive failure alerts. The runtime
 state file D4A-ScheduledMonitor.state.json stores this counter and LastHealthy
-timestamp; it is state data, not a component log.
+timestamp. It also stores the rule keys and component labels of successfully
+emailed issues so one recovery notification can be sent after an explicit OK.
+It is state data, not a component log.
 
 When the service is Running, LastHealthy older than 5 minutes is a warning and
 older than 10 minutes is critical. If the Windows service is not Running, the
@@ -917,10 +923,28 @@ and memory readings are also retained in error_log; they alert only after two
 consecutive monitor runs at 90% or higher. A recovered API retry is included
 in daily results but does not send a normal notification. NSSM output-file
 rotation events 1063 and 1077, and the known harmless "Failed to read output"
-pipe-ended event, are excluded. Windows-event warnings appear only in the
-daily monitoring results email. Watchdog evidence that a service was
-successfully restarted is also daily-only; Windows-event alerts and unresolved
-Watchdog failures still notify immediately.
+pipe-ended event, are excluded. Windows-event warnings and errors are written
+to error_log and appear in daily results, but never trigger an immediate email;
+service availability is evaluated independently. Watchdog evidence that a
+service was successfully restarted is also daily-only; unresolved Watchdog
+failures still notify immediately. Disk space has no warning email: it alerts
+only at 5 GB free or less, or when used space reaches 95 percent.
+
+NOTIFICATION AND RECOVERY POLICY
+================================
+Relevant Windows event warnings and errors are always retained in error_log and
+daily/test reports, but they do not cause immediate email. D4A and Mosquitto
+service checks independently alert when a Windows service is not Running.
+
+Disk usage does not generate warning emails. A critical alert is sent when a
+fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
+first.
+
+After an alert email is delivered, its rule key and component are retained in
+D4A-ScheduledMonitor.state.json. A later scan sends one recovery email only when
+the same check explicitly returns OK. Recovery is not inferred from a missing or
+failed check. Single-issue subjects identify the component and level; multiple
+simultaneous issues use "Multiple Alerts detected".
 
 All dated .txt monitoring logs are retained for the current day plus the prior
 four days. README.txt and ignore-rules.txt are not removed by log retention.
@@ -1035,8 +1059,31 @@ two consecutive minutes. Frontend and API endpoints notify only when
 unreachable; responses over 4500 ms are logged without an email. CPU and RAM
 notify only after two consecutive monitor runs at 90% or higher. NSSM
 server.log rotation events 1063 and 1077, and the harmless pipe-ended output
-read event, are excluded; Windows-event warnings and successful Watchdog
-restart evidence are included only in daily monitoring results.
+read event, are excluded. All relevant Windows events are log-only because
+service availability is checked separately. Disk space alerts only at 5 GB
+free or less, or 95 percent used. A successfully emailed issue produces one
+recovery email after a later check explicitly confirms that it is healthy.
+'@
+}
+
+function Get-MonitorLogsReadmeNotificationPolicy {
+    return @'
+
+NOTIFICATION AND RECOVERY POLICY
+================================
+Relevant Windows event warnings and errors are always retained in error_log and
+daily/test reports, but they do not cause immediate email. D4A and Mosquitto
+service checks independently alert when a Windows service is not Running.
+
+Disk usage does not generate warning emails. A critical alert is sent when a
+fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
+first.
+
+After an alert email is delivered, its rule key and component are retained in
+D4A-ScheduledMonitor.state.json. A later scan sends one recovery email only when
+the same check explicitly returns OK. Recovery is not inferred from a missing or
+failed check. Single-issue subjects identify the component and level; multiple
+simultaneous issues use "Multiple Alerts detected".
 '@
 }
 
@@ -1085,6 +1132,10 @@ function Ensure-MonitorLogDocumentation {
         }
         if ($existingReadme -notmatch '(?m)^AUTOMATIC MONITOR UPDATES$') {
             [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeAutomaticUpdate), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^NOTIFICATION AND RECOVERY POLICY$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeNotificationPolicy), $script:Utf8NoBom)
         }
     }
 
@@ -1159,7 +1210,7 @@ function Initialize-MonitorLogging {
 
 function Get-MonitorRuntimeState {
     $defaultState = [pscustomobject]@{
-        StateVersion = 2
+        StateVersion = 3
         DataCollectorLastEvent = [pscustomobject]@{
             ConsecutiveFailures = 0
             LastHealthy         = $null
@@ -1170,6 +1221,7 @@ function Get-MonitorRuntimeState {
             CpuConsecutiveHigh    = 0
             MemoryConsecutiveHigh = 0
         }
+        NotifiedIssues = @()
     }
     if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath) -or -not (Test-Path -LiteralPath $script:MonitorStatePath -PathType Leaf)) {
         return $defaultState
@@ -1193,11 +1245,17 @@ function Get-MonitorRuntimeState {
                 $state.ResourceUtilization | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.ResourceUtilization.$propertyName
             }
         }
-        if ($null -eq $state.PSObject.Properties['StateVersion']) {
-            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 2
+        if ($null -eq $state.PSObject.Properties['NotifiedIssues']) {
+            $state | Add-Member -MemberType NoteProperty -Name NotifiedIssues -Value @()
         }
         else {
-            $state.StateVersion = 2
+            $state.NotifiedIssues = @($state.NotifiedIssues)
+        }
+        if ($null -eq $state.PSObject.Properties['StateVersion']) {
+            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 3
+        }
+        else {
+            $state.StateVersion = 3
         }
         return $state
     }
@@ -1210,7 +1268,10 @@ function Get-MonitorRuntimeState {
 }
 
 function Save-MonitorRuntimeState {
-    param([Parameter(Mandatory = $true)][object]$State)
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [switch]$ThrowOnFailure
+    )
 
     if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath)) { return }
     $temporaryPath = '{0}.{1}.tmp' -f $script:MonitorStatePath, [guid]::NewGuid().ToString('N')
@@ -1222,6 +1283,7 @@ function Save-MonitorRuntimeState {
         Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
             'Unable to save monitor state: {0}' -f $_.Exception.Message
         )
+        if ($ThrowOnFailure.IsPresent) { throw }
     }
     finally {
         if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
@@ -1715,6 +1777,79 @@ function Remove-ResolvedAutomaticIssueCooldowns {
     if ($changed) {
         [IO.File]::WriteAllLines($script:IgnoreRulesPath, $updatedLines.ToArray(), $script:Utf8NoBom)
     }
+}
+
+function Get-RecoveredNotifiedIssues {
+    $state = Get-MonitorRuntimeState
+    $healthyKeys = @{}
+    foreach ($result in @($script:Results | Where-Object { $_.Severity -eq 'OK' })) {
+        $healthyKeys[(ConvertTo-IgnoreRuleKey -Value $result.Key)] = $true
+    }
+
+    $recovered = [System.Collections.Generic.List[object]]::new()
+    foreach ($notifiedIssue in @($state.NotifiedIssues)) {
+        if ($null -eq $notifiedIssue -or [string]::IsNullOrWhiteSpace([string]$notifiedIssue.Key)) { continue }
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$notifiedIssue.Key)
+        if (-not $healthyKeys.ContainsKey($key)) { continue }
+
+        $lastNotified = if ([string]::IsNullOrWhiteSpace([string]$notifiedIssue.LastNotifiedAt)) {
+            'unknown time'
+        }
+        else {
+            [string]$notifiedIssue.LastNotifiedAt
+        }
+        $recovered.Add([pscustomobject]@{
+                Time                 = Get-Date
+                Severity             = 'OK'
+                Category             = [string]$notifiedIssue.Category
+                Check                = [string]$notifiedIssue.Check
+                Message              = ('Recovery confirmed after a previous {0} notification sent at {1}.' -f $notifiedIssue.Severity, $lastNotified)
+                Key                  = $key
+                IgnoreActive         = $false
+                IgnoreMode           = $null
+                IgnoreUntil          = $null
+                NotificationEligible = $true
+                IsRecovery           = $true
+            }) | Out-Null
+        Write-RunLog -Level OK -Category Recovery -Color Green -Message (
+            'Previously notified issue is healthy: {0}; component={1}; check={2}.' -f $key, $notifiedIssue.Category, $notifiedIssue.Check
+        )
+    }
+    return $recovered.ToArray()
+}
+
+function Update-NotifiedIssueStateAfterDelivery {
+    param(
+        [object[]]$NewlyNotifiedIssues,
+        [object[]]$RecoveredIssues
+    )
+
+    $state = Get-MonitorRuntimeState
+    $issuesByKey = @{}
+    foreach ($issue in @($state.NotifiedIssues)) {
+        if ($null -eq $issue -or [string]::IsNullOrWhiteSpace([string]$issue.Key)) { continue }
+        $issuesByKey[(ConvertTo-IgnoreRuleKey -Value ([string]$issue.Key))] = $issue
+    }
+
+    foreach ($recoveredIssue in @($RecoveredIssues)) {
+        if ($null -eq $recoveredIssue -or [string]::IsNullOrWhiteSpace([string]$recoveredIssue.Key)) { continue }
+        [void]$issuesByKey.Remove((ConvertTo-IgnoreRuleKey -Value ([string]$recoveredIssue.Key)))
+    }
+
+    foreach ($issue in @($NewlyNotifiedIssues)) {
+        if ($null -eq $issue -or [string]::IsNullOrWhiteSpace([string]$issue.Key)) { continue }
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$issue.Key)
+        $issuesByKey[$key] = [pscustomobject]@{
+            Key            = $key
+            Category       = [string]$issue.Category
+            Check          = [string]$issue.Check
+            Severity       = [string]$issue.Severity
+            LastNotifiedAt = (Get-Date).ToString('o')
+        }
+    }
+
+    $state.NotifiedIssues = @($issuesByKey.Values | Sort-Object -Property Key)
+    Save-MonitorRuntimeState -State $state -ThrowOnFailure
 }
 
 function Invoke-SafeMonitorCheck {
@@ -2421,11 +2556,12 @@ function Test-DiskHealth {
             $disk.DeviceID, $freeGb, $sizeGb, $freePercent
         $diskKey = 'server-disk-space-{0}' -f $disk.DeviceID
 
-        if ($freeGb -lt 3 -or $freePercent -lt 5) {
-            Add-MonitorResult -Severity Alert -Category Server -Check 'Disk space' -Message $message -Key $diskKey
-        }
-        elseif ($freeGb -lt 10 -or $freePercent -lt 10) {
-            Add-MonitorResult -Severity Warning -Category Server -Check 'Disk space' -Message $message -Key $diskKey
+        $usedPercent = [Math]::Round(100 - $freePercent, 1)
+        if ($freeGb -le $script:DiskCriticalFreeGb -or $usedPercent -ge $script:DiskCriticalUsedPercent) {
+            Add-MonitorResult -Severity Alert -Category Server -Check 'Disk space' -Message (
+                '{0}; critical threshold reached: free space <= {1} GB or used space >= {2}%.' -f
+                    $message, $script:DiskCriticalFreeGb, $script:DiskCriticalUsedPercent
+            ) -Key $diskKey
         }
         else {
             Add-MonitorResult -Severity OK -Category Server -Check 'Disk space' -Message $message -Key $diskKey
@@ -2659,7 +2795,10 @@ function Test-RelevantWindowsEvents {
                 $latest.Id,
                 $latest.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'),
                 $eventMessage
-        ) -Key $eventKey -NotificationEligible:($severity -eq 'Alert')
+        ) -Key $eventKey -NotificationEligible:$false
+        Write-RunLog -Category Diagnostics -Color DarkGray -Message (
+            'Windows event {0} is log-only. D4A and Mosquitto service availability is evaluated independently by the Windows service checks.' -f $eventKey
+        )
     }
 }
 
@@ -3264,12 +3403,56 @@ function Invoke-SmtpEmail {
     }
 }
 
-function Get-IssueTypeLabel {
+function Get-MonitorSubjectComponentLabel {
+    param([Parameter(Mandatory = $true)][object]$Result)
+
+    $check = [string]$Result.Check
+    $searchText = '{0} {1} {2}' -f $Result.Category, $check, $Result.Key
+    if ($check -match '(?i)certificate' -and $searchText -match '(?i)\bAPI\b') { return 'API Certificate' }
+    if ($check -match '(?i)certificate' -and $searchText -match '(?i)frontend') { return 'Frontend Certificate' }
+    if ($searchText -match '(?i)\bAPI\b') { return 'API' }
+    if ($searchText -match '(?i)disk') { return 'Disk Space' }
+    if ($searchText -match '(?i)data collector') { return 'Data Collector' }
+    if ($searchText -match '(?i)nginx') { return 'Nginx' }
+    if ($searchText -match '(?i)mosquitto|mqtt') { return 'Mosquitto/MQTT' }
+    if ($searchText -match '(?i)\bCPU\b') { return 'CPU' }
+    if ($searchText -match '(?i)memory|\bRAM\b') { return 'Memory' }
+    if ($check -match '(?i)windows service' -and [string]$Result.Message -match '^(?<ServiceName>.+?)\s+\[') {
+        return $matches.ServiceName.Trim()
+    }
+    if ($searchText -match '(?i)frontend') { return 'Frontend' }
+    if (-not [string]::IsNullOrWhiteSpace($check)) { return ($check -replace '\s*\([^)]*\)\s*$', '').Trim() }
+    return 'Monitoring'
+}
+
+function Get-MonitorAlertSubjectLabel {
     param([object[]]$IssueResults)
 
-    if (@($IssueResults | Where-Object { $_.Severity -eq 'Error' }).Count -gt 0) { return 'Errors' }
-    if (@($IssueResults | Where-Object { $_.Severity -eq 'Alert' }).Count -gt 0) { return 'Alerts' }
-    return 'Warnings'
+    $distinctIssues = @($IssueResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })
+    if ($distinctIssues.Count -gt 1) { return 'Multiple Alerts detected' }
+    if ($distinctIssues.Count -eq 0) { return 'Monitoring Alert' }
+
+    $issue = $distinctIssues[0]
+    $component = Get-MonitorSubjectComponentLabel -Result $issue
+    $level = if ($component -eq 'Disk Space' -and $issue.Severity -in @('Alert', 'Error')) {
+        'Critical'
+    }
+    elseif ($issue.Severity -eq 'Warning') {
+        'Warning'
+    }
+    else {
+        'Alert'
+    }
+    return '{0} {1}' -f $component, $level
+}
+
+function Get-MonitorRecoverySubjectLabel {
+    param([object[]]$RecoveryResults)
+
+    $distinctRecoveries = @($RecoveryResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })
+    if ($distinctRecoveries.Count -gt 1) { return 'Multiple Recoveries detected' }
+    if ($distinctRecoveries.Count -eq 0) { return 'Monitoring Recovery' }
+    return '{0} Recovery' -f (Get-MonitorSubjectComponentLabel -Result $distinctRecoveries[0])
 }
 
 function New-EmailContent {
@@ -3277,45 +3460,39 @@ function New-EmailContent {
         [Parameter(Mandatory = $true)][string]$MonitoredSite,
         [Parameter(Mandatory = $true)][string]$MonitoringName,
         [object[]]$ActiveIgnoreRules,
-        [ValidateSet('Alert', 'Test', 'Daily')]
+        [object[]]$RecoveryResults,
+        [ValidateSet('Alert', 'Recovery', 'Test', 'Daily')]
         [string]$EmailType = 'Alert'
     )
 
     $allResults = @($script:Results.ToArray())
+    $recoveryResults = @($RecoveryResults)
     $dailyOnlyResults = @($allResults | Where-Object {
         $_.Severity -ne 'OK' -and -not $_.NotificationEligible
     })
-    $emailResults = if ($EmailType -eq 'Alert') {
-        @($allResults | Where-Object {
-            $_.Severity -eq 'OK' -or $_.NotificationEligible
-        })
-    }
-    else {
-        $allResults
+    $emailResults = switch ($EmailType) {
+        'Alert' {
+            @($allResults | Where-Object { $_.Severity -eq 'OK' -or $_.NotificationEligible })
+        }
+        'Recovery' { $recoveryResults }
+        default { $allResults }
     }
     $issues = @($emailResults | Where-Object { $_.Severity -ne 'OK' })
     $unignoredIssues = @($issues | Where-Object { -not $_.IgnoreActive })
     $ignoredIssues = @($issues | Where-Object { $_.IgnoreActive })
     $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
     $ruleEntries = @(Get-IgnoreRuleEntries -Results $emailResults)
-    $issueLabel = if ($unignoredNotifiableIssues.Count -gt 0) {
-        Get-IssueTypeLabel -IssueResults $unignoredNotifiableIssues
-    }
-    elseif ($ignoredIssues.Count -gt 0) {
-        'Ignored issues'
-    }
-    else {
-        'Healthy'
-    }
     $heading = switch ($EmailType) {
         'Test' { 'MONITORING TEST RESULTS' }
         'Daily' { 'DAILY MONITORING RESULTS' }
+        'Recovery' { 'MONITORING RECOVERY' }
         default { 'MONITORING ALERT' }
     }
     $subject = switch ($EmailType) {
         'Test' { 'Monitoring test results for {0}' -f $MonitoringName }
         'Daily' { 'Daily monitoring results for {0}' -f $MonitoringName }
-        default { 'Monitoring alert for {0} - {1} detected' -f $MonitoringName, $issueLabel }
+        'Recovery' { '{0} - {1}' -f (Get-MonitorRecoverySubjectLabel -RecoveryResults $recoveryResults), $MonitoringName }
+        default { '{0} - {1}' -f (Get-MonitorAlertSubjectLabel -IssueResults $unignoredNotifiableIssues), $MonitoringName }
     }
 
     $text = [Text.StringBuilder]::new()
@@ -3328,9 +3505,10 @@ function New-EmailContent {
     [void]$text.AppendLine(('Issues detected: {0}' -f $issues.Count))
     [void]$text.AppendLine(('Issues not ignored: {0}' -f $unignoredIssues.Count))
     [void]$text.AppendLine(('Issues covered by active rules: {0}' -f $ignoredIssues.Count))
+    [void]$text.AppendLine(('Recovered previously notified issues: {0}' -f $recoveryResults.Count))
     [void]$text.AppendLine(('Active ignore rules: {0}' -f @($ActiveIgnoreRules).Count))
     if ($EmailType -eq 'Alert' -and $dailyOnlyResults.Count -gt 0) {
-        [void]$text.AppendLine(('Daily-only warning or recovery evidence held for the daily monitoring email: {0}' -f $dailyOnlyResults.Count))
+        [void]$text.AppendLine(('Daily-only warning evidence held for the daily monitoring email: {0}' -f $dailyOnlyResults.Count))
     }
     [void]$text.AppendLine('')
     [void]$text.AppendLine('ISSUES DETECTED')
@@ -3347,6 +3525,16 @@ function New-EmailContent {
             }
             [void]$text.AppendLine(('[{0}] [{1}] {2}: {3}' -f $result.Severity, $result.Category, $result.Check, $result.Message))
             [void]$text.AppendLine(('Rule key: {0}; Ignore status: {1}' -f $result.Key, $ignoreStatus))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('RECOVERED ISSUES')
+    if ($recoveryResults.Count -eq 0) {
+        [void]$text.AppendLine('No previously notified issue recovered during this scan.')
+    }
+    else {
+        foreach ($recovery in $recoveryResults) {
+            [void]$text.AppendLine(('[RECOVERY] [{0}] {1}: {2} [key={3}]' -f $recovery.Category, $recovery.Check, $recovery.Message, $recovery.Key))
         }
     }
     [void]$text.AppendLine('')
@@ -3392,16 +3580,17 @@ function New-EmailContent {
     $html = [Text.StringBuilder]::new()
     [void]$html.AppendLine('<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#202124;font-size:14px">')
     [void]$html.AppendLine(('<h2>{0}</h2>' -f [Net.WebUtility]::HtmlEncode($heading)))
-    [void]$html.AppendLine(('<p><b>Monitoring name:</b> {0}<br><b>Sites:</b> {1}<br><b>Server:</b> {2}<br><b>Time:</b> {3}<br><b>Issues detected:</b> {4}<br><b>Not ignored:</b> {5}<br><b>Covered by active ignore rules:</b> {6}</p>' -f
+    [void]$html.AppendLine(('<p><b>Monitoring name:</b> {0}<br><b>Sites:</b> {1}<br><b>Server:</b> {2}<br><b>Time:</b> {3}<br><b>Issues detected:</b> {4}<br><b>Not ignored:</b> {5}<br><b>Covered by active ignore rules:</b> {6}<br><b>Recovered previously notified issues:</b> {7}</p>' -f
         [Net.WebUtility]::HtmlEncode($MonitoringName),
         [Net.WebUtility]::HtmlEncode($MonitoredSite),
         [Net.WebUtility]::HtmlEncode($env:COMPUTERNAME),
         [Net.WebUtility]::HtmlEncode((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')),
         $issues.Count,
         $unignoredIssues.Count,
-        $ignoredIssues.Count))
+        $ignoredIssues.Count,
+        $recoveryResults.Count))
     if ($EmailType -eq 'Alert' -and $dailyOnlyResults.Count -gt 0) {
-        [void]$html.AppendLine(('<p><i>{0} daily-only warning or recovery item(s) were retained for the daily monitoring email and are omitted here.</i></p>' -f $dailyOnlyResults.Count))
+        [void]$html.AppendLine(('<p><i>{0} daily-only warning item(s) were retained for the daily monitoring email and are omitted here.</i></p>' -f $dailyOnlyResults.Count))
     }
 
     if ($issues.Count -eq 0) {
@@ -3426,6 +3615,22 @@ function New-EmailContent {
                 [Net.WebUtility]::HtmlEncode([string]$result.Message),
                 [Net.WebUtility]::HtmlEncode([string]$result.Key),
                 [Net.WebUtility]::HtmlEncode($ignoreStatus)))
+        }
+        [void]$html.AppendLine('</table>')
+    }
+
+    [void]$html.AppendLine('<h3>Recovered issues</h3>')
+    if ($recoveryResults.Count -eq 0) {
+        [void]$html.AppendLine('<p>No previously notified issue recovered during this scan.</p>')
+    }
+    else {
+        [void]$html.AppendLine('<table style="border-collapse:collapse;width:100%;background:#e8f5e9" border="1" cellpadding="6"><tr><th>Component</th><th>Check</th><th>Details</th><th>Rule key</th></tr>')
+        foreach ($recovery in $recoveryResults) {
+            [void]$html.AppendLine(('<tr><td>{0}</td><td>{1}</td><td>{2}</td><td><code>{3}</code></td></tr>' -f
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Category),
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Check),
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Message),
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Key)))
         }
         [void]$html.AppendLine('</table>')
     }
@@ -3672,6 +3877,7 @@ function Invoke-D4AMonitor {
         $unignoredIssues = @($issuesBeforeEmail | Where-Object { -not $_.IgnoreActive })
         $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
         $dailyOnlyResults = @($unignoredIssues | Where-Object { -not $_.NotificationEligible })
+        $recoveredNotifiedIssues = @(Get-RecoveredNotifiedIssues)
         Remove-ResolvedAutomaticIssueCooldowns -ActiveIssueKeys @($issuesBeforeEmail | Select-Object -ExpandProperty Key -Unique)
         if ($activeIgnoreRules.Count -gt 0) {
             Write-RunLog -Category Ignore -Color Cyan -Message ('Active ignore rules loaded: {0}; file={1}' -f $activeIgnoreRules.Count, $script:IgnoreRulesPath)
@@ -3688,9 +3894,23 @@ function Invoke-D4AMonitor {
             )
         }
 
-        $emailType = if ($SendTestResultsEmail.IsPresent) { 'Test' } elseif ($SendDailySummaryEmail.IsPresent) { 'Daily' } else { 'Alert' }
+        $emailType = if ($SendTestResultsEmail.IsPresent) {
+            'Test'
+        }
+        elseif ($SendDailySummaryEmail.IsPresent) {
+            'Daily'
+        }
+        elseif ($unignoredNotifiableIssues.Count -gt 0) {
+            'Alert'
+        }
+        else {
+            'Recovery'
+        }
         $shouldSendEmail = -not $DisableEmail.IsPresent -and (
-            $SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent -or $unignoredNotifiableIssues.Count -gt 0
+            $SendTestResultsEmail.IsPresent -or
+            $SendDailySummaryEmail.IsPresent -or
+            $unignoredNotifiableIssues.Count -gt 0 -or
+            $recoveredNotifiedIssues.Count -gt 0
         )
 
         if ($shouldSendEmail) {
@@ -3707,8 +3927,10 @@ function Invoke-D4AMonitor {
                 -MonitoredSite $siteForEmail `
                 -MonitoringName $resolvedMonitoringName `
                 -ActiveIgnoreRules $activeIgnoreRules `
+                -RecoveryResults $recoveredNotifiedIssues `
                 -EmailType $emailType
             Write-RunLog -Category Email -Color Cyan -Message ('Sending to {0}; subject={1}' -f $NotificationTo, $content.Subject)
+            $deliverySucceeded = $false
             try {
                 $delivery = Send-MonitorEmail `
                     -Subject $content.Subject `
@@ -3717,14 +3939,36 @@ function Invoke-D4AMonitor {
                 Write-RunLog -Level OK -Category Email -Color Green -Message (
                     'Notification sent to {0} using {1}. {2}' -f $NotificationTo, $delivery.Method, $delivery.Details
                 )
-                if ($emailType -eq 'Alert' -and $unignoredNotifiableIssues.Count -gt 0) {
-                    foreach ($issueKey in @($unignoredNotifiableIssues | Select-Object -ExpandProperty Key -Unique)) {
-                        Set-AutomaticIssueCooldown -Key $issueKey -Duration '24h'
-                    }
-                }
+                $deliverySucceeded = $true
             }
             catch {
                 Add-MonitorResult -Severity Error -Category Email -Check 'Notification delivery' -Message $_.Exception.Message
+            }
+
+            if ($deliverySucceeded) {
+                $newlyNotifiedIssues = if ($emailType -eq 'Alert') { $unignoredNotifiableIssues } else { @() }
+                try {
+                    Update-NotifiedIssueStateAfterDelivery `
+                        -NewlyNotifiedIssues $newlyNotifiedIssues `
+                        -RecoveredIssues $recoveredNotifiedIssues
+                }
+                catch {
+                    Add-MonitorResult -Severity Warning -Category Recovery -Check 'Notification state' -Message (
+                        'The email was delivered, but notification/recovery state could not be saved: {0}' -f $_.Exception.Message
+                    ) -NotificationEligible:$false
+                }
+                if ($emailType -eq 'Alert' -and $unignoredNotifiableIssues.Count -gt 0) {
+                    foreach ($issueKey in @($unignoredNotifiableIssues | Select-Object -ExpandProperty Key -Unique)) {
+                        try {
+                            Set-AutomaticIssueCooldown -Key $issueKey -Duration '24h'
+                        }
+                        catch {
+                            Add-MonitorResult -Severity Warning -Category Ignore -Check 'Automatic cooldown' -Message (
+                                'The email was delivered, but the automatic cooldown for {0} could not be saved: {1}' -f $issueKey, $_.Exception.Message
+                            ) -NotificationEligible:$false
+                        }
+                    }
+                }
             }
         }
         elseif ($DisableEmail.IsPresent) {
@@ -3737,7 +3981,7 @@ function Invoke-D4AMonitor {
         }
         elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredNotifiableIssues.Count -eq 0 -and $dailyOnlyResults.Count -gt 0) {
             Write-RunLog -Category Email -Color DarkGray -Message (
-                'Only daily-summary warning or recovery evidence was detected; it is retained for the daily monitoring results email.'
+                'Only daily-summary warning evidence was detected; it is retained for the daily monitoring results email.'
             )
         }
         elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredNotifiableIssues.Count -eq 0) {

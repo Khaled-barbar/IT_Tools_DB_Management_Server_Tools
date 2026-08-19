@@ -461,7 +461,7 @@ The default log folder is `Configuration\monitor-logs`.
 | `error_log_yyyyMMdd.txt` | Warnings, alerts, errors, and supporting evidence |
 | `ignore-rules.txt` | Active temporary, permanent, and automatic notification-suppression rules |
 | `D4A-ScheduledMonitor.config.json` | Site-specific settings and schedule metadata |
-| `D4A-ScheduledMonitor.state.json` | Consecutive-failure and recovery state |
+| `D4A-ScheduledMonitor.state.json` | Consecutive-failure state and successfully notified issue history used for explicit recovery emails |
 | `README.txt` | Local monitoring behavior and manual command examples |
 
 The monitor keeps five days of dated monitoring logs by default. Ignore-rule archives rotate on the 3rd, 13th, and 23rd and retain the three newest archives.
@@ -473,7 +473,11 @@ Normal endpoint behavior:
 - CPU or RAM at least 90 percent for one run: log only;
 - CPU or RAM at least 90 percent for two consecutive runs: alert;
 - Data Collector SQL timeout while service runs: degrade/retry before persistent alert;
-- Nginx errors: alert only above 20 errors/minute for two consecutive minutes.
+- Nginx errors: alert only above 20 errors/minute for two consecutive minutes;
+- relevant Windows event warning/error while services remain available: `error_log` and daily/test reports only;
+- disk space: no warning email; critical alert at 5 GB free or less, or 95 percent used or more;
+- previously notified issue later returns `OK`: one recovery email, then its recovery state and automatic cooldown are cleared;
+- one immediate issue: subject identifies component and level, such as `API Alert` or `Disk Space Critical`; multiple issues use `Multiple Alerts detected`.
 
 The monitor reports and collects evidence. It does not restart services.
 

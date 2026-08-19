@@ -72,3 +72,7 @@ These conditions must be respected whenever `IT_Tools_Database_Translations_and_
 - Monitoring version updates must back up the installed script, JSON configuration, and related Scheduled Task definitions before replacement.
 - Monitoring version updates must preserve site settings, logs, ignore rules, installed filename, Scheduled Task triggers, frequency, task identity, and background-execution settings.
 - Every monitoring execution must check the verified GitHub release for a newer monitoring version unless `-SkipAutomaticUpdate` is explicitly used. Validate the manifest SHA-256, version metadata, release-date metadata, and PowerShell syntax before replacement; if any check fails, keep the installed version and continue the monitoring run.
+- Keep Windows-event warnings and errors as log-only evidence; service availability checks are the authority for immediate service alerts.
+- Do not send disk-space warning emails. Send a critical disk alert only at 5 GB free or less, or 95 percent used or more.
+- Persist only successfully emailed notification-eligible issues for recovery tracking. Send one recovery email only after the same check explicitly returns `OK`; never infer recovery merely because a check or result is missing.
+- For normal alert emails, use a component-and-level subject for one issue and `Multiple Alerts detected` when more than one distinct notifiable issue is present.

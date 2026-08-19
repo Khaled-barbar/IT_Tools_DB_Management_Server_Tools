@@ -160,7 +160,7 @@ flowchart LR
     H --> I["Alert-noise reduction and ongoing refinement"]
 ```
 
-Monitoring became its own production-feedback loop. Early versions collected useful signals but could treat a single SQL timeout, a brief resource spike, or a slow yet reachable endpoint as an alert. Reviewing real notifications led to service-first checks, retries, consecutive-run thresholds, `LastHealthy` tracking, Nginx rate windows, cooldowns, and recovery cleanup. Degraded conditions are still logged for troubleshooting, while email is reserved for unreachable endpoints, stopped services, and failures that meet their alert criteria. This progression from detection to actionable alerting is one of the clearest examples of how production feedback shaped the toolkit.
+Monitoring became its own production-feedback loop. Early versions collected useful signals but could treat a single SQL timeout, a brief resource spike, a slow yet reachable endpoint, or Windows-event evidence from a running service as an alert. Reviewing real notifications led to service-first checks, retries, consecutive-run thresholds, `LastHealthy` tracking, Nginx rate windows, cooldowns, component-aware subjects, and explicit recovery notifications. Degraded conditions and Windows events are still logged for troubleshooting, while email is reserved for unreachable endpoints, stopped services, critical disk capacity, and failures that meet their alert criteria. This progression from detection to actionable alerting is one of the clearest examples of how production feedback shaped the toolkit.
 
 Representative improvement cycles include:
 

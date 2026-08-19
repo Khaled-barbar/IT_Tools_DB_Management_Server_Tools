@@ -42,7 +42,7 @@ flowchart TD
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
-At release 7.1.4, the main script contains approximately 9,400 lines and 244 PowerShell functions. The monitor contains approximately 3,800 lines and 88 functions. These counts describe implementation scope, not business impact.
+At release 7.1.5, the main script contains approximately 9,400 lines and 244 PowerShell functions. The monitor contains approximately 4,100 lines and 93 functions. These counts describe implementation scope, not business impact.
 
 ## Main script architecture
 
@@ -177,7 +177,8 @@ flowchart TD
     Evaluate --> Healthy["Healthy or recovered"]
     Evaluate --> Degraded["Warning or diagnostic evidence"]
     Evaluate --> Failure["Persistent or immediate failure"]
-    Healthy --> RunLog["Write run log and clear resolved automatic cooldowns"]
+    Healthy --> Recovery["Match explicit OK against previously emailed issue"]
+    Recovery --> RunLog["Send one recovery email and clear resolved state/cooldown"]
     Degraded --> ErrorLog["Write diagnostics without unnecessary notification"]
     Failure --> Ignore["Evaluate active ignore/cooldown rule"]
     Ignore -->|Not covered| Email["Send email and create automatic cooldown"]
@@ -195,8 +196,10 @@ Monitoring logic was refined using observed production alerts:
 - a running Data Collector does not alert on one SQL timeout; persistent failures and LastHealthy age drive severity;
 - Nginx requires more than 20 matching errors per minute for two consecutive minutes;
 - known harmless NSSM output-rotation and ended-pipe events are excluded;
+- relevant Windows events are retained as log-only evidence because service state is checked independently;
+- disk capacity has no warning email and becomes critical at 5 GB free or less, or 95 percent used or more;
 - Watchdog logs provide root-cause evidence but the monitor never restarts services;
-- automatic issue cooldowns prevent repeated notification and are removed after recovery.
+- automatic issue cooldowns prevent repeated notification, and successfully emailed issues remain in state until the same check explicitly reports `OK` and a recovery email is delivered.
 
 ### Monitoring files and lifecycle
 
