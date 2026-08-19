@@ -42,7 +42,7 @@ flowchart TD
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
-At release 7.1.6, the main script contains approximately 9,500 lines and 245 PowerShell functions. The monitor contains approximately 4,200 lines and 97 functions. These counts describe implementation scope, not business impact.
+At release 7.1.7, the main script contains approximately 9,500 lines and 246 PowerShell functions. The monitor contains approximately 4,200 lines and 97 functions. These counts describe implementation scope, not business impact.
 
 ## Main script architecture
 
@@ -245,6 +245,8 @@ sequenceDiagram
 The updater always includes the main script and refreshes companion files only when they already exist locally. If an official companion is missing, the selected feature downloads only that file, validates it against the manifest, and then saves it beside IT Tools. Before a monitoring deployment or version comparison, IT Tools also retrieves the current official monitor with cache-busting, verifies its manifest hash and parser result, and refreshes an outdated local template. Consequently, a stale companion can never make **Update monitoring script version** report that an older installed version is current. Site configuration, credentials, monitoring state, logs, and ignore rules are never release payloads.
 
 The monitoring script independently performs the same cache-bypassed release check on every execution unless `-SkipAutomaticUpdate` is supplied. It validates the manifest entry, SHA-256, monitor version and release-date headers, PowerShell syntax, and compatibility with the current JSON configuration. A file lock prevents recurring and daily Scheduled Tasks from racing to update the same deployment. Before replacing its own installed path, it backs up the current script, external JSON configuration, and matching Scheduled Task definitions. The installed filename and task settings remain unchanged, version metadata is written back to the JSON, and the verified code starts on the next execution. Update failure restores both the script and configuration, is logged, and does not prevent the health check from continuing.
+
+For a manual version update, IT Tools checks the matching Scheduled Tasks after the operator confirms `UPDATE`. If a task is running, the tool polls it every five seconds and streams the task name, elapsed time, next check, and 15-minute limit. It proceeds immediately when the task becomes idle; the finite timeout converts a stuck execution into a logged, recoverable error.
 
 `CHANGELOG.md` complements this mechanism but is not an updater input. It explains meaningful changes to technicians and reviewers, while `version.txt` determines whether an update exists and `update-manifest.json` defines and verifies the downloadable release payload.
 

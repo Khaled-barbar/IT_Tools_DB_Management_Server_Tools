@@ -6,6 +6,14 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.7 - 2026-08-19
+
+### Corrected
+
+- Replaced the immediate **Monitoring version update** failure when a related Scheduled Task is running with a fault-tolerant wait loop.
+- IT Tools now refreshes related task state every five seconds, displays the running task names, elapsed time, next check, and timeout, then starts the verified update automatically as soon as execution finishes.
+- Added a 15-minute timeout with full daily error logging so an abnormally stuck monitoring task cannot leave the interactive session waiting indefinitely.
+
 ## 7.1.6 - 2026-08-19
 
 ### Corrected

@@ -53,7 +53,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.6'
+$Script:ToolVersion = [version]'7.1.7'
 $Script:ToolReleaseDate = '2026-08-19'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -2260,6 +2260,73 @@ function Get-SiteMonitoringScheduleMetadata {
     }
 }
 
+function Wait-SiteMonitoringTasksToFinish {
+    param(
+        [object[]]$Tasks,
+        [ValidateRange(5, 3600)][int]$TimeoutSeconds = 900,
+        [ValidateRange(1, 60)][int]$PollIntervalSeconds = 5
+    )
+
+    $taskIdentities = @(
+        foreach ($task in @($Tasks)) {
+            if ($null -eq $task -or [string]::IsNullOrWhiteSpace([string]$task.TaskName)) { continue }
+            [pscustomobject]@{
+                TaskName = [string]$task.TaskName
+                TaskPath = if ([string]::IsNullOrWhiteSpace([string]$task.TaskPath)) { '\' } else { [string]$task.TaskPath }
+            }
+        }
+    )
+    if ($taskIdentities.Count -eq 0) { return }
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $currentTasks = @(
+            foreach ($identity in $taskIdentities) {
+                try {
+                    $currentTask = Get-ScheduledTask `
+                        -TaskName $identity.TaskName `
+                        -TaskPath $identity.TaskPath `
+                        -ErrorAction Stop
+                    if ($null -ne $currentTask) { $currentTask }
+                }
+                catch {
+                    if ($_.FullyQualifiedErrorId -notmatch '(?i)NoMatching|ObjectNotFound') { throw }
+                }
+            }
+        )
+        $runningTasks = @($currentTasks | Where-Object { [string]$_.State -ieq 'Running' })
+        if ($runningTasks.Count -eq 0) {
+            if ($stopwatch.Elapsed.TotalSeconds -ge 1) {
+                Write-StreamingLog -Percent 100 -Step 'Wait' -Description (
+                    'Related monitoring task execution completed after {0}. Continuing with backup and update.' -f
+                        $stopwatch.Elapsed.ToString('hh\:mm\:ss')
+                )
+            }
+            $stopwatch.Stop()
+            $currentTasks
+            return
+        }
+
+        if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            $runningNames = @($runningTasks | ForEach-Object { $_.TaskName } | Sort-Object -Unique) -join ', '
+            throw "Timed out after $TimeoutSeconds seconds while waiting for monitoring task(s) to finish: $runningNames. Review Task Scheduler history and the monitoring run log before retrying."
+        }
+
+        $percent = [Math]::Max(1, [Math]::Min(95, [int](($stopwatch.Elapsed.TotalSeconds / $TimeoutSeconds) * 100)))
+        $runningNames = @($runningTasks | ForEach-Object { $_.TaskName } | Sort-Object -Unique) -join ', '
+        $remainingSeconds = [Math]::Max(1, $TimeoutSeconds - [int]$stopwatch.Elapsed.TotalSeconds)
+        $sleepSeconds = [Math]::Min($PollIntervalSeconds, $remainingSeconds)
+        Write-StreamingLog -Percent $percent -Step 'Wait' -Description (
+            'Monitoring task(s) still running: {0}. Checking again in {1} seconds. Elapsed {2}; timeout {3}.' -f
+                $runningNames,
+                $sleepSeconds,
+                $stopwatch.Elapsed.ToString('hh\:mm\:ss'),
+                ([TimeSpan]::FromSeconds($TimeoutSeconds)).ToString('hh\:mm\:ss')
+        )
+        Start-Sleep -Seconds $sleepSeconds
+    }
+}
+
 function Test-PowerShellScriptParser {
     param([Parameter(Mandatory = $true)][string]$ScriptPath)
 
@@ -2452,9 +2519,6 @@ function Show-UpdateSiteMonitoringVersion {
         }
 
         $relatedTasks = @($tasks | Where-Object { (Get-SiteMonitoringTaskScriptPath -Task $_) -ieq $selected.ScriptPath })
-        if (@($relatedTasks | Where-Object { $_.State -eq 'Running' }).Count -gt 0) {
-            throw 'A related monitoring task is currently running. Wait for it to finish, then start the version update again.'
-        }
         if ($null -ne $selected.Version -and $selected.Version -gt $templateMetadata.Version) {
             Write-Host "The installed monitor version $($selected.VersionText) is newer than the available template $($templateMetadata.VersionText)." -ForegroundColor Yellow
             Write-Host 'The update was blocked to prevent a monitoring downgrade.' -ForegroundColor Yellow
@@ -2484,6 +2548,10 @@ function Show-UpdateSiteMonitoringVersion {
             return
         }
 
+        if (@($relatedTasks | Where-Object { [string]$_.State -ieq 'Running' }).Count -gt 0) {
+            Write-Host 'A related monitoring task is running. IT Tools will wait for it to finish, checking every 5 seconds for up to 15 minutes.' -ForegroundColor Yellow
+        }
+        $relatedTasks = @(Wait-SiteMonitoringTasksToFinish -Tasks $relatedTasks -PollIntervalSeconds 5 -TimeoutSeconds 900)
         $result = Invoke-SiteMonitoringVersionUpdate -InstalledScriptPath $selected.ScriptPath -TemplatePath $templatePath -RelatedTasks $relatedTasks
         Write-Host "Success: monitoring version $($result.Version), released $($result.ReleaseDate), is installed." -ForegroundColor Green
         Write-Host "Monitor file preserved: $($result.ScriptPath)" -ForegroundColor Green
