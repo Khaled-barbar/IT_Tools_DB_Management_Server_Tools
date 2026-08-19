@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.7.0
+# D4A-Monitor-Version: 6.7.1
 # D4A-Monitor-Release-Date: 2026-08-19
 
 <#
@@ -220,11 +220,12 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.7.0'
+$script:MonitorVersion = '6.7.1'
 $script:MonitorReleaseDate = '2026-08-19'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorUpdateManifestFileName = 'update-manifest.json'
 $script:MonitorReleaseScriptFileName = 'D4A-ScheduledMonitor-v5.ps1'
+$script:MonitorUpdateRequestId = '{0}-{1}' -f [DateTime]::UtcNow.Ticks, [guid]::NewGuid().ToString('N')
 $script:EndpointSlowLogMs = 4500
 $script:ResourceAlertPercent = 90
 $script:ResourceConsecutiveRunsRequired = 2
@@ -256,7 +257,7 @@ function Get-MonitorAutomaticUpdateUri {
         throw "Unsafe monitoring update path: $RelativePath"
     }
     $encodedPath = (@($RelativePath -split '[\\/]' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
-    return "$($script:MonitorRepositoryRawRoot)/$encodedPath"
+    return "$($script:MonitorRepositoryRawRoot)/$encodedPath`?releaseCheck=$($script:MonitorUpdateRequestId)"
 }
 
 function Get-MonitorScriptReleaseMetadata {
@@ -351,6 +352,80 @@ function New-MonitorAutomaticUpdateBackup {
     return $backupFolder
 }
 
+function Enter-MonitorAutomaticUpdateLock {
+    $lockPath = Join-Path $script:MonitorLogDirectory '.monitor-update.lock'
+    try {
+        return [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    }
+    catch [IO.IOException] {
+        return $null
+    }
+}
+
+function Test-MonitorDownloadedReleaseConfiguration {
+    param([Parameter(Mandatory = $true)][string]$DownloadedScriptPath)
+
+    if ([string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -or
+        -not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        return
+    }
+
+    $arguments = @(
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $DownloadedScriptPath,
+        '-ConfigPath', $script:ResolvedConfigPath,
+        '-SkipAutomaticUpdate',
+        '-ValidateConfiguration'
+    )
+    $validationOutput = @(& powershell.exe @arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $summary = (($validationOutput | ForEach-Object { [string]$_ }) -join ' ').Trim()
+        if ($summary.Length -gt 500) { $summary = $summary.Substring(0, 500) + '...' }
+        throw "Downloaded monitoring release rejected the current site configuration: $summary"
+    }
+}
+
+function Set-MonitorInstalledReleaseMetadata {
+    param(
+        [Parameter(Mandatory = $true)][version]$Version,
+        [Parameter(Mandatory = $true)][string]$ReleaseDate
+    )
+
+    if ([string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -or
+        -not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        return
+    }
+
+    $configuration = Get-Content -LiteralPath $script:ResolvedConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    foreach ($property in @(
+            [pscustomobject]@{ Name = 'InstalledMonitorVersion'; Value = $Version.ToString() },
+            [pscustomobject]@{ Name = 'InstalledMonitorReleaseDate'; Value = $ReleaseDate },
+            [pscustomobject]@{ Name = 'LastMonitorUpdate'; Value = (Get-Date).ToString('o') }
+        )) {
+        if ($null -eq $configuration.PSObject.Properties[$property.Name]) {
+            $configuration | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value
+        }
+        else {
+            $configuration.($property.Name) = $property.Value
+        }
+    }
+
+    $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText(
+            $temporaryConfigPath,
+            ($configuration | ConvertTo-Json -Depth 12) + [Environment]::NewLine,
+            $script:Utf8NoBom
+        )
+        Copy-Item -LiteralPath $temporaryConfigPath -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryConfigPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-MonitorAutomaticUpdate {
     if ($SkipAutomaticUpdate.IsPresent) {
         Write-RunLog -Category Update -Color DarkGray -Message 'Automatic monitoring update check was skipped for this run.'
@@ -359,6 +434,11 @@ function Invoke-MonitorAutomaticUpdate {
 
     $temporaryFolder = $null
     $backupFolder = $null
+    $updateLock = Enter-MonitorAutomaticUpdateLock
+    if ($null -eq $updateLock) {
+        Write-RunLog -Category Update -Color DarkGray -Message 'Another monitoring process is checking or installing an update; this run will continue without a duplicate update attempt.'
+        return
+    }
     try {
         Write-RunLog -Category Update -Color DarkGray -Message ('Checking GitHub for a monitoring update. Current version={0}.' -f $script:MonitorVersion)
         $manifestResponse = Invoke-WebRequest `
@@ -398,6 +478,8 @@ function Invoke-MonitorAutomaticUpdate {
 
         Write-RunLog -Category Update -Color Cyan -Message ('Verified monitoring update {0}, released {1}. Creating backups before installation.' -f $remoteMetadata.Version, $remoteMetadata.ReleaseDate)
         $backupFolder = New-MonitorAutomaticUpdateBackup -TargetVersion $remoteMetadata.Version
+        Write-RunLog -Category Update -Color DarkGray -Message 'Validating the downloaded monitoring release against the current site configuration.'
+        Test-MonitorDownloadedReleaseConfiguration -DownloadedScriptPath $downloadedScript
         $replacementPath = Join-Path $script:ScriptDirectory ('.monitor_verified_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
         try {
             Copy-Item -LiteralPath $downloadedScript -Destination $replacementPath -Force -ErrorAction Stop
@@ -409,6 +491,11 @@ function Invoke-MonitorAutomaticUpdate {
 
         $installedHash = (Get-FileHash -LiteralPath $script:ScriptPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
         if ($installedHash -ne $expectedHash) { throw 'The installed monitoring script failed post-update integrity verification.' }
+        $installedMetadata = Get-MonitorScriptReleaseMetadata -Path $script:ScriptPath
+        if ($installedMetadata.Version -ne $remoteMetadata.Version -or $installedMetadata.ReleaseDate -ne $remoteMetadata.ReleaseDate) {
+            throw 'The installed monitoring script metadata does not match the verified release.'
+        }
+        Set-MonitorInstalledReleaseMetadata -Version $remoteMetadata.Version -ReleaseDate $remoteMetadata.ReleaseDate
         Write-RunLog -Level OK -Category Update -Color Green -Message (
             'Monitoring version {0} was installed successfully. Backup={1}. The current process will finish with version {2}; the new version starts on the next execution.' -f
                 $remoteMetadata.Version, $backupFolder, $script:MonitorVersion
@@ -422,6 +509,13 @@ function Invoke-MonitorAutomaticUpdate {
                 try { Copy-Item -LiteralPath $backupScript -Destination $script:ScriptPath -Force -ErrorAction Stop }
                 catch { Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic update restore also failed: {0}' -f $_.Exception.Message) }
             }
+            if (-not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
+                $backupConfiguration = Join-Path $backupFolder ([IO.Path]::GetFileName($script:ResolvedConfigPath))
+                if (Test-Path -LiteralPath $backupConfiguration -PathType Leaf) {
+                    try { Copy-Item -LiteralPath $backupConfiguration -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop }
+                    catch { Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic configuration restore also failed: {0}' -f $_.Exception.Message) }
+                }
+            }
         }
         Write-RunLog -Level Warning -Category Update -Color Yellow -Message (
             'Automatic monitoring update was not applied; this monitoring run will continue with version {0}. Reason: {1}' -f
@@ -431,6 +525,9 @@ function Invoke-MonitorAutomaticUpdate {
     finally {
         if (-not [string]::IsNullOrWhiteSpace($temporaryFolder)) {
             Remove-Item -LiteralPath $temporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $updateLock) {
+            $updateLock.Dispose()
         }
     }
 }
@@ -1102,6 +1199,20 @@ execution. Use -SkipAutomaticUpdate only for a temporary troubleshooting run.
 '@
 }
 
+function Get-MonitorLogsReadmeAutomaticUpdateReliability {
+    return @'
+
+AUTOMATIC UPDATE RELIABILITY
+============================
+Release requests bypass web caches. The downloaded monitor is also validated
+against the current JSON configuration before replacement. A cross-process
+lock prevents recurring and daily Scheduled Tasks from installing the same
+release simultaneously. After installation, the JSON records the installed
+version and release date. If installation fails after backup, both the prior
+script and prior configuration are restored and the health check continues.
+'@
+}
+
 function Ensure-MonitorLogDocumentation {
     param(
         [Parameter(Mandatory = $true)][string]$Directory,
@@ -1122,7 +1233,12 @@ function Ensure-MonitorLogDocumentation {
 
     $readmePath = Join-Path $Directory 'README.txt'
     if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) {
-        [IO.File]::WriteAllText($readmePath, (Get-MonitorLogsReadme), $script:Utf8NoBom)
+        $readmeContent = (Get-MonitorLogsReadme) +
+            (Get-MonitorLogsReadmeUpdate) +
+            (Get-MonitorLogsReadmeAutomaticUpdate) +
+            (Get-MonitorLogsReadmeNotificationPolicy) +
+            (Get-MonitorLogsReadmeAutomaticUpdateReliability)
+        [IO.File]::WriteAllText($readmePath, $readmeContent, $script:Utf8NoBom)
     }
     else {
         $existingReadme = [IO.File]::ReadAllText($readmePath)
@@ -1136,6 +1252,10 @@ function Ensure-MonitorLogDocumentation {
         }
         if ($existingReadme -notmatch '(?m)^NOTIFICATION AND RECOVERY POLICY$') {
             [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeNotificationPolicy), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^AUTOMATIC UPDATE RELIABILITY$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeAutomaticUpdateReliability), $script:Utf8NoBom)
         }
     }
 

@@ -6,6 +6,19 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.6 - 2026-08-19
+
+### Corrected
+
+- Corrected **Update monitoring script version** so it downloads and verifies the current GitHub release before comparing versions. An outdated companion file beside IT Tools is refreshed automatically instead of being mistaken for the latest release.
+- Added cache-busting release requests so GitHub/CDN cache state cannot leave IT Tools or the installed monitor comparing against an older manifest or script.
+- Strengthened scheduled monitor self-updates with a cross-process update lock, configuration compatibility validation, installed-version metadata updates, and restoration of both the script and JSON configuration after an installation failure.
+
+### Monitoring 6.7.1
+
+- Scheduled and stand-alone runs now install a newer verified monitor release directly into the currently executed script path while preserving filenames such as `D4A-ScheduledMonitor-v5.ps1`, `D4A-ScheduledMonitor-v6.ps1`, or versioned variants.
+- Concurrent recurring and daily Scheduled Tasks cannot race to install the same release; one process updates while the other continues its health check.
+
 ## 7.1.5 - 2026-08-19
 
 ### Changed

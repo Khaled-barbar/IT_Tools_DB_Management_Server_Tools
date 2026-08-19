@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "7.1.5",
+  "version": "7.1.6",
   "releaseDate": "2026-08-19",
   "files": [
     {
@@ -13,11 +13,11 @@
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
-      "sha256": "AE382493AAE2779645CFB952CF93175644FC22DDE8F5F0DC2C0AC7189DDB3055"
+      "sha256": "560702D296D00FA6824B72D6ACD5777A200C7B255B85FCB410F1BEF1600DB3DB"
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "53CCC3243BC746CB749451B19A6E9AE0EC85CE50E7FB27B2EAC719466EE91988"
+      "sha256": "FF57CEB325AA7D8731141FDEBA8E96A314BE2290AB274909C50C48CD828325D9"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",

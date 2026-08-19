@@ -53,7 +53,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.5'
+$Script:ToolVersion = [version]'7.1.6'
 $Script:ToolReleaseDate = '2026-08-19'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -233,10 +233,17 @@ function Get-ITToolsUpdateUri {
     return "$($Script:ToolRepositoryRawRoot)/$encodedPath"
 }
 
+function Get-ITToolsCacheBustedUpdateUri {
+    param([Parameter(Mandatory = $true)][string]$RelativePath)
+
+    $uri = Get-ITToolsUpdateUri -RelativePath $RelativePath
+    return '{0}?releaseCheck={1}' -f $uri, [DateTime]::UtcNow.Ticks
+}
+
 function Get-ITToolsRemoteText {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
-    $response = Invoke-WebRequest -Uri (Get-ITToolsUpdateUri -RelativePath $RelativePath) -UseBasicParsing -TimeoutSec 12 -ErrorAction Stop
+    $response = Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath) -UseBasicParsing -TimeoutSec 12 -ErrorAction Stop
     return ([string]$response.Content).Trim()
 }
 
@@ -325,7 +332,7 @@ function Invoke-ITToolsAutomaticUpdate {
                 [void](New-Item -Path $downloadFolder -ItemType Directory -Force -ErrorAction Stop)
                 $percent = [Math]::Min(75, 10 + [int](($fileIndex / $filesToInstall.Count) * 65))
                 Write-StreamingLog -Percent $percent -Step 'Update' -Description "Downloading and verifying $relativePath."
-                Invoke-WebRequest -Uri (Get-ITToolsUpdateUri -RelativePath $relativePath) -OutFile $downloadPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+                Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $relativePath) -OutFile $downloadPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
                 $actualHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
                 if ($actualHash -ne $expectedHash) {
                     throw "Integrity check failed for $relativePath."
@@ -1497,34 +1504,78 @@ function Get-SiteMonitoringScriptMetadata {
 
 function Get-SiteMonitoringTemplatePath {
     $scriptFolder = Get-CurrentScriptFolder
-    $templates = @(
-        Get-ChildItem -LiteralPath $scriptFolder -File -Filter 'D4A-ScheduledMonitor*.ps1' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch '(?i)\.bak\.ps1$|_\d{14}\.ps1$' } |
-            ForEach-Object {
-                try { Get-SiteMonitoringScriptMetadata -ScriptPath $_.FullName } catch { $null }
-            } |
-            Where-Object { $null -ne $_.Version }
-    )
-    if ($templates.Count -eq 0) {
-        [void](Get-RequiredScriptFolderFilePath `
-            -FileName 'D4A-ScheduledMonitor-v5.ps1' `
-            -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/D4A-ScheduledMonitor-v5.ps1' `
-            -FeatureName 'Add Site Monitoring')
+    $templateName = 'D4A-ScheduledMonitor-v5.ps1'
+    $templatePath = Join-Path $scriptFolder $templateName
+    $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorTemplate_{0}' -f [guid]::NewGuid().ToString('N'))
 
-        $templates = @(
-            Get-ChildItem -LiteralPath $scriptFolder -File -Filter 'D4A-ScheduledMonitor*.ps1' -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -notmatch '(?i)\.bak\.ps1$|_\d{14}\.ps1$' } |
-                ForEach-Object {
-                    try { Get-SiteMonitoringScriptMetadata -ScriptPath $_.FullName } catch { $null }
-                } |
-                Where-Object { $null -ne $_.Version }
-        )
-    }
-    if ($templates.Count -eq 0) {
-        throw "No versioned D4A-ScheduledMonitor PowerShell template was found beside IT Tools: $scriptFolder"
-    }
+    try {
+        Write-StreamingLog -Percent 5 -Step 'Release' -Description 'Checking GitHub for the current official monitoring release.'
+        $manifest = (Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName) | ConvertFrom-Json -ErrorAction Stop
+        $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $templateName })
+        if ($entries.Count -ne 1) {
+            throw "The official release manifest does not contain one unique entry for '$templateName'."
+        }
 
-    return ($templates | Sort-Object -Property Version, ScriptPath -Descending | Select-Object -First 1).ScriptPath
+        $expectedHash = ([string]$entries[0].sha256).Trim().ToUpperInvariant()
+        if ($expectedHash -notmatch '^[A-F0-9]{64}$') {
+            throw "The official release manifest contains an invalid SHA-256 value for '$templateName'."
+        }
+
+        [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
+        $downloadedTemplate = Join-Path $temporaryFolder $templateName
+        Write-StreamingLog -Percent 10 -Step 'Release' -Description 'Downloading and verifying the current monitoring template.'
+        Invoke-WebRequest `
+            -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $templateName) `
+            -OutFile $downloadedTemplate `
+            -UseBasicParsing `
+            -TimeoutSec 60 `
+            -ErrorAction Stop
+
+        $downloadedHash = (Get-FileHash -LiteralPath $downloadedTemplate -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        if ($downloadedHash -ne $expectedHash) {
+            throw "The downloaded monitoring template failed SHA-256 verification."
+        }
+        Test-PowerShellScriptParser -ScriptPath $downloadedTemplate
+        $releaseMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $downloadedTemplate
+        if (-not $releaseMetadata.HasVersionHeader) {
+            throw 'The downloaded monitoring template is missing valid version or release-date metadata.'
+        }
+
+        $localHash = if (Test-Path -LiteralPath $templatePath -PathType Leaf) {
+            (Get-FileHash -LiteralPath $templatePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        }
+        else { '' }
+
+        if ($localHash -ne $expectedHash) {
+            if (-not (Test-ITToolsScriptFolderWritable -Folder $scriptFolder)) {
+                throw "Monitoring release $($releaseMetadata.VersionText) is available, but IT Tools cannot update its companion file in: $scriptFolder"
+            }
+
+            $statusText = if ([string]::IsNullOrWhiteSpace($localHash)) { 'missing' } else { 'outdated' }
+            Write-Host "The local monitoring template is $statusText. IT Tools is installing the verified official release $($releaseMetadata.VersionText)." -ForegroundColor Cyan
+            $replacementPath = Join-Path $scriptFolder ('.{0}.{1}.tmp' -f $templateName, [guid]::NewGuid().ToString('N'))
+            try {
+                Copy-Item -LiteralPath $downloadedTemplate -Destination $replacementPath -Force -ErrorAction Stop
+                Unblock-File -LiteralPath $replacementPath -ErrorAction SilentlyContinue
+                Copy-Item -LiteralPath $replacementPath -Destination $templatePath -Force -ErrorAction Stop
+            }
+            finally {
+                Remove-Item -LiteralPath $replacementPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $installedTemplateHash = (Get-FileHash -LiteralPath $templatePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        if ($installedTemplateHash -ne $expectedHash) {
+            throw 'The local monitoring template failed post-installation integrity verification.'
+        }
+        Write-StreamingLog -Percent 15 -Step 'Release' -Description "Official monitoring release $($releaseMetadata.VersionText) is ready."
+        return $templatePath
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryFolder -PathType Container) {
+            Remove-Item -LiteralPath $temporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Get-SiteMonitoringConfigurationPath {
@@ -3416,7 +3467,7 @@ function Get-RequiredScriptFolderFilePath {
             $temporaryFileFolder = Split-Path -Parent $temporaryFilePath
             [void](New-Item -Path $temporaryFileFolder -ItemType Directory -Force -ErrorAction Stop)
             Write-StreamingLog -Percent 25 -Step 'Download' -Description "Downloading missing companion file $FileName."
-            Invoke-WebRequest -Uri (Get-ITToolsUpdateUri -RelativePath $FileName) -OutFile $temporaryFilePath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+            Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $FileName) -OutFile $temporaryFilePath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
 
             Write-StreamingLog -Percent 70 -Step 'Verify' -Description "Verifying the official file $FileName."
             $actualHash = (Get-FileHash -LiteralPath $temporaryFilePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
