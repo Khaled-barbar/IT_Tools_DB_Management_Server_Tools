@@ -430,6 +430,8 @@ The configuration update creates a settings backup. Version update first retriev
 
 The monitor also checks GitHub for its own newer verified version whenever it runs, including Scheduled Task and stand-alone executions. It bypasses cached release responses, validates the release manifest, SHA-256, version metadata, release date, PowerShell syntax, and current JSON configuration; then backs up the installed script, configuration, and related task definitions before replacing its own file. A lock prevents two Scheduled Tasks from installing concurrently. The current health check continues with the loaded version, and the new code is used on the next run. Use `-SkipAutomaticUpdate` only for a temporary troubleshooting execution.
 
+Monitoring configuration is read and written explicitly as UTF-8, so friendly names with accents, such as `Salé`, remain readable in e-mail subjects. Existing corrupted forms such as `SalÃ©` are repaired when loaded. Monitoring e-mails display **D4A Monitoring** as their sender name while keeping the site’s configured sender address.
+
 ### Execute Monitoring Commands
 
 The menu exposes common management and test commands:

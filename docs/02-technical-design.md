@@ -42,7 +42,7 @@ flowchart TD
 | `version.txt` | Public main-tool version used by update checks |
 | `update-manifest.json` | Allowlist and SHA-256 integrity values for distributed files |
 
-At release 7.1.7, the main script contains approximately 9,500 lines and 246 PowerShell functions. The monitor contains approximately 4,200 lines and 97 functions. These counts describe implementation scope, not business impact.
+At release 7.1.8, the main script contains approximately 9,600 lines and 249 PowerShell functions. The monitor contains approximately 4,300 lines and 102 functions. These counts describe implementation scope, not business impact.
 
 ## Main script architecture
 
@@ -265,6 +265,7 @@ Standing maintenance conditions require every enhancement to preserve common beh
 - syntax validation before publication;
 - synchronized release version and manifest hashes;
 - preservation of local monitoring configuration during updates.
+- explicit UTF-8 monitoring configuration reads and writes for accented site names and sender metadata.
 - autonomous verified monitor update checks that fail safely without stopping health monitoring.
 
 These rules convert lessons from earlier defects into constraints for future features.

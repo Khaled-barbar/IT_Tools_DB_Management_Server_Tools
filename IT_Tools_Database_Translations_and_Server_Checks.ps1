@@ -53,8 +53,8 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.7'
-$Script:ToolReleaseDate = '2026-08-19'
+$Script:ToolVersion = [version]'7.1.8'
+$Script:ToolReleaseDate = '2026-08-20'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
 $Script:ToolUpdateManifestFileName = 'update-manifest.json'
@@ -1803,6 +1803,70 @@ function Write-SiteMonitoringConfiguration {
     return $ConfigurationPath
 }
 
+function Get-SiteMonitoringTextMojibakeScore {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return 0 }
+    $markers = @([char]0x00C2, [char]0x00C3, [char]0x00E2, [char]0x00F0)
+    $score = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($markers -contains $character) { $score++ }
+    }
+    return $score
+}
+
+function Repair-SiteMonitoringTextEncoding {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    $repairedValue = $Value
+    $legacyEncoding = [Text.Encoding]::GetEncoding(1252)
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $currentScore = Get-SiteMonitoringTextMojibakeScore -Value $repairedValue
+        if ($currentScore -eq 0) { break }
+        try {
+            $candidate = $strictUtf8.GetString($legacyEncoding.GetBytes($repairedValue))
+        }
+        catch {
+            break
+        }
+        if ($candidate -eq $repairedValue -or
+            (Get-SiteMonitoringTextMojibakeScore -Value $candidate) -ge $currentScore) {
+            break
+        }
+        $repairedValue = $candidate
+    }
+    return $repairedValue
+}
+
+function Read-SiteMonitoringConfiguration {
+    param([Parameter(Mandatory = $true)][string]$ConfigurationPath)
+
+    $bytes = [IO.File]::ReadAllBytes($ConfigurationPath)
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    try {
+        $json = $strictUtf8.GetString($bytes)
+    }
+    catch {
+        # Support legacy ANSI files while new monitoring configurations are UTF-8.
+        $json = [Text.Encoding]::Default.GetString($bytes)
+    }
+    $json = $json.TrimStart([char]0xFEFF)
+    $configuration = $json | ConvertFrom-Json -ErrorAction Stop
+    foreach ($propertyName in @('MonitoringName', 'SiteDisplayNames', 'FromAddress')) {
+        $property = $configuration.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        if ($property.Value -is [Array]) {
+            $property.Value = @($property.Value | ForEach-Object { Repair-SiteMonitoringTextEncoding -Value ([string]$_) })
+        }
+        elseif ($property.Value -is [string]) {
+            $property.Value = Repair-SiteMonitoringTextEncoding -Value ([string]$property.Value)
+        }
+    }
+    return $configuration
+}
+
 function Set-SiteMonitoringDeploymentConfiguration {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
@@ -1910,7 +1974,7 @@ function Test-IsIncompleteSiteMonitoringDeployment {
             (Get-FileHash -LiteralPath $TargetScriptPath -Algorithm SHA256 -ErrorAction Stop).Hash) {
             return $false
         }
-        $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $configuration = Read-SiteMonitoringConfiguration -ConfigurationPath $ConfigurationPath
         if ([int]$configuration.ConfigurationVersion -ne 1 -or @($configuration.SiteAddress).Count -eq 0 -or
             @($configuration.NotificationTo).Count -eq 0) {
             return $false
@@ -1935,7 +1999,7 @@ function Test-IsIncompleteSiteMonitoringDeployment {
 function Get-SiteMonitoringConfigurationSummary {
     param([Parameter(Mandatory = $true)][string]$ConfigurationPath)
 
-    $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $configuration = Read-SiteMonitoringConfiguration -ConfigurationPath $ConfigurationPath
     $sites = @($configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
     $siteNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
     if ($siteNames.Count -ne $sites.Count) {
@@ -1961,7 +2025,7 @@ function Update-SiteMonitoringNodeConfiguration {
         [Parameter(Mandatory = $true)][string]$NodemailerModulePath
     )
 
-    $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $configuration = Read-SiteMonitoringConfiguration -ConfigurationPath $ConfigurationPath
     foreach ($setting in @{
             NodeExecutable       = $NodeExecutable
             NodemailerModulePath = $NodemailerModulePath
@@ -2086,7 +2150,7 @@ function Update-SiteMonitoringTaskConfiguration {
         [AllowNull()][string]$DailySummaryTime
     )
 
-    $configuration = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $configuration = Read-SiteMonitoringConfiguration -ConfigurationPath $ConfigPath
     if ($null -eq $configuration.TaskScheduler) {
         $configuration | Add-Member -MemberType NoteProperty -Name TaskScheduler -Value ([pscustomobject]@{})
     }
@@ -2416,7 +2480,7 @@ function Invoke-SiteMonitoringVersionUpdate {
         $scriptReplaced = $true
         Test-PowerShellScriptParser -ScriptPath $InstalledScriptPath
 
-        $configuration = Get-Content -LiteralPath $configurationPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $configuration = Read-SiteMonitoringConfiguration -ConfigurationPath $configurationPath
         if ($null -eq $configuration.PSObject.Properties['InstalledMonitorVersion']) {
             $configuration | Add-Member -MemberType NoteProperty -Name InstalledMonitorVersion -Value $templateMetadata.VersionText
         }
@@ -2807,7 +2871,7 @@ function Show-UpdateExistingMonitoringConfiguration {
             throw "The monitoring configuration file was not found: $($target.ConfigPath). Use Monitoring Version Update to migrate a legacy installation first."
         }
 
-        $configuration = Get-Content -LiteralPath $target.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $configuration = Read-SiteMonitoringConfiguration -ConfigurationPath $target.ConfigPath
         $currentSites = (@($configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
         $currentName = ([string]$configuration.MonitoringName).Trim()
         $currentSiteNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
@@ -3164,7 +3228,7 @@ function Show-ExecuteMonitoringCommandsMenu {
                 if ($null -eq $sites) { continue }
                 $currentSites = ''
                 try {
-                    $currentConfiguration = Get-Content -LiteralPath $target.ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $currentConfiguration = Read-SiteMonitoringConfiguration -ConfigurationPath $target.ConfigPath
                     $currentSites = (@($currentConfiguration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
                 }
                 catch {}

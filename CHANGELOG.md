@@ -6,6 +6,18 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.8 - 2026-08-20
+
+### Corrected
+
+- Corrected monitoring JSON reads under Windows PowerShell 5.1 to use UTF-8 explicitly, preserving accented friendly site names such as `Salé` in email subjects and configuration updates.
+- Added safe repair for existing UTF-8/Windows-1252 mojibake such as `SalÃ©` and double-encoded variants when loading user-facing monitoring names.
+- Changed all monitor email delivery paths to display `D4A Monitoring` as the sender name while preserving the configured sender address.
+
+### Monitoring 6.8.0
+
+- Added Unicode-safe configuration loading and sender-name normalization for Node.js/Nodemailer and PowerShell SMTP delivery.
+
 ## 7.1.7 - 2026-08-19
 
 ### Corrected

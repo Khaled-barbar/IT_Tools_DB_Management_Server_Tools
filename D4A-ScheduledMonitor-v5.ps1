@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.7.1
-# D4A-Monitor-Release-Date: 2026-08-19
+# D4A-Monitor-Version: 6.8.0
+# D4A-Monitor-Release-Date: 2026-08-20
 
 <#
 .SYNOPSIS
@@ -220,8 +220,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.7.1'
-$script:MonitorReleaseDate = '2026-08-19'
+$script:MonitorVersion = '6.8.0'
+$script:MonitorReleaseDate = '2026-08-20'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorUpdateManifestFileName = 'update-manifest.json'
 $script:MonitorReleaseScriptFileName = 'D4A-ScheduledMonitor-v5.ps1'
@@ -398,7 +398,7 @@ function Set-MonitorInstalledReleaseMetadata {
         return
     }
 
-    $configuration = Get-Content -LiteralPath $script:ResolvedConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $configuration = Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath
     foreach ($property in @(
             [pscustomobject]@{ Name = 'InstalledMonitorVersion'; Value = $Version.ToString() },
             [pscustomobject]@{ Name = 'InstalledMonitorReleaseDate'; Value = $ReleaseDate },
@@ -549,6 +549,76 @@ function Get-MonitorConfigurationProperty {
     return $Configuration.PSObject.Properties[$Name]
 }
 
+function Get-MonitorTextMojibakeScore {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return 0 }
+    $markers = @([char]0x00C2, [char]0x00C3, [char]0x00E2, [char]0x00F0)
+    $score = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($markers -contains $character) { $score++ }
+    }
+    return $score
+}
+
+function Repair-MonitorTextEncoding {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    $repairedValue = $Value
+    $legacyEncoding = [Text.Encoding]::GetEncoding(1252)
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $currentScore = Get-MonitorTextMojibakeScore -Value $repairedValue
+        if ($currentScore -eq 0) { break }
+        try {
+            $candidate = $strictUtf8.GetString($legacyEncoding.GetBytes($repairedValue))
+        }
+        catch {
+            break
+        }
+        if ($candidate -eq $repairedValue -or
+            (Get-MonitorTextMojibakeScore -Value $candidate) -ge $currentScore) {
+            break
+        }
+        $repairedValue = $candidate
+    }
+    return $repairedValue
+}
+
+function Repair-MonitorConfigurationTextProperties {
+    param([Parameter(Mandatory = $true)][object]$Configuration)
+
+    foreach ($propertyName in @('MonitoringName', 'SiteDisplayNames', 'FromAddress')) {
+        $property = $Configuration.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        if ($property.Value -is [Array]) {
+            $property.Value = @($property.Value | ForEach-Object { Repair-MonitorTextEncoding -Value ([string]$_) })
+        }
+        elseif ($property.Value -is [string]) {
+            $property.Value = Repair-MonitorTextEncoding -Value ([string]$property.Value)
+        }
+    }
+    return $Configuration
+}
+
+function Read-MonitorConfigurationFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    try {
+        $json = $strictUtf8.GetString($bytes)
+    }
+    catch {
+        # Support legacy ANSI configuration files while all new files remain UTF-8.
+        $json = [Text.Encoding]::Default.GetString($bytes)
+    }
+    $json = $json.TrimStart([char]0xFEFF)
+    $configuration = $json | ConvertFrom-Json -ErrorAction Stop
+    return (Repair-MonitorConfigurationTextProperties -Configuration $configuration)
+}
+
 function Convert-MonitorConfigurationValue {
     param(
         [Parameter(Mandatory = $true)][object]$Value,
@@ -558,7 +628,7 @@ function Convert-MonitorConfigurationValue {
 
     switch ($Type) {
         'StringList' {
-            $items = @($Value | ForEach-Object { ([string]$_).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            $items = @($Value | ForEach-Object { (Repair-MonitorTextEncoding -Value ([string]$_)).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             if ($items.Count -eq 0) { throw "Configuration property '$Name' cannot be empty." }
             return ($items -join ',')
         }
@@ -582,7 +652,7 @@ function Convert-MonitorConfigurationValue {
             if ([string]::IsNullOrWhiteSpace($pathValue)) { return '' }
             return [Environment]::ExpandEnvironmentVariables($pathValue)
         }
-        default { return ([string]$Value).Trim() }
+        default { return (Repair-MonitorTextEncoding -Value ([string]$Value)).Trim() }
     }
 }
 
@@ -596,7 +666,7 @@ function Import-MonitorConfiguration {
     }
 
     try {
-        $configuration = Get-Content -LiteralPath $script:ResolvedConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $configuration = Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath
     }
     catch {
         throw "Unable to read monitor configuration '$($script:ResolvedConfigPath)': $($_.Exception.Message)"
@@ -769,7 +839,7 @@ function Get-MonitorConfigurationForManagement {
     }
 
     try {
-        return (Get-Content -LiteralPath $script:ResolvedConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+        return (Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath)
     }
     catch {
         throw "Unable to read monitoring configuration '$($script:ResolvedConfigPath)': $($_.Exception.Message)"
@@ -946,6 +1016,9 @@ endpoints, TLS certificates, local D4A Windows services, the local API listener,
 Email behavior
 --------------
 Normal scheduled runs send an email only for a notification-eligible issue.
+Messages use the display name D4A Monitoring and preserve the configured sender
+email address. Friendly site names are read as UTF-8 so accents are retained in
+email subjects.
 After a successful notification, an automatic 24-hour cooldown is added for
 that specific issue. When a later scan explicitly confirms the check is healthy,
 the monitor sends a recovery email and removes the automatic cooldown. Test and
@@ -3430,12 +3503,15 @@ async function main() {
         });
     }
 
-    const from = payload.from || config.EmailFrom || config.EmailUser;
-    if (!from) throw new Error("No sender was found in -FromAddress, EmailFrom, or EmailUser.");
+    const configuredFrom = payload.from || config.EmailFrom || config.EmailUser;
+    if (!configuredFrom) throw new Error("No sender was found in -FromAddress, EmailFrom, or EmailUser.");
+    const addressMatch = String(configuredFrom).match(/<\s*([^<>]+)\s*>/);
+    const senderAddress = (addressMatch ? addressMatch[1] : String(configuredFrom)).trim();
+    if (!senderAddress) throw new Error("The configured sender address is empty.");
     if (!payload.to) throw new Error("NotificationTo is empty.");
 
     const info = await transporter.sendMail({
-        from,
+        from: { name: "D4A Monitoring", address: senderAddress },
         to: payload.to,
         subject: payload.subject,
         text: payload.text,
@@ -3463,6 +3539,17 @@ main().catch(error => {
     finally {
         Remove-Item -LiteralPath $helperPath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $payloadPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-MonitorSenderEmailAddress {
+    param([Parameter(Mandatory = $true)][string]$Sender)
+
+    try {
+        return ([Net.Mail.MailAddress]::new($Sender)).Address
+    }
+    catch {
+        throw "The configured sender address is invalid: $Sender"
     }
 }
 
@@ -3497,7 +3584,8 @@ function Invoke-SmtpEmail {
     $message = [Net.Mail.MailMessage]::new()
     $client = [Net.Mail.SmtpClient]::new($SmtpServer, $SmtpPort)
     try {
-        $message.From = [Net.Mail.MailAddress]::new($from)
+        $senderAddress = Get-MonitorSenderEmailAddress -Sender $from
+        $message.From = [Net.Mail.MailAddress]::new($senderAddress, 'D4A Monitoring', [Text.Encoding]::UTF8)
         $message.To.Add($NotificationTo)
         $message.Subject = $Subject
         $message.SubjectEncoding = [Text.Encoding]::UTF8
