@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.8.0
-# D4A-Monitor-Release-Date: 2026-08-20
+# D4A-Monitor-Version: 6.9.0
+# D4A-Monitor-Release-Date: 2026-08-21
 
 <#
 .SYNOPSIS
@@ -38,10 +38,11 @@
     the JSON configuration. Their matching D4A API endpoints are derived and
     checked automatically during each normal monitoring run.
 
-    Every execution checks the official GitHub release for a newer monitoring
-    version. A newer script is installed only after manifest, SHA-256, and
-    PowerShell syntax validation. Local configuration, logs, script filename,
-    and Scheduled Task definitions are preserved and backed up. Use
+    Every execution checks the official GitHub Monitoring release for a newer
+    version. monitor-version.txt, the monitoring release definition in
+    update-manifest.json, and the downloaded script metadata and SHA-256 must
+    agree before installation. Local configuration, logs, script filename, and
+    Scheduled Task definitions are preserved and backed up. Use
     -SkipAutomaticUpdate only for a temporary troubleshooting run.
 
 .EXAMPLE
@@ -220,9 +221,10 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.8.0'
-$script:MonitorReleaseDate = '2026-08-20'
+$script:MonitorVersion = '6.9.0'
+$script:MonitorReleaseDate = '2026-08-21'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
+$script:MonitorVersionFileName = 'monitor-version.txt'
 $script:MonitorUpdateManifestFileName = 'update-manifest.json'
 $script:MonitorReleaseScriptFileName = 'D4A-ScheduledMonitor-v5.ps1'
 $script:MonitorUpdateRequestId = '{0}-{1}' -f [DateTime]::UtcNow.Ticks, [guid]::NewGuid().ToString('N')
@@ -258,6 +260,74 @@ function Get-MonitorAutomaticUpdateUri {
     }
     $encodedPath = (@($RelativePath -split '[\\/]' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
     return "$($script:MonitorRepositoryRawRoot)/$encodedPath`?releaseCheck=$($script:MonitorUpdateRequestId)"
+}
+
+function Get-MonitorUpdateText {
+    param([Parameter(Mandatory = $true)][string]$RelativePath)
+
+    $response = Invoke-WebRequest `
+        -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $RelativePath) `
+        -UseBasicParsing `
+        -TimeoutSec 15 `
+        -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } `
+        -ErrorAction Stop
+    return ([string]$response.Content).Trim()
+}
+
+function Get-MonitorRemoteReleaseDefinition {
+    param(
+        [int]$MaximumAttempts = 12,
+        [int]$RetrySeconds = 5
+    )
+
+    $lastIssue = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            $remoteVersion = [version](Get-MonitorUpdateText -RelativePath $script:MonitorVersionFileName)
+            $manifest = (Get-MonitorUpdateText -RelativePath $script:MonitorUpdateManifestFileName) | ConvertFrom-Json -ErrorAction Stop
+            $monitoring = $manifest.monitoring
+            if ($null -eq $monitoring) {
+                throw 'The update manifest does not define a monitoring release.'
+            }
+            if ([string]$monitoring.version -ne $remoteVersion.ToString()) {
+                throw "Monitoring version '$($monitoring.version)' in the manifest does not match monitor-version.txt '$remoteVersion'."
+            }
+            if ([string]$monitoring.scriptPath -ine $script:MonitorReleaseScriptFileName) {
+                throw "The monitoring manifest script path '$($monitoring.scriptPath)' is not '$($script:MonitorReleaseScriptFileName)'."
+            }
+            $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $script:MonitorReleaseScriptFileName })
+            if ($entries.Count -ne 1) {
+                throw "The release manifest does not contain one unique entry for $($script:MonitorReleaseScriptFileName)."
+            }
+            $expectedHash = ([string]$entries[0].sha256).Trim().ToUpperInvariant()
+            if ($expectedHash -notmatch '^[A-F0-9]{64}$') { throw 'The monitoring manifest SHA-256 value is invalid.' }
+            if ($expectedHash -ne ([string]$monitoring.sha256).Trim().ToUpperInvariant()) {
+                throw 'The monitoring release hash does not match the file entry in the manifest.'
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$monitoring.releaseDate)) {
+                throw 'The monitoring release date is missing from the manifest.'
+            }
+
+            return [pscustomobject]@{
+                Version = $remoteVersion
+                ReleaseDate = [string]$monitoring.releaseDate
+                ExpectedHash = $expectedHash
+            }
+        }
+        catch {
+            $lastIssue = $_.Exception.Message
+        }
+
+        if ($attempt -lt $MaximumAttempts) {
+            Write-RunLog -Category Update -Color DarkGray -Message (
+                'GitHub monitoring release files are synchronizing (attempt {0}/{1}). Retrying in {2} second(s).' -f
+                    $attempt, $MaximumAttempts, $RetrySeconds
+            )
+            Start-Sleep -Seconds $RetrySeconds
+        }
+    }
+
+    throw "The GitHub monitoring release did not become consistent after $MaximumAttempts attempt(s). $lastIssue"
 }
 
 function Get-MonitorScriptReleaseMetadata {
@@ -441,18 +511,13 @@ function Invoke-MonitorAutomaticUpdate {
     }
     try {
         Write-RunLog -Category Update -Color DarkGray -Message ('Checking GitHub for a monitoring update. Current version={0}.' -f $script:MonitorVersion)
-        $manifestResponse = Invoke-WebRequest `
-            -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorUpdateManifestFileName) `
-            -UseBasicParsing `
-            -TimeoutSec 15 `
-            -ErrorAction Stop
-        $manifest = ([string]$manifestResponse.Content) | ConvertFrom-Json -ErrorAction Stop
-        $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $script:MonitorReleaseScriptFileName })
-        if ($entries.Count -ne 1) {
-            throw "The release manifest does not contain one unique entry for $($script:MonitorReleaseScriptFileName)."
+        $release = Get-MonitorRemoteReleaseDefinition
+        $currentVersion = [version]$script:MonitorVersion
+        if ($release.Version -le $currentVersion) {
+            Write-RunLog -Category Update -Color DarkGray -Message ('Monitoring version {0} is current; no update was required.' -f $currentVersion)
+            return
         }
-        $expectedHash = ([string]$entries[0].sha256).Trim().ToUpperInvariant()
-        if ($expectedHash -notmatch '^[A-F0-9]{64}$') { throw 'The monitoring manifest SHA-256 value is invalid.' }
+        $expectedHash = $release.ExpectedHash
 
         $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorUpdate_{0}' -f [guid]::NewGuid().ToString('N'))
         [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
@@ -467,16 +532,14 @@ function Invoke-MonitorAutomaticUpdate {
         $downloadedHash = (Get-FileHash -LiteralPath $downloadedScript -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
         if ($downloadedHash -ne $expectedHash) { throw 'The downloaded monitoring script failed SHA-256 verification.' }
         $remoteMetadata = Get-MonitorScriptReleaseMetadata -Path $downloadedScript
-        $currentVersion = [version]$script:MonitorVersion
-        if ($remoteMetadata.Version -le $currentVersion) {
-            Write-RunLog -Category Update -Color DarkGray -Message ('Monitoring version {0} is current; no update was required.' -f $currentVersion)
-            return
+        if ($remoteMetadata.Version -ne $release.Version -or $remoteMetadata.ReleaseDate -ne $release.ReleaseDate) {
+            throw 'The downloaded monitoring script metadata does not match the verified monitoring release definition.'
         }
         if (-not (Test-MonitorScriptFolderWritable)) {
             throw "A newer monitoring version $($remoteMetadata.Version) is available, but the script folder is not writable: $($script:ScriptDirectory)"
         }
 
-        Write-RunLog -Category Update -Color Cyan -Message ('Verified monitoring update {0}, released {1}. Creating backups before installation.' -f $remoteMetadata.Version, $remoteMetadata.ReleaseDate)
+        Write-RunLog -Category Update -Color Cyan -Message ('Verified monitoring update {0}, released {1}. Creating backups before installation.' -f $release.Version, $release.ReleaseDate)
         $backupFolder = New-MonitorAutomaticUpdateBackup -TargetVersion $remoteMetadata.Version
         Write-RunLog -Category Update -Color DarkGray -Message 'Validating the downloaded monitoring release against the current site configuration.'
         Test-MonitorDownloadedReleaseConfiguration -DownloadedScriptPath $downloadedScript

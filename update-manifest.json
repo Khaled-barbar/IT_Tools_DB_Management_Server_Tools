@@ -1,7 +1,13 @@
 {
-  "schemaVersion": 1,
-  "version": "7.1.11",
+  "schemaVersion": 2,
+  "version": "7.1.12",
   "releaseDate": "2026-08-21",
+  "monitoring": {
+    "version": "6.9.0",
+    "releaseDate": "2026-08-21",
+    "scriptPath": "D4A-ScheduledMonitor-v5.ps1",
+    "sha256": "76D3A6C2A142C7BE28D6608699A98D72E3F92881E1DEEB639D7863B79B96EB1B"
+  },
   "files": [
     {
       "path": "AssemblyRules_Luleburgas.sql",
@@ -13,11 +19,15 @@
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
-      "sha256": "EA183C19995582621385761838039F0D302A3707047C0172C0C997ED5CB6998E"
+      "sha256": "76D3A6C2A142C7BE28D6608699A98D72E3F92881E1DEEB639D7863B79B96EB1B"
+    },
+    {
+      "path": "monitor-version.txt",
+      "sha256": "B39EC1E3EA395D5252A2606456DF93446F6460E60AE35D8E8CF1A83C3E66E900"
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "7A8937CE82B6226082538ED405F6383D0C782546426E59096475038894CFC238"
+      "sha256": "5D4FECA460CA1977F21C214731FC3A43591546DCC28D609D1A9D2DF90C7AB611"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",

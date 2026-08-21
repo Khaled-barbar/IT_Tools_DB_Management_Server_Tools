@@ -6,6 +6,17 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.12 - 2026-08-21
+
+### Corrected
+
+- Defined independent update channels for IT Tools and Monitoring. `version.txt` now applies only to IT Tools, while `monitor-version.txt` and the manifest `monitoring` definition identify the monitor release.
+- Monitoring runs now require the monitor version, manifest definition, script filename, release date, and SHA-256 values to agree before code is downloaded or installed. Inconsistent GitHub/CDN responses are retried every five seconds for up to one minute and recorded in the monitor run log.
+
+### Monitoring 6.9.0
+
+- Added an explicit Monitoring release definition and independent version check so scheduled monitor executions can reliably detect and install a newer release while preserving site-specific configuration, logs, filename, and Scheduled Tasks.
+
 ## 7.1.11 - 2026-08-21
 
 ### Corrected

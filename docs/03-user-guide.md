@@ -44,6 +44,8 @@ Unblock-File -LiteralPath '.\IT_Tools_Database_Translations_and_Server_Checks.ps
 
 At startup, IT Tools compares its embedded version with `version.txt` on GitHub. If an update exists, it waits and retries if GitHub temporarily serves a manifest from a different release, then downloads the manifest and release files to a temporary folder, validates SHA-256 hashes, parses the new main script, installs only verified files, verifies the version and hash written to disk, and shows an update summary. The summary remains visible until you press a key; IT Tools then reloads the verified version in the same PowerShell window.
 
+Deployed monitoring scripts update independently. At the beginning of every scheduled or manual monitor run, the monitor compares its embedded version with `monitor-version.txt`, then verifies that the `monitoring` definition and file hash in `update-manifest.json` match. A newer verified monitor replaces the installed script at the same path after backing up its script, configuration, and related Scheduled Task definitions. The current health check finishes with the existing code; the next scheduled run uses the new version. Use `-SkipAutomaticUpdate` only for a troubleshooting run.
+
 If the script folder is not writable, run PowerShell as Administrator or move the full toolkit to a user-owned folder. Do not manually combine files from different releases.
 
 Before a planned production rollout, review [`CHANGELOG.md`](../CHANGELOG.md) for significant new features, behavior changes, and corrections. The changelog is informational; the updater relies on `version.txt` and `update-manifest.json` for version and integrity decisions.

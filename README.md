@@ -20,7 +20,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.1.11, Monitoring 6.8.0 |
+| Current release | IT Tools 7.1.12, Monitoring 6.9.0 |
 
 ## Why it exists
 
@@ -78,11 +78,12 @@ This toolkit supports operational work; it does not replace change-management ap
 | `RoleAdminLuleburgaz-DanoneStandard-090426.sql` | Companion data for the Luleburgas roles workflow |
 | `CHANGELOG.md` | Human-readable history of significant releases, features, and corrections |
 | `IT_Tools_Script_Maintenance_Conditions.md` | Standing safety, logging, validation, and release rules for future script changes |
-| `version.txt` | Public IT Tools release version |
-| `update-manifest.json` | Release file list and SHA-256 integrity hashes |
+| `version.txt` | Public IT Tools release version used only by the IT Tools updater |
+| `monitor-version.txt` | Public Monitoring release version used only by deployed monitoring scripts |
+| `update-manifest.json` | File allowlist and SHA-256 hashes, plus the explicit Monitoring release definition |
 
 ## Versioning
 
-Patch releases are used for changes in the same release week, minor releases for a later release cycle, and major releases for substantial or breaking changes. The monitoring component has its own version because it can be updated while preserving each site's local configuration and Scheduled Tasks.
+Patch releases are used for changes in the same release week, minor releases for a later release cycle, and major releases for substantial or breaking changes. IT Tools reads `version.txt`; deployed monitors read `monitor-version.txt` and the `monitoring` definition in `update-manifest.json`. The monitoring component has its own version because it can be updated while preserving each site's local configuration and Scheduled Tasks.
 
 For stronger production assurance, signed GitHub releases or Authenticode signatures can be added in addition to the current HTTPS and SHA-256 controls.
