@@ -6,6 +6,17 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.15 - 2026-08-21
+
+### Corrected
+
+- Corrected GitHub release SHA-256 values to hash the exact `LF` files distributed by GitHub rather than local `CRLF` working copies. This resolves false integrity failures for the IT Tools script and companion files.
+- IT Tools now retries each manifest-listed file download with a fresh cache-busting request until its verified hash matches, so a temporary GitHub/CDN mismatch cannot block a multi-version update.
+
+### Monitoring 6.9.1
+
+- Monitoring release downloads now use a fresh cache-busting URL on every retry and require a matching SHA-256 before installation, supporting safe upgrades from older monitor releases.
+
 ## 7.1.14 - 2026-08-21
 
 ### Changed

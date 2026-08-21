@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.9.0
+# D4A-Monitor-Version: 6.9.1
 # D4A-Monitor-Release-Date: 2026-08-21
 
 <#
@@ -221,7 +221,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.9.0'
+$script:MonitorVersion = '6.9.1'
 $script:MonitorReleaseDate = '2026-08-21'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -259,7 +259,7 @@ function Get-MonitorAutomaticUpdateUri {
         throw "Unsafe monitoring update path: $RelativePath"
     }
     $encodedPath = (@($RelativePath -split '[\\/]' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
-    return "$($script:MonitorRepositoryRawRoot)/$encodedPath`?releaseCheck=$($script:MonitorUpdateRequestId)"
+    return "$($script:MonitorRepositoryRawRoot)/$encodedPath`?releaseCheck=$($script:MonitorUpdateRequestId)-$([DateTime]::UtcNow.Ticks)"
 }
 
 function Get-MonitorUpdateText {
@@ -328,6 +328,47 @@ function Get-MonitorRemoteReleaseDefinition {
     }
 
     throw "The GitHub monitoring release did not become consistent after $MaximumAttempts attempt(s). $lastIssue"
+}
+
+function Get-MonitorVerifiedReleaseScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedHash,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [int]$MaximumAttempts = 12,
+        [int]$RetrySeconds = 5
+    )
+
+    $lastIssue = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest `
+                -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorReleaseScriptFileName) `
+                -OutFile $DestinationPath `
+                -UseBasicParsing `
+                -TimeoutSec 60 `
+                -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } `
+                -ErrorAction Stop
+
+            $downloadedHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+            if ($downloadedHash -eq $ExpectedHash) { return $DestinationPath }
+            $lastIssue = "Received SHA-256 $downloadedHash, expected $ExpectedHash."
+        }
+        catch {
+            $lastIssue = $_.Exception.Message
+        }
+
+        Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+        if ($attempt -lt $MaximumAttempts) {
+            Write-RunLog -Category Update -Color DarkGray -Message (
+                'GitHub monitoring script is still synchronizing (attempt {0}/{1}). Retrying in {2} second(s).' -f
+                    $attempt, $MaximumAttempts, $RetrySeconds
+            )
+            Start-Sleep -Seconds $RetrySeconds
+        }
+    }
+
+    throw "The verified monitoring script could not be downloaded after $MaximumAttempts attempt(s). $lastIssue"
 }
 
 function Get-MonitorScriptReleaseMetadata {
@@ -522,15 +563,7 @@ function Invoke-MonitorAutomaticUpdate {
         $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorUpdate_{0}' -f [guid]::NewGuid().ToString('N'))
         [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
         $downloadedScript = Join-Path $temporaryFolder $script:MonitorReleaseScriptFileName
-        Invoke-WebRequest `
-            -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorReleaseScriptFileName) `
-            -OutFile $downloadedScript `
-            -UseBasicParsing `
-            -TimeoutSec 60 `
-            -ErrorAction Stop
-
-        $downloadedHash = (Get-FileHash -LiteralPath $downloadedScript -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
-        if ($downloadedHash -ne $expectedHash) { throw 'The downloaded monitoring script failed SHA-256 verification.' }
+        [void](Get-MonitorVerifiedReleaseScript -ExpectedHash $expectedHash -DestinationPath $downloadedScript)
         $remoteMetadata = Get-MonitorScriptReleaseMetadata -Path $downloadedScript
         if ($remoteMetadata.Version -ne $release.Version -or $remoteMetadata.ReleaseDate -ne $release.ReleaseDate) {
             throw 'The downloaded monitoring script metadata does not match the verified monitoring release definition.'

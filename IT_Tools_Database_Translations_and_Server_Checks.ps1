@@ -55,7 +55,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.14'
+$Script:ToolVersion = [version]'7.1.15'
 $Script:ToolReleaseDate = '2026-08-21'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -306,6 +306,48 @@ function Get-ITToolsMatchingRemoteManifest {
     throw "The GitHub update release did not become consistent after $MaximumAttempts attempt(s). $lastIssue"
 }
 
+function Get-ITToolsVerifiedRemoteUpdateFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$ExpectedHash,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [int]$MaximumAttempts = 12,
+        [int]$RetrySeconds = 5,
+        [int]$ProgressPercent = 15
+    )
+
+    $lastIssue = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest `
+                -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath) `
+                -OutFile $DestinationPath `
+                -UseBasicParsing `
+                -TimeoutSec 60 `
+                -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } `
+                -ErrorAction Stop
+
+            $actualHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+            if ($actualHash -eq $ExpectedHash) { return $DestinationPath }
+            $lastIssue = "Received SHA-256 $actualHash, expected $ExpectedHash."
+        }
+        catch {
+            $lastIssue = $_.Exception.Message
+        }
+
+        Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+        if ($attempt -lt $MaximumAttempts) {
+            Write-StreamingLog -Percent $ProgressPercent -Step 'Update' -Description (
+                "GitHub file $RelativePath is still synchronizing (attempt $attempt of $MaximumAttempts). Retrying in $RetrySeconds second(s)."
+            )
+            Start-Sleep -Seconds $RetrySeconds
+        }
+    }
+
+    throw "The verified GitHub file '$RelativePath' could not be downloaded after $MaximumAttempts attempt(s). $lastIssue"
+}
+
 function Test-ITToolsScriptFolderWritable {
     param([Parameter(Mandatory = $true)][string]$Folder)
 
@@ -387,11 +429,11 @@ function Invoke-ITToolsAutomaticUpdate {
                 [void](New-Item -Path $downloadFolder -ItemType Directory -Force -ErrorAction Stop)
                 $percent = [Math]::Min(75, 10 + [int](($fileIndex / $filesToInstall.Count) * 65))
                 Write-StreamingLog -Percent $percent -Step 'Update' -Description "Downloading and verifying $relativePath."
-                Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $relativePath) -OutFile $downloadPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
-                $actualHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
-                if ($actualHash -ne $expectedHash) {
-                    throw "Integrity check failed for $relativePath."
-                }
+                [void](Get-ITToolsVerifiedRemoteUpdateFile `
+                    -RelativePath $relativePath `
+                    -ExpectedHash $expectedHash `
+                    -DestinationPath $downloadPath `
+                    -ProgressPercent $percent)
             }
 
             $downloadedMainScript = Join-Path $stagingFolder $Script:ToolMainScriptFileName
@@ -1601,17 +1643,11 @@ function Get-SiteMonitoringTemplatePath {
         [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
         $downloadedTemplate = Join-Path $temporaryFolder $templateName
         Write-StreamingLog -Percent 10 -Step 'Release' -Description 'Downloading and verifying the current monitoring template.'
-        Invoke-WebRequest `
-            -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $templateName) `
-            -OutFile $downloadedTemplate `
-            -UseBasicParsing `
-            -TimeoutSec 60 `
-            -ErrorAction Stop
-
-        $downloadedHash = (Get-FileHash -LiteralPath $downloadedTemplate -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
-        if ($downloadedHash -ne $expectedHash) {
-            throw "The downloaded monitoring template failed SHA-256 verification."
-        }
+        [void](Get-ITToolsVerifiedRemoteUpdateFile `
+            -RelativePath $templateName `
+            -ExpectedHash $expectedHash `
+            -DestinationPath $downloadedTemplate `
+            -ProgressPercent 10)
         Test-PowerShellScriptParser -ScriptPath $downloadedTemplate
         $releaseMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $downloadedTemplate
         if (-not $releaseMetadata.HasVersionHeader) {
