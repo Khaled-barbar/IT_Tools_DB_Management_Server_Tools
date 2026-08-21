@@ -335,7 +335,7 @@ Collects operating system, CPU, memory, disk, and performance information with t
 
 ### SSL Checker
 
-Enter an HTTPS hostname or a full URL. The checker validates DNS resolution, TCP reachability, the TLS handshake with SNI, hostname/SAN matching, certificate dates and key strength, Windows chain trust, online CRL/OCSP status, TLS protocol support, HTTPS redirects, HTTP-to-HTTPS behavior, and static mixed-content references. Entering a direct server IP/address keeps the hostname as the SNI and certificate-validation name. Each network step has a 15-second timeout, and certificate trust errors are reported rather than bypassed.
+Enter a domain, subdomain, or full HTTPS URL. The checker validates DNS resolution, TCP reachability, the TLS handshake with SNI, hostname/SAN matching, certificate dates and key strength, Windows chain trust, online CRL/OCSP status, TLS protocol support, HTTPS redirects, HTTP-to-HTTPS behavior, and static mixed-content references. A domain uses port `443`; a full URL can include a non-default HTTPS port. Redirect and mixed-content checks always run. Each network step has a 15-second timeout, and certificate trust errors are reported rather than bypassed.
 
 ### Show recently created or changed files
 

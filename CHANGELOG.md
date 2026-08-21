@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.13 - 2026-08-21
+
+### Corrected
+
+- Simplified SSL Checker to one domain/subdomain or HTTPS URL prompt. The supplied hostname now drives DNS, TCP, and SNI validation; redirect and mixed-content checks always run automatically. A plain hostname uses port 443, while an HTTPS URL may retain an explicitly specified port.
+
 ## 7.1.12 - 2026-08-21
 
 ### Corrected

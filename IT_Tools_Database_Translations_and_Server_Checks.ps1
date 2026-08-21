@@ -54,7 +54,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.12'
+$Script:ToolVersion = [version]'7.1.13'
 $Script:ToolReleaseDate = '2026-08-21'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -9855,9 +9855,9 @@ function Show-SslChecker {
     Write-Host 'Type q at any prompt to return to Local server and file tools.' -ForegroundColor DarkGray
     Write-Host ''
 
-    $targetText = Read-Host 'HTTPS hostname or full URL (example: https://site.example.com)'
+    $targetText = Read-Host 'Domain/subdomain or full HTTPS URL (example: site.example.com or https://site.example.com)'
     if (Test-IsBack $targetText) { return }
-    if ([string]::IsNullOrWhiteSpace($targetText)) { Write-Host 'Enter an HTTPS hostname or URL.' -ForegroundColor Yellow; Pause-Screen; return }
+    if ([string]::IsNullOrWhiteSpace($targetText)) { Write-Host 'Enter a domain, subdomain, or HTTPS URL.' -ForegroundColor Yellow; Pause-Screen; return }
     $targetText = $targetText.Trim()
     $hostName = $null; $pagePath = '/'; $port = 443
     if ($targetText -match '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
@@ -9873,17 +9873,9 @@ function Show-SslChecker {
     else {
         $hostName = $targetText.TrimEnd('.')
         if ($hostName -match '[\s/]') { Write-Host 'Enter only a hostname, or a full HTTPS URL.' -ForegroundColor Yellow; Pause-Screen; return }
-        $portText = Read-Host 'HTTPS TCP port (Enter = 443)'
-        if (Test-IsBack $portText) { return }
-        if (-not [string]::IsNullOrWhiteSpace($portText) -and (-not [int]::TryParse($portText, [ref]$port) -or $port -lt 1 -or $port -gt 65535)) { Write-Host 'Enter a port from 1 to 65535.' -ForegroundColor Yellow; Pause-Screen; return }
     }
-    $serverAddress = Read-Host "Server IP/address to connect to (Enter = $hostName; keeps SNI as $hostName)"
-    if (Test-IsBack $serverAddress) { return }
-    if ([string]::IsNullOrWhiteSpace($serverAddress)) { $serverAddress = $hostName } else { $serverAddress = $serverAddress.Trim() }
-    $skipPageScan = Read-Host 'Skip the HTTP redirect and mixed-content scan? (y/N)'
-    if (Test-IsBack $skipPageScan) { return }
-    $skipPageScan = $skipPageScan -match '^(?i)y(es)?$'
-    Invoke-SslHealthCheck -HostName $hostName -ServerAddress $serverAddress -Port $port -PagePath $pagePath -SkipPageScan:$skipPageScan
+    # Use the requested host for DNS, TCP, and SNI; redirect and mixed-content checks always run.
+    Invoke-SslHealthCheck -HostName $hostName -ServerAddress $hostName -Port $port -PagePath $pagePath
     Pause-Screen
 }
 
