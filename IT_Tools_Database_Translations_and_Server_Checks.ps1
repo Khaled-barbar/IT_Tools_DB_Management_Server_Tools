@@ -54,7 +54,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.10'
+$Script:ToolVersion = [version]'7.1.11'
 $Script:ToolReleaseDate = '2026-08-21'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -270,8 +270,38 @@ function Get-ITToolsCacheBustedUpdateUri {
 function Get-ITToolsRemoteText {
     param([Parameter(Mandatory = $true)][string]$RelativePath)
 
-    $response = Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath) -UseBasicParsing -TimeoutSec 12 -ErrorAction Stop
+    $response = Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath) -UseBasicParsing -TimeoutSec 12 -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } -ErrorAction Stop
     return ([string]$response.Content).Trim()
+}
+
+function Get-ITToolsMatchingRemoteManifest {
+    param(
+        [Parameter(Mandatory = $true)][version]$ExpectedVersion,
+        [int]$MaximumAttempts = 12,
+        [int]$RetrySeconds = 5
+    )
+
+    $lastIssue = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            $manifestText = Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName
+            $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
+            if ([string]$manifest.version -eq $ExpectedVersion.ToString()) {
+                return $manifest
+            }
+            $lastIssue = "The update manifest version '$($manifest.version)' does not match version.txt '$ExpectedVersion'."
+        }
+        catch {
+            $lastIssue = $_.Exception.Message
+        }
+
+        if ($attempt -lt $MaximumAttempts) {
+            Write-StreamingLog -Percent 12 -Step 'Update' -Description "GitHub release files are synchronizing (attempt $attempt of $MaximumAttempts). Retrying in $RetrySeconds second(s)."
+            Start-Sleep -Seconds $RetrySeconds
+        }
+    }
+
+    throw "The GitHub update release did not become consistent after $MaximumAttempts attempt(s). $lastIssue"
 }
 
 function Test-ITToolsScriptFolderWritable {
@@ -318,11 +348,7 @@ function Invoke-ITToolsAutomaticUpdate {
         }
 
         Write-StreamingLog -Percent 10 -Step 'Update' -Description 'Downloading the release manifest for verification.'
-        $manifestText = Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName
-        $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
-        if ([string]$manifest.version -ne $remoteVersion.ToString()) {
-            throw "The update manifest version '$($manifest.version)' does not match version.txt '$remoteVersion'."
-        }
+        $manifest = Get-ITToolsMatchingRemoteManifest -ExpectedVersion $remoteVersion
         $manifestFiles = @($manifest.files)
         if ($manifestFiles.Count -eq 0) { throw 'The update manifest does not contain files.' }
         if (@($manifestFiles | Where-Object { $_.path -eq $Script:ToolMainScriptFileName }).Count -ne 1) {

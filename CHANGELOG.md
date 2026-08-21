@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.11 - 2026-08-21
+
+### Corrected
+
+- Corrected automatic updates during GitHub/CDN propagation. When `version.txt` and `update-manifest.json` temporarily come from different releases, IT Tools now shows five-second retry progress for up to one minute instead of immediately continuing with the outdated menu.
+- Added no-cache request headers to the update check and retained a finite retry limit with full daily error logging if the release never becomes consistent.
+
 ## 7.1.10 - 2026-08-21
 
 ### Corrected

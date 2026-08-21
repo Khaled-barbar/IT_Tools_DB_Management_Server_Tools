@@ -42,7 +42,7 @@ Unblock-File -LiteralPath '.\IT_Tools_Database_Translations_and_Server_Checks.ps
 
 ### Automatic updates
 
-At startup, IT Tools compares its embedded version with `version.txt` on GitHub. If an update exists, it downloads the manifest and release files to a temporary folder, validates SHA-256 hashes, parses the new main script, installs only verified files, verifies the version and hash written to disk, and shows an update summary. The summary remains visible until you press a key; IT Tools then reloads the verified version in the same PowerShell window.
+At startup, IT Tools compares its embedded version with `version.txt` on GitHub. If an update exists, it waits and retries if GitHub temporarily serves a manifest from a different release, then downloads the manifest and release files to a temporary folder, validates SHA-256 hashes, parses the new main script, installs only verified files, verifies the version and hash written to disk, and shows an update summary. The summary remains visible until you press a key; IT Tools then reloads the verified version in the same PowerShell window.
 
 If the script folder is not writable, run PowerShell as Administrator or move the full toolkit to a user-owned folder. Do not manually combine files from different releases.
 
