@@ -54,7 +54,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.9'
+$Script:ToolVersion = [version]'7.1.10'
 $Script:ToolReleaseDate = '2026-08-21'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -172,6 +172,11 @@ function Get-CurrentScriptFolder {
 }
 
 function Show-ITToolsDeveloperBanner {
+    param(
+        [version]$Version = $Script:ToolVersion,
+        [string]$ReleaseDate = $Script:ToolReleaseDate
+    )
+
     Write-Host 'Developer: ⇓⇓⇓⇓' -ForegroundColor Cyan
     $banner = @'
  _  __ _           _          _   _ ___              _
@@ -181,7 +186,7 @@ function Show-ITToolsDeveloperBanner {
 |_|\_\|_| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
 '@
     Write-Host $banner -ForegroundColor Green
-    Write-Host "IT Tools version $($Script:ToolVersion) | Release date: $($Script:ToolReleaseDate)" -ForegroundColor Cyan
+    Write-Host "IT Tools version $Version | Release date: $ReleaseDate" -ForegroundColor Cyan
     Write-Host ''
 }
 
@@ -221,6 +226,26 @@ function Show-ITToolsDescription {
     Write-Host '     - Deploy and schedule the D4A health and performance monitor' -ForegroundColor Gray
     Write-Host '  4. Logs:' -ForegroundColor Cyan
     Write-Host '     - Review database interventions performed by this script' -ForegroundColor Gray
+    Write-Host ''
+}
+
+function Show-ITToolsInstalledReleaseDescription {
+    param([Parameter(Mandatory = $true)][string]$ScriptText)
+
+    $headerLines = @($ScriptText -split "`r?`n" | Select-Object -First 45)
+    $descriptionLines = @($headerLines | Where-Object {
+        $_ -match '^# This script contains ' -or $_ -match '^#   \d+\. ' -or $_ -match '^#      - '
+    })
+
+    if ($descriptionLines.Count -eq 0) {
+        Write-Host 'The verified release provides Database Tools, Local server and file tools, Site Monitoring, and Logs.' -ForegroundColor White
+        Write-Host ''
+        return
+    }
+
+    foreach ($descriptionLine in $descriptionLines) {
+        Write-Host ($descriptionLine -replace '^#\s?', '') -ForegroundColor Gray
+    }
     Write-Host ''
 }
 
@@ -265,13 +290,13 @@ function Test-ITToolsScriptFolderWritable {
 }
 
 function Invoke-ITToolsAutomaticUpdate {
-    if ($SkipAutomaticUpdate.IsPresent) { return }
+    if ($SkipAutomaticUpdate.IsPresent) { return $false }
 
     $updateAvailable = $false
     try {
         $remoteVersionText = Get-ITToolsRemoteText -RelativePath $Script:ToolVersionFileName
         $remoteVersion = [version]$remoteVersionText
-        if ($remoteVersion -le $Script:ToolVersion) { return }
+        if ($remoteVersion -le $Script:ToolVersion) { return $false }
         $updateAvailable = $true
 
         Clear-Host
@@ -360,16 +385,36 @@ function Invoke-ITToolsAutomaticUpdate {
                 Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force -ErrorAction Stop
             }
 
+            $mainManifestFile = @($filesToInstall | Where-Object { $_.path -eq $Script:ToolMainScriptFileName } | Select-Object -First 1)
+            $installedHash = (Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+            if ($installedHash -ne ([string]$mainManifestFile.sha256).ToUpperInvariant()) {
+                throw 'The installed IT Tools script did not match the verified release hash.'
+            }
+            $installedScriptText = Get-Content -LiteralPath $scriptPath -Raw -ErrorAction Stop
+            $installedVersionMatch = [regex]::Match($installedScriptText, '(?m)^\s*\$Script:ToolVersion\s*=\s*\[version\]''(?<version>[^'']+)''')
+            if (-not $installedVersionMatch.Success) {
+                throw 'The installed IT Tools script does not contain readable release metadata.'
+            }
+            $installedVersion = [version]$installedVersionMatch.Groups['version'].Value
+            if ($installedVersion -ne $remoteVersion) {
+                throw "The installed IT Tools version '$installedVersion' does not match the verified release '$remoteVersion'."
+            }
+
             Write-StreamingLog -Percent 100 -Step 'Update' -Description "IT Tools version $remoteVersion was installed."
             Write-Host ''
-            Write-Host 'Update installed successfully.' -ForegroundColor Green
+            Write-Host 'Update installed successfully and its on-disk version was verified.' -ForegroundColor Green
+            Write-Host 'Update summary:' -ForegroundColor Cyan
+            Write-Host "  Previous version : $($Script:ToolVersion)" -ForegroundColor Gray
+            Write-Host "  Installed version: $installedVersion" -ForegroundColor Green
+            Write-Host "  Release date     : $($manifest.releaseDate)" -ForegroundColor Gray
+            Write-Host "  Verified files   : $($orderedFiles.Count)" -ForegroundColor Gray
+            Write-Host '  Next step        : IT Tools will reload the verified version in this same PowerShell window.' -ForegroundColor Gray
             Write-Host ''
-            Show-ITToolsDeveloperBanner
-            Show-ITToolsDescription
-            Pause-Screen -Message 'Press any key to relaunch IT Tools with the new version...'
-            $quotedScriptPath = '"{0}"' -f $scriptPath.Replace('"', '""')
-            Start-Process -FilePath 'powershell.exe' -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
-            exit
+            Show-ITToolsDeveloperBanner -Version $installedVersion -ReleaseDate ([string]$manifest.releaseDate)
+            Show-ITToolsInstalledReleaseDescription -ScriptText $installedScriptText
+            Pause-Screen -Message 'Press any key to open the new IT Tools version...'
+            & $scriptPath
+            return $true
         }
         finally {
             if (Test-Path -LiteralPath $stagingFolder -PathType Container) {
@@ -382,6 +427,7 @@ function Invoke-ITToolsAutomaticUpdate {
             $logPath = Write-ToolErrorLog -Context 'Automatic GitHub update' -ErrorRecord $_
             Write-Host "The update was not applied. The current version will continue. Error log: $logPath" -ForegroundColor Yellow
         }
+        return $false
     }
 }
 
@@ -769,7 +815,8 @@ function Write-DatabaseInterventionAuditEntry {
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
             [IO.File]::AppendAllText($Script:DatabaseEditLogPath, $line + [Environment]::NewLine, $encoding)
-            return
+            Pause-Screen -Message 'Press any key to continue with the current IT Tools version...'
+            return $false
         }
         catch {
             if ($attempt -eq 3) { throw }
@@ -9948,7 +9995,8 @@ function Show-MasterMainMenu {
 
 # Start the script.
 try {
-    Invoke-ITToolsAutomaticUpdate
+    $updateInstalled = Invoke-ITToolsAutomaticUpdate
+    if ($updateInstalled) { return }
     Show-MasterMainMenu
 }
 catch {

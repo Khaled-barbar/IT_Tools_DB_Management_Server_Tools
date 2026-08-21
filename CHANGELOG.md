@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.10 - 2026-08-21
+
+### Corrected
+
+- Corrected the automatic IT Tools update flow so it verifies the copied main-script hash and embedded version, keeps the update summary visible until a key press, and reloads the verified release in the same PowerShell window. The older script session can no longer proceed to its stale main menu after an update.
+- The update summary now shows the previous and installed versions, release date, and number of verified files. Its feature overview is read from the installed release rather than the in-memory older script.
+
 ## 7.1.9 - 2026-08-21
 
 ### Added
