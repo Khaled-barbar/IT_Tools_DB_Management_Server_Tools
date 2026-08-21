@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.9.1
+# D4A-Monitor-Version: 6.9.2
 # D4A-Monitor-Release-Date: 2026-08-21
 
 <#
@@ -221,9 +221,10 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.9.1'
+$script:MonitorVersion = '6.9.2'
 $script:MonitorReleaseDate = '2026-08-21'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
+$script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
 $script:MonitorUpdateManifestFileName = 'update-manifest.json'
 $script:MonitorReleaseScriptFileName = 'D4A-ScheduledMonitor-v5.ps1'
@@ -252,21 +253,45 @@ $script:MonitorStatePath = $null
 $script:LoggingReady = $false
 $script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
 
+function Get-MonitorReleaseCommit {
+    try {
+        $response = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/$($script:MonitorGitHubRepository)/commits/main" `
+            -TimeoutSec 15 `
+            -Headers @{ 'User-Agent' = 'D4A-ScheduledMonitor'; 'Cache-Control' = 'no-cache' } `
+            -ErrorAction Stop
+        $commit = [string]$response.sha
+        if ($commit -notmatch '^[a-fA-F0-9]{40}$') { throw 'The GitHub API did not return a valid main-branch commit SHA.' }
+        return $commit
+    }
+    catch {
+        Write-RunLog -Category Update -Color DarkGray -Message 'GitHub commit lookup is unavailable; using the main release URL with verified retry protection.'
+        return ''
+    }
+}
+
 function Get-MonitorAutomaticUpdateUri {
-    param([Parameter(Mandatory = $true)][string]$RelativePath)
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string]$ReleaseCommit = ''
+    )
 
     if ($RelativePath -match '(?i)(\.\.|^[\\/]|^[A-Za-z]:)') {
         throw "Unsafe monitoring update path: $RelativePath"
     }
     $encodedPath = (@($RelativePath -split '[\\/]' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
-    return "$($script:MonitorRepositoryRawRoot)/$encodedPath`?releaseCheck=$($script:MonitorUpdateRequestId)-$([DateTime]::UtcNow.Ticks)"
+    $releaseReference = if ([string]::IsNullOrWhiteSpace($ReleaseCommit)) { 'main' } else { $ReleaseCommit }
+    return "https://raw.githubusercontent.com/$($script:MonitorGitHubRepository)/$releaseReference/$encodedPath`?releaseCheck=$($script:MonitorUpdateRequestId)-$([DateTime]::UtcNow.Ticks)"
 }
 
 function Get-MonitorUpdateText {
-    param([Parameter(Mandatory = $true)][string]$RelativePath)
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string]$ReleaseCommit = ''
+    )
 
     $response = Invoke-WebRequest `
-        -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $RelativePath) `
+        -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit) `
         -UseBasicParsing `
         -TimeoutSec 15 `
         -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } `
@@ -283,8 +308,9 @@ function Get-MonitorRemoteReleaseDefinition {
     $lastIssue = $null
     for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
         try {
-            $remoteVersion = [version](Get-MonitorUpdateText -RelativePath $script:MonitorVersionFileName)
-            $manifest = (Get-MonitorUpdateText -RelativePath $script:MonitorUpdateManifestFileName) | ConvertFrom-Json -ErrorAction Stop
+            $releaseCommit = Get-MonitorReleaseCommit
+            $remoteVersion = [version](Get-MonitorUpdateText -RelativePath $script:MonitorVersionFileName -ReleaseCommit $releaseCommit)
+            $manifest = (Get-MonitorUpdateText -RelativePath $script:MonitorUpdateManifestFileName -ReleaseCommit $releaseCommit) | ConvertFrom-Json -ErrorAction Stop
             $monitoring = $manifest.monitoring
             if ($null -eq $monitoring) {
                 throw 'The update manifest does not define a monitoring release.'
@@ -312,6 +338,7 @@ function Get-MonitorRemoteReleaseDefinition {
                 Version = $remoteVersion
                 ReleaseDate = [string]$monitoring.releaseDate
                 ExpectedHash = $expectedHash
+                ReleaseCommit = $releaseCommit
             }
         }
         catch {
@@ -334,6 +361,7 @@ function Get-MonitorVerifiedReleaseScript {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedHash,
         [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [string]$ReleaseCommit = '',
         [int]$MaximumAttempts = 12,
         [int]$RetrySeconds = 5
     )
@@ -343,7 +371,7 @@ function Get-MonitorVerifiedReleaseScript {
         try {
             Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
             Invoke-WebRequest `
-                -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorReleaseScriptFileName) `
+                -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorReleaseScriptFileName -ReleaseCommit $ReleaseCommit) `
                 -OutFile $DestinationPath `
                 -UseBasicParsing `
                 -TimeoutSec 60 `
@@ -563,7 +591,7 @@ function Invoke-MonitorAutomaticUpdate {
         $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorUpdate_{0}' -f [guid]::NewGuid().ToString('N'))
         [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
         $downloadedScript = Join-Path $temporaryFolder $script:MonitorReleaseScriptFileName
-        [void](Get-MonitorVerifiedReleaseScript -ExpectedHash $expectedHash -DestinationPath $downloadedScript)
+        [void](Get-MonitorVerifiedReleaseScript -ExpectedHash $expectedHash -DestinationPath $downloadedScript -ReleaseCommit $release.ReleaseCommit)
         $remoteMetadata = Get-MonitorScriptReleaseMetadata -Path $downloadedScript
         if ($remoteMetadata.Version -ne $release.Version -or $remoteMetadata.ReleaseDate -ne $release.ReleaseDate) {
             throw 'The downloaded monitoring script metadata does not match the verified monitoring release definition.'

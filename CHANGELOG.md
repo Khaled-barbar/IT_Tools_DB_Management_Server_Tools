@@ -6,6 +6,16 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.16 - 2026-08-21
+
+### Corrected
+
+- Automatic updaters now resolve the current `main` commit through GitHub and download the manifest, IT Tools, and monitoring files from that immutable commit. This prevents CDN cache skew between individual release files; a verified retry fallback remains available if the API cannot be reached.
+
+### Monitoring 6.9.2
+
+- Monitoring now resolves the same immutable GitHub commit for its release metadata and script download, avoiding mixed monitoring-version responses during an update.
+
 ## 7.1.15 - 2026-08-21
 
 ### Corrected

@@ -55,9 +55,10 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.15'
+$Script:ToolVersion = [version]'7.1.16'
 $Script:ToolReleaseDate = '2026-08-21'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
+$Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
 $Script:ToolUpdateManifestFileName = 'update-manifest.json'
 $Script:ToolMainScriptFileName = 'IT_Tools_Database_Translations_and_Server_Checks.ps1'
@@ -251,34 +252,62 @@ function Show-ITToolsInstalledReleaseDescription {
     Write-Host ''
 }
 
+function Get-ITToolsReleaseCommit {
+    try {
+        $response = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/$($Script:ToolGitHubRepository)/commits/main" `
+            -TimeoutSec 15 `
+            -Headers @{ 'User-Agent' = 'D4A-IT-Tools'; 'Cache-Control' = 'no-cache' } `
+            -ErrorAction Stop
+        $commit = [string]$response.sha
+        if ($commit -notmatch '^[a-fA-F0-9]{40}$') { throw 'The GitHub API did not return a valid main-branch commit SHA.' }
+        return $commit
+    }
+    catch {
+        Write-StreamingLog -Percent 5 -Step 'Update' -Description 'GitHub commit lookup is unavailable; using the main release URL with verified retry protection.'
+        return ''
+    }
+}
+
 function Get-ITToolsUpdateUri {
-    param([Parameter(Mandatory = $true)][string]$RelativePath)
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string]$ReleaseCommit = ''
+    )
 
     if ($RelativePath -match '(?i)(\.\.|^[\\/]|^[A-Za-z]:)') {
         throw "Unsafe update path: $RelativePath"
     }
 
     $encodedPath = (@($RelativePath -split '[\\/]' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
-    return "$($Script:ToolRepositoryRawRoot)/$encodedPath"
+    $releaseReference = if ([string]::IsNullOrWhiteSpace($ReleaseCommit)) { 'main' } else { $ReleaseCommit }
+    return "https://raw.githubusercontent.com/$($Script:ToolGitHubRepository)/$releaseReference/$encodedPath"
 }
 
 function Get-ITToolsCacheBustedUpdateUri {
-    param([Parameter(Mandatory = $true)][string]$RelativePath)
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string]$ReleaseCommit = ''
+    )
 
-    $uri = Get-ITToolsUpdateUri -RelativePath $RelativePath
+    $uri = Get-ITToolsUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit
     return '{0}?releaseCheck={1}' -f $uri, [DateTime]::UtcNow.Ticks
 }
 
 function Get-ITToolsRemoteText {
-    param([Parameter(Mandatory = $true)][string]$RelativePath)
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string]$ReleaseCommit = ''
+    )
 
-    $response = Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath) -UseBasicParsing -TimeoutSec 12 -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } -ErrorAction Stop
+    $response = Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit) -UseBasicParsing -TimeoutSec 12 -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } -ErrorAction Stop
     return ([string]$response.Content).Trim()
 }
 
 function Get-ITToolsMatchingRemoteManifest {
     param(
         [Parameter(Mandatory = $true)][version]$ExpectedVersion,
+        [string]$ReleaseCommit = '',
         [int]$MaximumAttempts = 12,
         [int]$RetrySeconds = 5
     )
@@ -286,7 +315,7 @@ function Get-ITToolsMatchingRemoteManifest {
     $lastIssue = $null
     for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
         try {
-            $manifestText = Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName
+            $manifestText = Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName -ReleaseCommit $ReleaseCommit
             $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
             if ([string]$manifest.version -eq $ExpectedVersion.ToString()) {
                 return $manifest
@@ -311,6 +340,7 @@ function Get-ITToolsVerifiedRemoteUpdateFile {
         [Parameter(Mandatory = $true)][string]$RelativePath,
         [Parameter(Mandatory = $true)][string]$ExpectedHash,
         [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [string]$ReleaseCommit = '',
         [int]$MaximumAttempts = 12,
         [int]$RetrySeconds = 5,
         [int]$ProgressPercent = 15
@@ -321,7 +351,7 @@ function Get-ITToolsVerifiedRemoteUpdateFile {
         try {
             Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
             Invoke-WebRequest `
-                -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath) `
+                -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit) `
                 -OutFile $DestinationPath `
                 -UseBasicParsing `
                 -TimeoutSec 60 `
@@ -368,7 +398,8 @@ function Invoke-ITToolsAutomaticUpdate {
 
     $updateAvailable = $false
     try {
-        $remoteVersionText = Get-ITToolsRemoteText -RelativePath $Script:ToolVersionFileName
+        $releaseCommit = Get-ITToolsReleaseCommit
+        $remoteVersionText = Get-ITToolsRemoteText -RelativePath $Script:ToolVersionFileName -ReleaseCommit $releaseCommit
         $remoteVersion = [version]$remoteVersionText
         if ($remoteVersion -le $Script:ToolVersion) { return $false }
         $updateAvailable = $true
@@ -392,7 +423,7 @@ function Invoke-ITToolsAutomaticUpdate {
         }
 
         Write-StreamingLog -Percent 10 -Step 'Update' -Description 'Downloading the release manifest for verification.'
-        $manifest = Get-ITToolsMatchingRemoteManifest -ExpectedVersion $remoteVersion
+        $manifest = Get-ITToolsMatchingRemoteManifest -ExpectedVersion $remoteVersion -ReleaseCommit $releaseCommit
         $manifestFiles = @($manifest.files)
         if ($manifestFiles.Count -eq 0) { throw 'The update manifest does not contain files.' }
         if (@($manifestFiles | Where-Object { $_.path -eq $Script:ToolMainScriptFileName }).Count -ne 1) {
@@ -433,6 +464,7 @@ function Invoke-ITToolsAutomaticUpdate {
                     -RelativePath $relativePath `
                     -ExpectedHash $expectedHash `
                     -DestinationPath $downloadPath `
+                    -ReleaseCommit $releaseCommit `
                     -ProgressPercent $percent)
             }
 
@@ -1629,7 +1661,8 @@ function Get-SiteMonitoringTemplatePath {
 
     try {
         Write-StreamingLog -Percent 5 -Step 'Release' -Description 'Checking GitHub for the current official monitoring release.'
-        $manifest = (Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName) | ConvertFrom-Json -ErrorAction Stop
+        $releaseCommit = Get-ITToolsReleaseCommit
+        $manifest = (Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName -ReleaseCommit $releaseCommit) | ConvertFrom-Json -ErrorAction Stop
         $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $templateName })
         if ($entries.Count -ne 1) {
             throw "The official release manifest does not contain one unique entry for '$templateName'."
@@ -1647,6 +1680,7 @@ function Get-SiteMonitoringTemplatePath {
             -RelativePath $templateName `
             -ExpectedHash $expectedHash `
             -DestinationPath $downloadedTemplate `
+            -ReleaseCommit $releaseCommit `
             -ProgressPercent 10)
         Test-PowerShellScriptParser -ScriptPath $downloadedTemplate
         $releaseMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $downloadedTemplate
