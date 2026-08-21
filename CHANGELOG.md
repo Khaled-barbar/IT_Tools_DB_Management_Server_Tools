@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.14 - 2026-08-21
+
+### Changed
+
+- Updated the main menu title to display the installed IT Tools version and release date, and reordered Local server and file tools so recent-file review is option 7 and Data Collector event tracing is option 8.
+
 ## 7.1.13 - 2026-08-21
 
 ### Corrected

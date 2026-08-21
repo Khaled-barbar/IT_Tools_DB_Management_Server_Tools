@@ -25,6 +25,7 @@
 #      - Search for text in files
 #      - Check basic system health
 #      - Show recently created or changed files
+#      - Trace events in Data Collector
 #      - Launch the visual disk usage analyzer
 #      - Manage SQL backup folder permissions
 #      - Check whether a TCP port is open
@@ -54,7 +55,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.13'
+$Script:ToolVersion = [version]'7.1.14'
 $Script:ToolReleaseDate = '2026-08-21'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
@@ -214,6 +215,7 @@ function Show-ITToolsDescription {
         'Search for text in files',
         'Check basic system health',
         'Show recently created or changed files',
+        'Trace events in Data Collector',
         'Launch the visual disk usage analyzer',
         'Manage SQL backup folder permissions',
         'Check whether a TCP port is open',
@@ -9896,8 +9898,8 @@ function Show-ServerInfrastructureSuite {
         Write-Host ""
         Write-Host "File search and application logs" -ForegroundColor Cyan
         Write-Host "6) Search for text in files"
-        Write-Host "7) Trace events in Data Collector"
-        Write-Host "8) Show recently created or changed files"
+        Write-Host "7) Show recently created or changed files"
+        Write-Host "8) Trace events in Data Collector"
         Write-Host "q) Back to main menu"
         Write-Host "------------------------------------------------------------------------"
         $Choice = Read-Host "Choose an option"
@@ -9910,8 +9912,8 @@ function Show-ServerInfrastructureSuite {
             '4' { Invoke-LoggedToolAction -Context "Local server and file tools - analyze disk usage" -Action { Invoke-DiskSpaceAnalyzer } }
             '5' { Invoke-LoggedToolAction -Context "Local server and file tools - manage SQL backup folder permissions" -Action { Show-SqlBackupFolderPermissionsMenu } }
             '6' { Invoke-LoggedToolAction -Context "Local server and file tools - search for text in files" -Action { Invoke-TextSearch } }
-            '7' { Invoke-LoggedToolAction -Context "Local server and file tools - Trace events in Data Collector" -Action { Invoke-DataCollectorEventTrace } }
-            '8' { Invoke-LoggedToolAction -Context "Local server and file tools - show recently created or changed files" -Action { Invoke-RecentFilesTracker } }
+            '7' { Invoke-LoggedToolAction -Context "Local server and file tools - show recently created or changed files" -Action { Invoke-RecentFilesTracker } }
+            '8' { Invoke-LoggedToolAction -Context "Local server and file tools - Trace events in Data Collector" -Action { Invoke-DataCollectorEventTrace } }
             default {
                 Write-Host "That is not a valid choice. Try again." -ForegroundColor Yellow
                 Start-Sleep -Seconds 1
@@ -9980,7 +9982,7 @@ function Show-MasterMainMenu {
     while ($true) {
         Clear-Host
         Write-Host "========================================================================" -ForegroundColor DarkGray
-        Write-Host "                              IT TOOLS" -ForegroundColor Green
+        Write-Host "      D4A IT Tools - Version: $($Script:ToolVersion) - Release Date: $($Script:ToolReleaseDate)" -ForegroundColor Green
         Write-Host "========================================================================" -ForegroundColor DarkGray
         Write-Host "1) Database Tools"
         Write-Host "2) Local server and file tools"
