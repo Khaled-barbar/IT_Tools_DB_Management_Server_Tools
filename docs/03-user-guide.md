@@ -331,6 +331,10 @@ Searches files below a selected folder using text and file filters. Use a narrow
 
 Collects operating system, CPU, memory, disk, and performance information with timestamped progress. CIM and performance operations have finite timeouts. A timeout is recorded in the daily error log instead of hanging the session indefinitely.
 
+### SSL Checker
+
+Enter an HTTPS hostname or a full URL. The checker validates DNS resolution, TCP reachability, the TLS handshake with SNI, hostname/SAN matching, certificate dates and key strength, Windows chain trust, online CRL/OCSP status, TLS protocol support, HTTPS redirects, HTTP-to-HTTPS behavior, and static mixed-content references. Entering a direct server IP/address keeps the hostname as the SNI and certificate-validation name. Each network step has a 15-second timeout, and certificate trust errors are reported rather than bypassed.
+
 ### Show recently created or changed files
 
 Lists files created or modified within the selected period. Use it to identify recent configuration, log, export, or deployment changes.

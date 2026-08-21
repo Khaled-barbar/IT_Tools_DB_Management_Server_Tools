@@ -6,6 +6,17 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.1.9 - 2026-08-21
+
+### Added
+
+- Added **SSL Checker** to Local server and file tools. It performs DNS, TCP, TLS/SNI, certificate identity and validity, Windows chain trust and CRL/OCSP, TLS protocol, HTTPS redirect, and static mixed-content checks without requiring a module, OpenSSL, or administrator rights.
+- Reorganized Local server and file tools into health/connectivity, storage/SQL backups, and file/application-log groups.
+
+### Safety
+
+- Added finite 15-second network timeouts to the SSL diagnostic so unreachable hosts cannot leave the interactive session waiting indefinitely.
+
 ## 7.1.8 - 2026-08-20
 
 ### Corrected

@@ -63,7 +63,7 @@ Those issues led to reusable patterns rather than one-off fixes:
 As more recurring work was added, disconnected scripts became a maintenance problem of their own. The solution evolved into one central interface with four operational areas:
 
 - Database Tools for translations, imports, migrations, D4A configuration, diagnostics, and recovery.
-- Local server and file tools for health checks, searches, disk analysis, permissions, ports, and Data Collector logs.
+- Local server and file tools for health checks, full SSL/TLS diagnostics, searches, disk analysis, permissions, ports, and Data Collector logs.
 - Site Monitoring for deployment, configuration, scheduled execution, updates, testing, alert controls, and diagnostics.
 - Logs for reviewing the latest operator-attributed database interventions and monitoring changes performed by the toolkit.
 

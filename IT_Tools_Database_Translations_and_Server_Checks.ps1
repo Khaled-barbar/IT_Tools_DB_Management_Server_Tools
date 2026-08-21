@@ -28,6 +28,7 @@
 #      - Launch the visual disk usage analyzer
 #      - Manage SQL backup folder permissions
 #      - Check whether a TCP port is open
+#      - Run a full SSL health check
 #   3. Site monitoring:
 #      - Deploy and schedule the D4A health and performance monitor
 #   4. Logs:
@@ -53,8 +54,8 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.8'
-$Script:ToolReleaseDate = '2026-08-20'
+$Script:ToolVersion = [version]'7.1.9'
+$Script:ToolReleaseDate = '2026-08-21'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolVersionFileName = 'version.txt'
 $Script:ToolUpdateManifestFileName = 'update-manifest.json'
@@ -210,7 +211,8 @@ function Show-ITToolsDescription {
         'Show recently created or changed files',
         'Launch the visual disk usage analyzer',
         'Manage SQL backup folder permissions',
-        'Check whether a TCP port is open'
+        'Check whether a TCP port is open',
+        'Run a full SSL health check'
     )) {
         Write-Host "     - $item" -ForegroundColor Gray
     }
@@ -9442,32 +9444,409 @@ function Test-RemoteTcpPort {
     }
 }
 
+function Write-SslCheck {
+    param(
+        [ValidateSet('PASS', 'FAIL', 'WARN', 'INFO')][string]$Status,
+        [string]$Message
+    )
+
+    $color = switch ($Status) {
+        'PASS' { 'Green' }
+        'FAIL' { 'Red' }
+        'WARN' { 'Yellow' }
+        default { 'Cyan' }
+    }
+    Write-Host "[$Status] $Message" -ForegroundColor $color
+}
+
+function Get-SslErrorMessage {
+    param([System.Exception]$Exception)
+
+    $current = $Exception
+    while ($null -ne $current.InnerException) { $current = $current.InnerException }
+    return $current.Message
+}
+
+function Open-SslTcpConnection {
+    param(
+        [Parameter(Mandatory = $true)][string]$ComputerName,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TimeoutMilliseconds = 15000
+    )
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    $asyncResult = $null
+    try {
+        $asyncResult = $client.BeginConnect($ComputerName, $Port, $null, $null)
+        if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds, $false)) {
+            throw "TCP connection timed out after $([math]::Round($TimeoutMilliseconds / 1000, 1)) second(s)."
+        }
+        $client.EndConnect($asyncResult)
+        $client.ReceiveTimeout = $TimeoutMilliseconds
+        $client.SendTimeout = $TimeoutMilliseconds
+        return $client
+    }
+    catch {
+        $client.Close()
+        throw
+    }
+    finally {
+        if ($null -ne $asyncResult -and $null -ne $asyncResult.AsyncWaitHandle) {
+            $asyncResult.AsyncWaitHandle.Close()
+        }
+    }
+}
+
+function Connect-SslForInspection {
+    param(
+        [Parameter(Mandatory = $true)][string]$ConnectTo,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$SniName,
+        [int]$TimeoutMilliseconds = 15000
+    )
+
+    $capture = [pscustomobject]@{
+        PolicyErrors = [System.Net.Security.SslPolicyErrors]::None
+        ChainCertificates = @()
+    }
+    $callback = [System.Net.Security.RemoteCertificateValidationCallback]{
+        param($sender, $certificate, $chain, $sslPolicyErrors)
+        $capture.PolicyErrors = [System.Net.Security.SslPolicyErrors]$sslPolicyErrors
+        if ($null -ne $chain) {
+            $capture.ChainCertificates = @($chain.ChainElements | ForEach-Object {
+                New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,$_.Certificate.RawData)
+            })
+        }
+        # Continue the handshake so the checker can report trust errors instead
+        # of hiding certificate details behind a failed TLS connection.
+        return $true
+    }
+
+    $client = $null
+    $sslStream = $null
+    try {
+        $client = Open-SslTcpConnection -ComputerName $ConnectTo -Port $Port -TimeoutMilliseconds $TimeoutMilliseconds
+        $sslStream = New-Object System.Net.Security.SslStream($client.GetStream(), $false, $callback)
+        $certificates = New-Object System.Security.Cryptography.X509Certificates.X509CertificateCollection
+        $sslStream.AuthenticateAsClient($SniName, $certificates, [System.Security.Authentication.SslProtocols]::None, $false)
+        if ($null -eq $sslStream.RemoteCertificate) { throw 'The TLS server did not return a certificate.' }
+
+        $leaf = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,$sslStream.RemoteCertificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        $cipher = '{0} ({1}-bit)' -f $sslStream.CipherAlgorithm, $sslStream.CipherStrength
+        if ($null -ne $sslStream.PSObject.Properties['NegotiatedCipherSuite']) { $cipher = $sslStream.NegotiatedCipherSuite.ToString() }
+        return [pscustomobject]@{
+            Certificate = $leaf
+            PolicyErrors = $capture.PolicyErrors
+            ChainCertificates = @($capture.ChainCertificates)
+            Protocol = $sslStream.SslProtocol.ToString()
+            Cipher = $cipher
+        }
+    }
+    finally {
+        if ($null -ne $sslStream) { $sslStream.Dispose() }
+        if ($null -ne $client) { $client.Close() }
+    }
+}
+
+function Test-SslProtocolSupport {
+    param(
+        [string]$ConnectTo,
+        [int]$Port,
+        [string]$SniName,
+        [System.Security.Authentication.SslProtocols]$Protocol,
+        [int]$TimeoutMilliseconds = 15000
+    )
+
+    $client = $null
+    $sslStream = $null
+    try {
+        $client = Open-SslTcpConnection -ComputerName $ConnectTo -Port $Port -TimeoutMilliseconds $TimeoutMilliseconds
+        $acceptCertificate = [System.Net.Security.RemoteCertificateValidationCallback]{ return $true }
+        $sslStream = New-Object System.Net.Security.SslStream($client.GetStream(), $false, $acceptCertificate)
+        $certificates = New-Object System.Security.Cryptography.X509Certificates.X509CertificateCollection
+        $sslStream.AuthenticateAsClient($SniName, $certificates, $Protocol, $false)
+        return [pscustomobject]@{ Success = $true; Detail = $sslStream.SslProtocol.ToString() }
+    }
+    catch {
+        return [pscustomobject]@{ Success = $false; Detail = Get-SslErrorMessage -Exception $_.Exception }
+    }
+    finally {
+        if ($null -ne $sslStream) { $sslStream.Dispose() }
+        if ($null -ne $client) { $client.Close() }
+    }
+}
+
+function Invoke-SslHttpRequest {
+    param(
+        [Parameter(Mandatory = $true)][System.Uri]$Uri,
+        [int]$TimeoutMilliseconds = 15000,
+        [int]$MaximumBodyCharacters = 2097152
+    )
+
+    $request = [System.Net.HttpWebRequest]::Create($Uri)
+    $request.Method = 'GET'
+    $request.AllowAutoRedirect = $false
+    $request.Timeout = $TimeoutMilliseconds
+    $request.ReadWriteTimeout = $TimeoutMilliseconds
+    $request.UserAgent = 'D4A-SSL-Checker/1.0'
+    if ($null -ne $request.PSObject.Properties['ServerCertificateValidationCallback']) {
+        $request.ServerCertificateValidationCallback = [System.Net.Security.RemoteCertificateValidationCallback]{ return $true }
+    }
+
+    $response = $null
+    $reader = $null
+    try {
+        try { $response = [System.Net.HttpWebResponse]$request.GetResponse() }
+        catch [System.Net.WebException] {
+            if ($null -eq $_.Exception.Response) { throw }
+            $response = [System.Net.HttpWebResponse]$_.Exception.Response
+        }
+
+        $body = ''
+        $stream = $response.GetResponseStream()
+        if ($null -ne $stream) {
+            $reader = New-Object System.IO.StreamReader($stream)
+            $body = $reader.ReadToEnd()
+            if ($body.Length -gt $MaximumBodyCharacters) { $body = $body.Substring(0, $MaximumBodyCharacters) }
+        }
+        return [pscustomobject]@{
+            Uri = $Uri; StatusCode = [int]$response.StatusCode; StatusDescription = $response.StatusDescription
+            Location = $response.Headers['Location']; ContentType = $response.ContentType; Body = $body
+        }
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -ne $response) { $response.Dispose() }
+    }
+}
+
+function Invoke-SslHealthCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][string]$ServerAddress,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$PagePath = '/',
+        [int]$TimeoutSeconds = 15,
+        [switch]$SkipPageScan
+    )
+
+    $timeoutMilliseconds = $TimeoutSeconds * 1000
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $warnings = [System.Collections.Generic.List[string]]::new()
+    try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12 } catch { }
+
+    Write-StreamingLog -Percent 5 -Step 'SSL checker' -Description "Starting full SSL health check for $HostName`:$Port."
+    Write-Host "Certificate name / SNI : $HostName" -ForegroundColor Gray
+    Write-Host "TCP destination        : $ServerAddress`:$Port" -ForegroundColor Gray
+    Write-Host "Timeout per network step: $TimeoutSeconds seconds" -ForegroundColor Gray
+
+    Write-Host "`nNetwork" -ForegroundColor White
+    try {
+        $addresses = @([System.Net.Dns]::GetHostAddresses($HostName) | ForEach-Object { $_.IPAddressToString } | Select-Object -Unique)
+        if ($addresses.Count -gt 0) { Write-SslCheck -Status PASS -Message "DNS resolves $HostName to: $($addresses -join ', ')" }
+    }
+    catch {
+        $message = "DNS lookup for $HostName failed: $(Get-SslErrorMessage -Exception $_.Exception)"
+        if ($ServerAddress -ne $HostName) { Write-SslCheck -Status WARN -Message "$message A direct server address will be used."; [void]$warnings.Add('DNS did not resolve, but a direct address was used.') }
+        else { Write-SslCheck -Status FAIL -Message $message; [void]$problems.Add('The hostname does not resolve in DNS.') }
+    }
+    try {
+        $probe = Open-SslTcpConnection -ComputerName $ServerAddress -Port $Port -TimeoutMilliseconds $timeoutMilliseconds
+        $probe.Close()
+        Write-SslCheck -Status PASS -Message "TCP port $Port is reachable on $ServerAddress."
+    }
+    catch {
+        Write-SslCheck -Status FAIL -Message "Cannot connect to $ServerAddress`:$Port. $(Get-SslErrorMessage -Exception $_.Exception)"
+        [void]$problems.Add('The HTTPS TCP port is not reachable.')
+    }
+    if ($problems.Count -gt 0 -and $ServerAddress -eq $HostName) { return [pscustomobject]@{ Problems = $problems; Warnings = $warnings } }
+
+    Write-StreamingLog -Percent 25 -Step 'TLS handshake' -Description 'Inspecting certificate, protocol, and cipher details.'
+    try { $connection = Connect-SslForInspection -ConnectTo $ServerAddress -Port $Port -SniName $HostName -TimeoutMilliseconds $timeoutMilliseconds }
+    catch {
+        Write-SslCheck -Status FAIL -Message "TLS handshake failed: $(Get-SslErrorMessage -Exception $_.Exception)"
+        [void]$problems.Add('The server did not complete a TLS handshake.')
+        return [pscustomobject]@{ Problems = $problems; Warnings = $warnings }
+    }
+    Write-SslCheck -Status PASS -Message "TLS handshake completed using $($connection.Protocol); cipher: $($connection.Cipher)."
+
+    $certificate = $connection.Certificate
+    Write-Host "`nCertificate identity" -ForegroundColor White
+    Write-Host "  Subject             : $($certificate.Subject)"
+    Write-Host "  Issuer              : $($certificate.Issuer)"
+    Write-Host "  Serial number       : $($certificate.SerialNumber)"
+    Write-Host "  Thumbprint (SHA-1)  : $($certificate.Thumbprint)"
+    Write-Host "  Signature algorithm : $($certificate.SignatureAlgorithm.FriendlyName)"
+    $sanExtension = @($certificate.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.17' } | Select-Object -First 1)
+    if ($sanExtension.Count -gt 0) { Write-Host "  Subject alternative : $($sanExtension[0].Format($false))" }
+    else { Write-SslCheck -Status WARN -Message 'The certificate has no Subject Alternative Name (SAN).'; [void]$warnings.Add('No SAN extension is present.') }
+    $nameMismatch = [System.Net.Security.SslPolicyErrors]::RemoteCertificateNameMismatch
+    if (($connection.PolicyErrors -band $nameMismatch) -eq [System.Net.Security.SslPolicyErrors]::None) { Write-SslCheck -Status PASS -Message "The certificate matches '$HostName'." }
+    else { Write-SslCheck -Status FAIL -Message "The certificate does not match '$HostName'."; [void]$problems.Add('Certificate hostname/SAN validation failed.') }
+
+    Write-Host "`nValidity and intended use" -ForegroundColor White
+    $daysRemaining = [math]::Floor(($certificate.NotAfter - (Get-Date)).TotalDays)
+    Write-Host "  Valid from          : $($certificate.NotBefore.ToString('yyyy-MM-dd HH:mm:ss zzz'))"
+    Write-Host "  Valid until         : $($certificate.NotAfter.ToString('yyyy-MM-dd HH:mm:ss zzz'))"
+    if ((Get-Date) -lt $certificate.NotBefore) { Write-SslCheck -Status FAIL -Message 'The certificate is not valid yet.'; [void]$problems.Add('Certificate is not valid yet.') }
+    elseif ($daysRemaining -lt 0) { Write-SslCheck -Status FAIL -Message "The certificate expired $([math]::Abs($daysRemaining)) day(s) ago."; [void]$problems.Add('Certificate is expired.') }
+    elseif ($daysRemaining -le 30) { Write-SslCheck -Status WARN -Message "The certificate expires in $daysRemaining day(s)."; [void]$warnings.Add("Certificate expires in $daysRemaining day(s).") }
+    else { Write-SslCheck -Status PASS -Message "The certificate is valid and expires in $daysRemaining day(s)." }
+    try {
+        $keySize = $certificate.PublicKey.Key.KeySize
+        Write-Host "  Public key          : $($certificate.PublicKey.Oid.FriendlyName), $keySize bits"
+        if ($certificate.PublicKey.Oid.Value -eq '1.2.840.113549.1.1.1' -and $keySize -lt 2048) { Write-SslCheck -Status WARN -Message "RSA key is only $keySize bits."; [void]$warnings.Add('RSA key is smaller than 2048 bits.') }
+    }
+    catch { Write-SslCheck -Status INFO -Message 'The public-key size could not be read.' }
+    if ($certificate.SignatureAlgorithm.Value -eq '1.2.840.113549.1.1.5' -or $certificate.SignatureAlgorithm.FriendlyName -match 'sha1') { Write-SslCheck -Status WARN -Message 'The certificate uses SHA-1.'; [void]$warnings.Add('Certificate uses SHA-1.') }
+
+    Write-StreamingLog -Percent 45 -Step 'Certificate trust' -Description 'Validating the Windows certificate chain and online revocation status.'
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+    $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+    $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds([math]::Min(10, $TimeoutSeconds))
+    foreach ($chainCertificate in @($connection.ChainCertificates)) { if ($chainCertificate.Thumbprint -ne $certificate.Thumbprint) { [void]$chain.ChainPolicy.ExtraStore.Add($chainCertificate) } }
+    $chainTrusted = $chain.Build($certificate)
+    foreach ($element in $chain.ChainElements) { Write-Host "  Chain: $($element.Certificate.Subject) (expires $($element.Certificate.NotAfter.ToString('yyyy-MM-dd')))" }
+    $chainStatuses = @($chain.ChainStatus | Where-Object { $_.Status -ne [System.Security.Cryptography.X509Certificates.X509ChainStatusFlags]::NoError } | ForEach-Object { $_.Status.ToString() } | Select-Object -Unique)
+    if ($chainTrusted) { Write-SslCheck -Status PASS -Message 'Windows trusts the certificate chain and completed online revocation checking.' }
+    elseif ($chainStatuses -contains 'Revoked') { Write-SslCheck -Status FAIL -Message 'Windows reports a revoked certificate in the chain.'; [void]$problems.Add('Certificate chain contains a revoked certificate.') }
+    elseif (($chainStatuses -contains 'OfflineRevocation') -or ($chainStatuses -contains 'RevocationStatusUnknown')) { Write-SslCheck -Status WARN -Message "Certificate chain trust/revocation could not be fully confirmed: $($chainStatuses -join ', ')."; [void]$warnings.Add('CRL/OCSP revocation status could not be confirmed.') }
+    else { Write-SslCheck -Status FAIL -Message "Windows does not trust the certificate chain: $($chainStatuses -join ', ')."; [void]$problems.Add('Windows certificate-chain validation failed.') }
+    if ($connection.PolicyErrors -ne [System.Net.Security.SslPolicyErrors]::None) { Write-SslCheck -Status WARN -Message "TLS policy flags: $($connection.PolicyErrors)." }
+
+    Write-Host "`nTLS protocol support (from this computer)" -ForegroundColor White
+    $availableProtocols = [System.Enum]::GetNames([System.Security.Authentication.SslProtocols])
+    foreach ($protocolInfo in @(
+        [pscustomobject]@{ Label = 'TLS 1.0'; EnumName = 'Tls'; Recommended = $false },
+        [pscustomobject]@{ Label = 'TLS 1.1'; EnumName = 'Tls11'; Recommended = $false },
+        [pscustomobject]@{ Label = 'TLS 1.2'; EnumName = 'Tls12'; Recommended = $true },
+        [pscustomobject]@{ Label = 'TLS 1.3'; EnumName = 'Tls13'; Recommended = $true }
+    )) {
+        if ($availableProtocols -notcontains $protocolInfo.EnumName) { Write-SslCheck -Status INFO -Message "$($protocolInfo.Label) cannot be tested by this Windows/.NET version."; continue }
+        $protocol = [System.Enum]::Parse([System.Security.Authentication.SslProtocols], $protocolInfo.EnumName)
+        $protocolResult = Test-SslProtocolSupport -ConnectTo $ServerAddress -Port $Port -SniName $HostName -Protocol $protocol -TimeoutMilliseconds $timeoutMilliseconds
+        if ($protocolResult.Success -and $protocolInfo.Recommended) { Write-SslCheck -Status PASS -Message "$($protocolInfo.Label) is supported." }
+        elseif ($protocolResult.Success) { Write-SslCheck -Status WARN -Message "$($protocolInfo.Label) is enabled but obsolete."; [void]$warnings.Add("$($protocolInfo.Label) is enabled.") }
+        elseif ($protocolInfo.EnumName -eq 'Tls12') { Write-SslCheck -Status FAIL -Message 'TLS 1.2 is not usable.'; [void]$problems.Add('TLS 1.2 is not usable.') }
+        else { Write-SslCheck -Status INFO -Message "$($protocolInfo.Label) is not usable." }
+    }
+
+    if (-not $SkipPageScan) {
+        Write-StreamingLog -Percent 70 -Step 'HTTPS page' -Description 'Checking HTTPS redirects, HTTP-to-HTTPS behavior, and static mixed content.'
+        $portSuffix = if ($Port -eq 443) { '' } else { ":$Port" }
+        $currentUri = [System.Uri]("https://$HostName$portSuffix$PagePath")
+        $seenUris = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $finalResponse = $null
+        for ($redirect = 0; $redirect -le 10; $redirect++) {
+            if (-not $seenUris.Add($currentUri.AbsoluteUri)) { Write-SslCheck -Status FAIL -Message "HTTPS redirect loop detected at $($currentUri.AbsoluteUri)."; [void]$problems.Add('HTTPS redirect loop.'); break }
+            try { $response = Invoke-SslHttpRequest -Uri $currentUri -TimeoutMilliseconds $timeoutMilliseconds }
+            catch { Write-SslCheck -Status WARN -Message "The page scan could not request $($currentUri.AbsoluteUri)."; [void]$warnings.Add('HTTPS page scan could not complete.'); break }
+            Write-Host "  $($currentUri.AbsoluteUri) -> HTTP $($response.StatusCode) $($response.StatusDescription)"
+            if ($response.StatusCode -ge 300 -and $response.StatusCode -lt 400 -and -not [string]::IsNullOrWhiteSpace($response.Location)) {
+                $nextUri = New-Object -TypeName System.Uri -ArgumentList @($currentUri, $response.Location)
+                if ($nextUri.Scheme -eq 'http') { Write-SslCheck -Status FAIL -Message "HTTPS redirects to insecure HTTP: $($nextUri.AbsoluteUri)"; [void]$problems.Add('HTTPS redirects to HTTP.'); break }
+                $currentUri = $nextUri
+                continue
+            }
+            $finalResponse = $response
+            break
+        }
+        if ($null -ne $finalResponse) {
+            if ($finalResponse.StatusCode -ge 400) { Write-SslCheck -Status WARN -Message "The final HTTPS page returned HTTP $($finalResponse.StatusCode)."; [void]$warnings.Add('HTTPS endpoint returned an error response.') }
+            else { Write-SslCheck -Status PASS -Message "The final page remained on HTTPS: $($finalResponse.Uri.AbsoluteUri)" }
+            if ($finalResponse.Body -match '(?i)(?:src|href|action|url)\s*=*\s*["'']?http://') { Write-SslCheck -Status FAIL -Message 'Static HTTP references were found in the page content.'; [void]$problems.Add('Static mixed HTTP content was found.') }
+            else { Write-SslCheck -Status PASS -Message 'No static HTTP mixed-content reference was found in the returned page.' }
+        }
+        try {
+            $plainHttpResponse = Invoke-SslHttpRequest -Uri ([System.Uri]("http://$HostName/")) -TimeoutMilliseconds $timeoutMilliseconds -MaximumBodyCharacters 4096
+            if ($plainHttpResponse.StatusCode -ge 300 -and $plainHttpResponse.StatusCode -lt 400 -and $plainHttpResponse.Location -match '(?i)^https://') { Write-SslCheck -Status PASS -Message 'Plain HTTP redirects to HTTPS.' }
+            elseif ($plainHttpResponse.StatusCode -lt 500) { Write-SslCheck -Status WARN -Message 'Plain HTTP responds without redirecting to HTTPS.'; [void]$warnings.Add('HTTP endpoint does not redirect to HTTPS.') }
+        }
+        catch { Write-SslCheck -Status INFO -Message 'Plain HTTP port 80 is not reachable from this computer.' }
+    }
+
+    Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'SSL health check completed.'
+    Write-Host "`nSummary" -ForegroundColor White
+    if ($problems.Count -gt 0) { Write-Host 'RESULT: FAILED - one or more SSL issues need attention.' -ForegroundColor Red; foreach ($problem in $problems) { Write-Host "  - $problem" -ForegroundColor Red } }
+    elseif ($warnings.Count -gt 0) { Write-Host 'RESULT: PASSED WITH WARNINGS - no blocking certificate error was found.' -ForegroundColor Yellow; foreach ($warning in $warnings) { Write-Host "  - $warning" -ForegroundColor Yellow } }
+    else { Write-Host 'RESULT: PASSED - the site passed the SSL health checks from this computer.' -ForegroundColor Green }
+    Write-Host 'Note: browser-specific trust policies and JavaScript-generated page content may still require browser testing.' -ForegroundColor DarkGray
+    return [pscustomobject]@{ Problems = $problems; Warnings = $warnings }
+}
+
+function Show-SslChecker {
+    Clear-Host
+    Show-SectionTitle 'SSL Checker'
+    Write-Host 'Performs DNS, TCP, TLS/SNI, certificate, trust, revocation, protocol, redirect, and mixed-content checks.' -ForegroundColor Cyan
+    Write-Host 'Type q at any prompt to return to Local server and file tools.' -ForegroundColor DarkGray
+    Write-Host ''
+
+    $targetText = Read-Host 'HTTPS hostname or full URL (example: https://site.example.com)'
+    if (Test-IsBack $targetText) { return }
+    if ([string]::IsNullOrWhiteSpace($targetText)) { Write-Host 'Enter an HTTPS hostname or URL.' -ForegroundColor Yellow; Pause-Screen; return }
+    $targetText = $targetText.Trim()
+    $hostName = $null; $pagePath = '/'; $port = 443
+    if ($targetText -match '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
+        try {
+            $uri = [System.Uri]$targetText
+            if ($uri.Scheme -ne 'https') { throw 'Only HTTPS URLs are accepted.' }
+            $hostName = $uri.DnsSafeHost
+            if (-not $uri.IsDefaultPort) { $port = $uri.Port }
+            if (-not [string]::IsNullOrWhiteSpace($uri.PathAndQuery)) { $pagePath = $uri.PathAndQuery }
+        }
+        catch { Write-Host "Invalid HTTPS URL: $(Get-SslErrorMessage -Exception $_.Exception)" -ForegroundColor Red; Pause-Screen; return }
+    }
+    else {
+        $hostName = $targetText.TrimEnd('.')
+        if ($hostName -match '[\s/]') { Write-Host 'Enter only a hostname, or a full HTTPS URL.' -ForegroundColor Yellow; Pause-Screen; return }
+        $portText = Read-Host 'HTTPS TCP port (Enter = 443)'
+        if (Test-IsBack $portText) { return }
+        if (-not [string]::IsNullOrWhiteSpace($portText) -and (-not [int]::TryParse($portText, [ref]$port) -or $port -lt 1 -or $port -gt 65535)) { Write-Host 'Enter a port from 1 to 65535.' -ForegroundColor Yellow; Pause-Screen; return }
+    }
+    $serverAddress = Read-Host "Server IP/address to connect to (Enter = $hostName; keeps SNI as $hostName)"
+    if (Test-IsBack $serverAddress) { return }
+    if ([string]::IsNullOrWhiteSpace($serverAddress)) { $serverAddress = $hostName } else { $serverAddress = $serverAddress.Trim() }
+    $skipPageScan = Read-Host 'Skip the HTTP redirect and mixed-content scan? (y/N)'
+    if (Test-IsBack $skipPageScan) { return }
+    $skipPageScan = $skipPageScan -match '^(?i)y(es)?$'
+    Invoke-SslHealthCheck -HostName $hostName -ServerAddress $serverAddress -Port $port -PagePath $pagePath -SkipPageScan:$skipPageScan
+    Pause-Screen
+}
+
 function Show-ServerInfrastructureSuite {
     while ($true) {
         Clear-Host
         Write-Host "========================================================================" -ForegroundColor DarkGray
         Write-Host "                        LOCAL SERVER AND FILE TOOLS" -ForegroundColor Cyan
         Write-Host "========================================================================" -ForegroundColor DarkGray
-        Write-Host "1) Search for text in files"
-        Write-Host "2) Check system health"
-        Write-Host "3) Show recently created or changed files"
+        Write-Host "Health and connectivity" -ForegroundColor Cyan
+        Write-Host "1) Check system health"
+        Write-Host "2) SSL Checker"
+        Write-Host "3) Check if a TCP port is open"
+        Write-Host ""
+        Write-Host "Storage and SQL backups" -ForegroundColor Cyan
         Write-Host "4) Analyze disk usage (visual report)"
         Write-Host "5) Manage SQL backup folder permissions"
-        Write-Host "6) Check if a port is open"
+        Write-Host ""
+        Write-Host "File search and application logs" -ForegroundColor Cyan
+        Write-Host "6) Search for text in files"
         Write-Host "7) Trace events in Data Collector"
+        Write-Host "8) Show recently created or changed files"
         Write-Host "q) Back to main menu"
         Write-Host "------------------------------------------------------------------------"
         $Choice = Read-Host "Choose an option"
 
         if (Test-IsBack $Choice) { return }
         switch ($Choice) {
-            '1' { Invoke-LoggedToolAction -Context "Local server and file tools - search for text in files" -Action { Invoke-TextSearch } }
-            '2' { Invoke-LoggedToolAction -Context "Local server and file tools - check system health" -Action { Invoke-ServerAudit } }
-            '3' { Invoke-LoggedToolAction -Context "Local server and file tools - show recently created or changed files" -Action { Invoke-RecentFilesTracker } }
+            '1' { Invoke-LoggedToolAction -Context "Local server and file tools - check system health" -Action { Invoke-ServerAudit } }
+            '2' { Invoke-LoggedToolAction -Context "Local server and file tools - SSL Checker" -Action { Show-SslChecker } }
+            '3' { Invoke-LoggedToolAction -Context "Local server and file tools - Check if a port is open" -Action { Test-RemoteTcpPort } }
             '4' { Invoke-LoggedToolAction -Context "Local server and file tools - analyze disk usage" -Action { Invoke-DiskSpaceAnalyzer } }
             '5' { Invoke-LoggedToolAction -Context "Local server and file tools - manage SQL backup folder permissions" -Action { Show-SqlBackupFolderPermissionsMenu } }
-            '6' { Invoke-LoggedToolAction -Context "Local server and file tools - Check if a port is open" -Action { Test-RemoteTcpPort } }
+            '6' { Invoke-LoggedToolAction -Context "Local server and file tools - search for text in files" -Action { Invoke-TextSearch } }
             '7' { Invoke-LoggedToolAction -Context "Local server and file tools - Trace events in Data Collector" -Action { Invoke-DataCollectorEventTrace } }
+            '8' { Invoke-LoggedToolAction -Context "Local server and file tools - show recently created or changed files" -Action { Invoke-RecentFilesTracker } }
             default {
                 Write-Host "That is not a valid choice. Try again." -ForegroundColor Yellow
                 Start-Sleep -Seconds 1

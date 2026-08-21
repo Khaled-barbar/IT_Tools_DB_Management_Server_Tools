@@ -30,6 +30,7 @@ These conditions must be respected whenever `IT_Tools_Database_Translations_and_
 ## Progress and output
 - Use `Write-StreamingLog` for operations that may take time, especially file reads, SQL file execution, backup creation, bulk imports, migrations, deletes, restores, and synchronization steps.
 - For server checks involving deep directory scans, massive file counts, or heavy WMI/CIM queries, enforce execution timeouts to prevent the script from hanging indefinitely.
+- SSL and network health checks must use finite connection and request timeouts, and must report certificate trust findings rather than bypassing them.
 - Show readable previews before data-changing actions. For large datasets, show summaries and `top 20` style previews.
 - After changes complete, print a concise success message with rows affected and backup table name.
 - For per-item operations, show success in green and failures in red with the encountered error line.
