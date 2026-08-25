@@ -6,6 +6,16 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.2.1 - 2026-08-25
+
+### Corrected
+
+- SSL Checker now uses an explicit TLS 1.2 handshake rather than the legacy-incompatible `SslProtocols.None` value.
+
+### Monitoring 6.10.1
+
+- Certificate inspections now explicitly negotiate TLS 1.2. SSPI and legacy TLS-runtime inspection failures are recorded as non-notifiable warnings because endpoint availability is checked independently.
+
 ## 7.2.0 - 2026-08-25
 
 ### Corrected

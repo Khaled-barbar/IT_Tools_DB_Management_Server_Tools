@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.10.0
+# D4A-Monitor-Version: 6.10.1
 # D4A-Monitor-Release-Date: 2026-08-25
 
 <#
@@ -221,7 +221,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.10.0'
+$script:MonitorVersion = '6.10.1'
 $script:MonitorReleaseDate = '2026-08-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -2510,6 +2510,18 @@ function Test-ApplicationPerformance {
     }
 }
 
+function Get-MonitorTlsExceptionDetail {
+    param([Parameter(Mandatory = $true)][System.Exception]$Exception)
+
+    $messages = [System.Collections.Generic.List[string]]::new()
+    $current = $Exception
+    while ($null -ne $current) {
+        if (-not [string]::IsNullOrWhiteSpace($current.Message)) { $messages.Add($current.Message) | Out-Null }
+        $current = $current.InnerException
+    }
+    return (($messages | Select-Object -Unique) -join ' -> ')
+}
+
 function Test-TlsCertificate {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -2541,7 +2553,14 @@ function Test-TlsCertificate {
         $sslStream = [Net.Security.SslStream]::new($tcpClient.GetStream(), $false, $acceptCertificate)
         $sslStream.ReadTimeout = $HttpTimeoutSeconds * 1000
         $sslStream.WriteTimeout = $HttpTimeoutSeconds * 1000
-        $sslStream.AuthenticateAsClient($Uri.DnsSafeHost)
+        $certificates = [Security.Cryptography.X509Certificates.X509CertificateCollection]::new()
+        # Explicit TLS 1.2 avoids inheriting legacy SChannel defaults for SslStream.
+        $sslStream.AuthenticateAsClient(
+            $Uri.DnsSafeHost,
+            $certificates,
+            [Security.Authentication.SslProtocols]::Tls12,
+            $false
+        )
         if ($null -eq $sslStream.RemoteCertificate) {
             throw 'The remote server did not provide a TLS certificate.'
         }
@@ -2568,9 +2587,17 @@ function Test-TlsCertificate {
         }
     }
     catch {
-        Add-MonitorResult -Severity Error -Category TLS -Check $Name -Message (
-            'Unable to inspect certificate for {0}: {1}' -f $Uri.AbsoluteUri, $_.Exception.Message
-        )
+        $detail = Get-MonitorTlsExceptionDetail -Exception $_.Exception
+        if ($detail -match '(?i)\bSSPI\b|SslProtocolType|SSL/TLS secure channel') {
+            Add-MonitorResult -Severity Warning -Category TLS -Check $Name -Message (
+                'Local TLS inspection could not complete for {0}: {1}. Endpoint availability is checked separately; no email notification is sent for this local TLS compatibility warning.' -f $Uri.AbsoluteUri, $detail
+            ) -NotificationEligible:$false
+        }
+        else {
+            Add-MonitorResult -Severity Error -Category TLS -Check $Name -Message (
+                'Unable to inspect certificate for {0}: {1}' -f $Uri.AbsoluteUri, $detail
+            )
+        }
     }
     finally {
         if ($null -ne $certificate) { $certificate.Dispose() }

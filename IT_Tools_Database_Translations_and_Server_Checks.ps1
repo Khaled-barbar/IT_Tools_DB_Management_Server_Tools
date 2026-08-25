@@ -55,7 +55,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.2.0'
+$Script:ToolVersion = [version]'7.2.1'
 $Script:ToolReleaseDate = '2026-08-25'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -9687,7 +9687,8 @@ function Connect-SslForInspection {
         $client = Open-SslTcpConnection -ComputerName $ConnectTo -Port $Port -TimeoutMilliseconds $TimeoutMilliseconds
         $sslStream = New-Object System.Net.Security.SslStream($client.GetStream(), $false, $callback)
         $certificates = New-Object System.Security.Cryptography.X509Certificates.X509CertificateCollection
-        $sslStream.AuthenticateAsClient($SniName, $certificates, [System.Security.Authentication.SslProtocols]::None, $false)
+        # Explicit TLS 1.2 avoids the invalid None enum value on legacy .NET runtimes.
+        $sslStream.AuthenticateAsClient($SniName, $certificates, [System.Security.Authentication.SslProtocols]::Tls12, $false)
         if ($null -eq $sslStream.RemoteCertificate) { throw 'The TLS server did not return a certificate.' }
 
         $leaf = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (,$sslStream.RemoteCertificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))

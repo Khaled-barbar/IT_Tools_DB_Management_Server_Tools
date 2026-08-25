@@ -1,12 +1,12 @@
 {
   "schemaVersion": 2,
-  "version": "7.2.0",
+  "version": "7.2.1",
   "releaseDate": "2026-08-25",
   "monitoring": {
-    "version": "6.10.0",
+    "version": "6.10.1",
     "releaseDate": "2026-08-25",
     "scriptPath": "D4A-ScheduledMonitor-v5.ps1",
-    "sha256": "285544379C98B0AF52360DA41479CBFFD0EAC293848E831313581126AC70FAEE"
+    "sha256": "D8B1438FAE88A211EA46A04CDAACD2BB84BC3C62EA0D5AD43DB280EEE832C68D"
   },
   "files": [
     {
@@ -19,15 +19,15 @@
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
-      "sha256": "285544379C98B0AF52360DA41479CBFFD0EAC293848E831313581126AC70FAEE"
+      "sha256": "D8B1438FAE88A211EA46A04CDAACD2BB84BC3C62EA0D5AD43DB280EEE832C68D"
     },
     {
       "path": "monitor-version.txt",
-      "sha256": "81254EC8251ACD235EECC3375F5DC6931A9FD2C4405B0C2E2760AAA7B960307B"
+      "sha256": "9C62E7974D9910D8A9DEF0DBA4BC1A1A667F4C0AEDC0CA689D2320ACDAA06C04"
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "1743406E70157CD5B0195C392C5965E8408ED5FFD5CA6F2C42E4DA98D48C2F36"
+      "sha256": "25B6D2A61A83C860A599CC8B7FA63F56301DCF070A7C32A69F928113A03A8821"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",
