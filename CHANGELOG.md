@@ -12,6 +12,11 @@ For project context, architecture, and operating procedures, see the [project ov
 
 - SSL Checker now uses an explicit TLS 1.2 handshake rather than the legacy-incompatible `SslProtocols.None` value.
 
+### Monitoring 6.10.2
+
+- Automatic monitoring-update backups are now created only after the downloaded release and local configuration validate. Only successful updates retain a backup, the newest three folders are kept, and a failed-update backup is removed after a successful restore.
+- Safely handle Scheduled Task action types that do not expose an `Arguments` property, preventing the prior automatic-update warning.
+
 ### Monitoring 6.10.1
 
 - Certificate inspections now explicitly negotiate TLS 1.2. SSPI and legacy TLS-runtime inspection failures are recorded as non-notifiable warnings because endpoint availability is checked independently.

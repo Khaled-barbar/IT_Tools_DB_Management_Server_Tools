@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.10.1
+# D4A-Monitor-Version: 6.10.2
 # D4A-Monitor-Release-Date: 2026-08-25
 
 <#
@@ -221,7 +221,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.10.1'
+$script:MonitorVersion = '6.10.2'
 $script:MonitorReleaseDate = '2026-08-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -459,11 +459,43 @@ function Get-MonitorRelatedScheduledTasks {
     return @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
         $task = $_
         @($task.Actions | Where-Object {
-            $arguments = [string]$_.Arguments
+            # Some Task Scheduler action types do not implement Arguments.
+            $argumentsProperty = $_.PSObject.Properties['Arguments']
+            $arguments = if ($null -eq $argumentsProperty) { '' } else { [string]$argumentsProperty.Value }
             -not [string]::IsNullOrWhiteSpace($arguments) -and
             $arguments.IndexOf($script:ScriptPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
         }).Count -gt 0
     })
+}
+
+function Remove-ExpiredMonitorAutomaticUpdateBackups {
+    param([ValidateRange(1, 20)][int]$Keep = 3)
+
+    try {
+        $backupRoot = Join-Path $script:MonitorLogDirectory 'monitor-update-backups'
+        if (-not (Test-Path -LiteralPath $backupRoot -PathType Container)) { return }
+
+        $backups = @(
+            Get-ChildItem -LiteralPath $backupRoot -Directory -ErrorAction Stop |
+                Sort-Object LastWriteTimeUtc -Descending
+        )
+        $expiredBackups = @($backups | Select-Object -Skip $Keep)
+        foreach ($backup in $expiredBackups) {
+            Remove-Item -LiteralPath $backup.FullName -Recurse -Force -ErrorAction Stop
+        }
+
+        if ($expiredBackups.Count -gt 0) {
+            Write-RunLog -Category Update -Color DarkGray -Message (
+                'Pruned {0} monitor update backup(s); retained the newest {1} folder(s) in {2}.' -f
+                    $expiredBackups.Count, $Keep, $backupRoot
+            )
+        }
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Update -Color Yellow -Message (
+            'Unable to apply monitor update backup retention: {0}' -f $_.Exception.Message
+        )
+    }
 }
 
 function New-MonitorAutomaticUpdateBackup {
@@ -473,34 +505,41 @@ function New-MonitorAutomaticUpdateBackup {
     $backupFolder = Join-Path $backupRoot ('{0}_to_{1}' -f (Get-Date -Format 'yyyyMMddHHmmss'), $TargetVersion)
     [void](New-Item -Path $backupFolder -ItemType Directory -Force -ErrorAction Stop)
 
-    Copy-Item -LiteralPath $script:ScriptPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ScriptPath))) -ErrorAction Stop
-    if (-not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -and
-        (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
-        Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ResolvedConfigPath))) -ErrorAction Stop
-    }
-
-    $relatedTasks = @(Get-MonitorRelatedScheduledTasks)
-    if ($relatedTasks.Count -eq 0) {
-        [IO.File]::WriteAllText((Join-Path $backupFolder 'scheduled-tasks.txt'), 'No related Scheduled Tasks were found.', $script:Utf8NoBom)
-    }
-    else {
-        foreach ($task in $relatedTasks) {
-            $safeTaskName = ('{0}{1}' -f $task.TaskPath.Trim('\').Replace('\', '_'), $task.TaskName) -replace '[^A-Za-z0-9_.-]', '_'
-            $taskXml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
-            [IO.File]::WriteAllText((Join-Path $backupFolder ($safeTaskName + '.xml')), [string]$taskXml, $script:Utf8NoBom)
+    try {
+        Copy-Item -LiteralPath $script:ScriptPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ScriptPath))) -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -and
+            (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+            Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ResolvedConfigPath))) -ErrorAction Stop
         }
-    }
 
-    $metadata = @(
-        'BackupTime={0}' -f (Get-Date).ToString('o'),
-        'InstalledScript={0}' -f $script:ScriptPath,
-        'PreviousVersion={0}' -f $script:MonitorVersion,
-        'TargetVersion={0}' -f $TargetVersion,
-        'Configuration={0}' -f $script:ResolvedConfigPath,
-        'ScheduledTasks={0}' -f $relatedTasks.Count
-    ) -join [Environment]::NewLine
-    [IO.File]::WriteAllText((Join-Path $backupFolder 'update-details.txt'), $metadata, $script:Utf8NoBom)
-    return $backupFolder
+        $relatedTasks = @(Get-MonitorRelatedScheduledTasks)
+        if ($relatedTasks.Count -eq 0) {
+            [IO.File]::WriteAllText((Join-Path $backupFolder 'scheduled-tasks.txt'), 'No related Scheduled Tasks were found.', $script:Utf8NoBom)
+        }
+        else {
+            foreach ($task in $relatedTasks) {
+                $safeTaskName = ('{0}{1}' -f $task.TaskPath.Trim('\').Replace('\', '_'), $task.TaskName) -replace '[^A-Za-z0-9_.-]', '_'
+                $taskXml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+                [IO.File]::WriteAllText((Join-Path $backupFolder ($safeTaskName + '.xml')), [string]$taskXml, $script:Utf8NoBom)
+            }
+        }
+
+        $metadata = @(
+            'BackupTime={0}' -f (Get-Date).ToString('o'),
+            'InstalledScript={0}' -f $script:ScriptPath,
+            'PreviousVersion={0}' -f $script:MonitorVersion,
+            'TargetVersion={0}' -f $TargetVersion,
+            'Configuration={0}' -f $script:ResolvedConfigPath,
+            'ScheduledTasks={0}' -f $relatedTasks.Count
+        ) -join [Environment]::NewLine
+        [IO.File]::WriteAllText((Join-Path $backupFolder 'update-details.txt'), $metadata, $script:Utf8NoBom)
+        return $backupFolder
+    }
+    catch {
+        # The update has not started: remove any incomplete rollback folder.
+        Remove-Item -LiteralPath $backupFolder -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
 }
 
 function Enter-MonitorAutomaticUpdateLock {
@@ -585,6 +624,10 @@ function Invoke-MonitorAutomaticUpdate {
 
     $temporaryFolder = $null
     $backupFolder = $null
+    $backupCreated = $false
+    $backupRestoreSucceeded = $false
+    $configurationRestoreSucceeded = $true
+    $scriptReplaced = $false
     $updateLock = Enter-MonitorAutomaticUpdateLock
     if ($null -eq $updateLock) {
         Write-RunLog -Category Update -Color DarkGray -Message 'Another monitoring process is checking or installing an update; this run will continue without a duplicate update attempt.'
@@ -595,6 +638,7 @@ function Invoke-MonitorAutomaticUpdate {
         $release = Get-MonitorRemoteReleaseDefinition
         $currentVersion = [version]$script:MonitorVersion
         if ($release.Version -le $currentVersion) {
+            Remove-ExpiredMonitorAutomaticUpdateBackups -Keep 3
             Write-RunLog -Category Update -Color DarkGray -Message ('Monitoring version {0} is current; no update was required.' -f $currentVersion)
             return
         }
@@ -612,14 +656,18 @@ function Invoke-MonitorAutomaticUpdate {
             throw "A newer monitoring version $($remoteMetadata.Version) is available, but the script folder is not writable: $($script:ScriptDirectory)"
         }
 
-        Write-RunLog -Category Update -Color Cyan -Message ('Verified monitoring update {0}, released {1}. Creating backups before installation.' -f $release.Version, $release.ReleaseDate)
-        $backupFolder = New-MonitorAutomaticUpdateBackup -TargetVersion $remoteMetadata.Version
         Write-RunLog -Category Update -Color DarkGray -Message 'Validating the downloaded monitoring release against the current site configuration.'
         Test-MonitorDownloadedReleaseConfiguration -DownloadedScriptPath $downloadedScript
+
+        # Create the rollback copy only after all download/configuration checks pass.
+        Write-RunLog -Category Update -Color Cyan -Message ('Verified monitoring update {0}, released {1}. Creating a rollback backup immediately before replacement.' -f $release.Version, $release.ReleaseDate)
+        $backupFolder = New-MonitorAutomaticUpdateBackup -TargetVersion $remoteMetadata.Version
+        $backupCreated = $true
         $replacementPath = Join-Path $script:ScriptDirectory ('.monitor_verified_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
         try {
             Copy-Item -LiteralPath $downloadedScript -Destination $replacementPath -Force -ErrorAction Stop
             Copy-Item -LiteralPath $replacementPath -Destination $script:ScriptPath -Force -ErrorAction Stop
+            $scriptReplaced = $true
         }
         finally {
             Remove-Item -LiteralPath $replacementPath -Force -ErrorAction SilentlyContinue
@@ -632,6 +680,7 @@ function Invoke-MonitorAutomaticUpdate {
             throw 'The installed monitoring script metadata does not match the verified release.'
         }
         Set-MonitorInstalledReleaseMetadata -Version $remoteMetadata.Version -ReleaseDate $remoteMetadata.ReleaseDate
+        Remove-ExpiredMonitorAutomaticUpdateBackups -Keep 3
         Write-RunLog -Level OK -Category Update -Color Green -Message (
             'Monitoring version {0} was installed successfully. Backup={1}. The current process will finish with version {2}; the new version starts on the next execution.' -f
                 $remoteMetadata.Version, $backupFolder, $script:MonitorVersion
@@ -639,18 +688,32 @@ function Invoke-MonitorAutomaticUpdate {
     }
     catch {
         $updateError = $_
-        if (-not [string]::IsNullOrWhiteSpace($backupFolder)) {
+        if ($backupCreated -and -not [string]::IsNullOrWhiteSpace($backupFolder)) {
             $backupScript = Join-Path $backupFolder ([IO.Path]::GetFileName($script:ScriptPath))
-            if (Test-Path -LiteralPath $backupScript -PathType Leaf) {
-                try { Copy-Item -LiteralPath $backupScript -Destination $script:ScriptPath -Force -ErrorAction Stop }
+            if (-not $scriptReplaced) {
+                $backupRestoreSucceeded = $true
+            }
+            elseif (Test-Path -LiteralPath $backupScript -PathType Leaf) {
+                try {
+                    Copy-Item -LiteralPath $backupScript -Destination $script:ScriptPath -Force -ErrorAction Stop
+                    $backupRestoreSucceeded = $true
+                }
                 catch { Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic update restore also failed: {0}' -f $_.Exception.Message) }
             }
             if (-not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
                 $backupConfiguration = Join-Path $backupFolder ([IO.Path]::GetFileName($script:ResolvedConfigPath))
                 if (Test-Path -LiteralPath $backupConfiguration -PathType Leaf) {
                     try { Copy-Item -LiteralPath $backupConfiguration -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop }
-                    catch { Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic configuration restore also failed: {0}' -f $_.Exception.Message) }
+                    catch {
+                        $configurationRestoreSucceeded = $false
+                        Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic configuration restore also failed: {0}' -f $_.Exception.Message)
+                    }
                 }
+            }
+
+            if ($backupRestoreSucceeded -and $configurationRestoreSucceeded) {
+                Remove-Item -LiteralPath $backupFolder -Recurse -Force -ErrorAction SilentlyContinue
+                Write-RunLog -Category Update -Color DarkGray -Message 'Removed the failed-update backup after the previous monitoring script was restored.'
             }
         }
         Write-RunLog -Level Warning -Category Update -Color Yellow -Message (
@@ -1176,11 +1239,13 @@ Automatic updates
 -----------------
 Each execution checks the official GitHub release. A newer monitor is installed
 only after update-manifest.json, SHA-256, and PowerShell syntax validation.
-Before replacement, the current script, JSON configuration, and related
-Scheduled Task definitions are saved under monitor-update-backups. The local
-script filename and all site settings remain unchanged. The installed update
-takes effect on the next execution. Use -SkipAutomaticUpdate only for a
-temporary troubleshooting run.
+After the downloaded release and local configuration validate, the current
+script, JSON configuration, and related Scheduled Task definitions are saved
+under monitor-update-backups immediately before replacement. Only successful
+updates retain a backup, and the newest three backup folders are kept. The
+local script filename and all site settings remain unchanged. The installed
+update takes effect on the next execution. Use -SkipAutomaticUpdate only for
+a temporary troubleshooting run.
 
 DAILY LOG FILES AND WATCHDOG EVIDENCE
 =====================================
@@ -1401,10 +1466,13 @@ AUTOMATIC MONITOR UPDATES
 Every execution checks the official GitHub release for a newer monitor. The
 downloaded script must match update-manifest.json, pass SHA-256 verification,
 and parse successfully as PowerShell before it can replace the installed file.
-The current script, JSON configuration, and related Scheduled Task definitions
-are backed up under monitor-update-backups. Site settings, logs, task schedules,
-and the installed script filename are preserved. The new code runs on the next
-execution. Use -SkipAutomaticUpdate only for a temporary troubleshooting run.
+After the downloaded release and local configuration validate, the current
+script, JSON configuration, and related Scheduled Task definitions are backed
+up under monitor-update-backups immediately before replacement. Only successful
+updates retain a backup, and the newest three folders are kept. Site settings,
+logs, task schedules, and the installed script filename are preserved. The new
+code runs on the next execution. Use -SkipAutomaticUpdate only for a temporary
+troubleshooting run.
 '@
 }
 

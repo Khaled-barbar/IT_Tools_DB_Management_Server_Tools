@@ -204,7 +204,7 @@ Monitoring logic was refined using observed production alerts:
 
 ### Monitoring files and lifecycle
 
-The monitor keeps daily `run_log_yyyyMMdd.txt` and `error_log_yyyyMMdd.txt` files, a single active `ignore-rules.txt`, a state JSON file for consecutive-run decisions, a configuration JSON file, and a locally generated README. Dated logs retain the current day and prior four days by default. Ignore rules rotate on the 3rd, 13th, and 23rd, retain the three newest archives, and carry active rules into the new file. Verified monitor-update backups are stored below `monitor-update-backups`.
+The monitor keeps daily `run_log_yyyyMMdd.txt` and `error_log_yyyyMMdd.txt` files, a single active `ignore-rules.txt`, a state JSON file for consecutive-run decisions, a configuration JSON file, and a locally generated README. Dated logs retain the current day and prior four days by default. Ignore rules rotate on the 3rd, 13th, and 23rd, retain the three newest archives, and carry active rules into the new file. A verified update creates its rollback folder below `monitor-update-backups` immediately before replacement; only successful updates retain one, and the newest three are kept.
 
 ## Logging and error handling
 
