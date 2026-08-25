@@ -6,6 +6,17 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.2.0 - 2026-08-25
+
+### Corrected
+
+- Forced TLS 1.2, and TLS 1.3 where supported, before GitHub API and release-file requests. This resolves companion-script download failures on Windows PowerShell sessions that inherit obsolete TLS defaults, without bypassing certificate validation.
+- Applied the same verified download path to on-demand companion files, including the monitoring template used by **Add Site Monitoring**.
+
+### Monitoring 6.10.0
+
+- Monitoring self-updates now explicitly enable TLS 1.2, and TLS 1.3 where available, before contacting GitHub.
+
 ## 7.1.16 - 2026-08-21
 
 ### Corrected

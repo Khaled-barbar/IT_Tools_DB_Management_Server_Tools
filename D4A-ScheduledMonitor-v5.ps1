@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 6.9.2
-# D4A-Monitor-Release-Date: 2026-08-21
+# D4A-Monitor-Version: 6.10.0
+# D4A-Monitor-Release-Date: 2026-08-25
 
 <#
 .SYNOPSIS
@@ -221,8 +221,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '6.9.2'
-$script:MonitorReleaseDate = '2026-08-21'
+$script:MonitorVersion = '6.10.0'
+$script:MonitorReleaseDate = '2026-08-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -253,8 +253,18 @@ $script:MonitorStatePath = $null
 $script:LoggingReady = $false
 $script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
 
+function Initialize-MonitorWebTls {
+    # Windows PowerShell can otherwise inherit obsolete protocol defaults on older servers.
+    $protocols = [Net.SecurityProtocolType]::Tls12
+    if ([Enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13') {
+        $protocols = $protocols -bor [Net.SecurityProtocolType]::Tls13
+    }
+    [Net.ServicePointManager]::SecurityProtocol = $protocols
+}
+
 function Get-MonitorReleaseCommit {
     try {
+        Initialize-MonitorWebTls
         $response = Invoke-RestMethod `
             -Uri "https://api.github.com/repos/$($script:MonitorGitHubRepository)/commits/main" `
             -TimeoutSec 15 `
@@ -290,6 +300,7 @@ function Get-MonitorUpdateText {
         [string]$ReleaseCommit = ''
     )
 
+    Initialize-MonitorWebTls
     $response = Invoke-WebRequest `
         -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit) `
         -UseBasicParsing `
@@ -370,6 +381,7 @@ function Get-MonitorVerifiedReleaseScript {
     for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
         try {
             Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+            Initialize-MonitorWebTls
             Invoke-WebRequest `
                 -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $script:MonitorReleaseScriptFileName -ReleaseCommit $ReleaseCommit) `
                 -OutFile $DestinationPath `

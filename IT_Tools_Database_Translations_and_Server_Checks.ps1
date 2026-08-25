@@ -55,8 +55,8 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.1.16'
-$Script:ToolReleaseDate = '2026-08-21'
+$Script:ToolVersion = [version]'7.2.0'
+$Script:ToolReleaseDate = '2026-08-25'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -252,8 +252,18 @@ function Show-ITToolsInstalledReleaseDescription {
     Write-Host ''
 }
 
+function Initialize-ITToolsWebTls {
+    # Windows PowerShell can otherwise inherit obsolete protocol defaults on older servers.
+    $protocols = [Net.SecurityProtocolType]::Tls12
+    if ([Enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13') {
+        $protocols = $protocols -bor [Net.SecurityProtocolType]::Tls13
+    }
+    [Net.ServicePointManager]::SecurityProtocol = $protocols
+}
+
 function Get-ITToolsReleaseCommit {
     try {
+        Initialize-ITToolsWebTls
         $response = Invoke-RestMethod `
             -Uri "https://api.github.com/repos/$($Script:ToolGitHubRepository)/commits/main" `
             -TimeoutSec 15 `
@@ -300,6 +310,7 @@ function Get-ITToolsRemoteText {
         [string]$ReleaseCommit = ''
     )
 
+    Initialize-ITToolsWebTls
     $response = Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit) -UseBasicParsing -TimeoutSec 12 -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } -ErrorAction Stop
     return ([string]$response.Content).Trim()
 }
@@ -350,6 +361,7 @@ function Get-ITToolsVerifiedRemoteUpdateFile {
     for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
         try {
             Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+            Initialize-ITToolsWebTls
             Invoke-WebRequest `
                 -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit) `
                 -OutFile $DestinationPath `
@@ -3730,7 +3742,8 @@ function Get-RequiredScriptFolderFilePath {
         $downloadFolder = Join-Path ([IO.Path]::GetTempPath()) ('ITToolsCompanion_{0}' -f [guid]::NewGuid().ToString('N'))
         try {
             [void](New-Item -Path $downloadFolder -ItemType Directory -Force -ErrorAction Stop)
-            $manifestText = Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName
+            $releaseCommit = Get-ITToolsReleaseCommit
+            $manifestText = Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName -ReleaseCommit $releaseCommit
             $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
             $fileEntries = @($manifest.files | Where-Object { [string]$_.path -ieq $FileName })
             if ($fileEntries.Count -ne 1) {
@@ -3746,13 +3759,14 @@ function Get-RequiredScriptFolderFilePath {
             $temporaryFileFolder = Split-Path -Parent $temporaryFilePath
             [void](New-Item -Path $temporaryFileFolder -ItemType Directory -Force -ErrorAction Stop)
             Write-StreamingLog -Percent 25 -Step 'Download' -Description "Downloading missing companion file $FileName."
-            Invoke-WebRequest -Uri (Get-ITToolsCacheBustedUpdateUri -RelativePath $FileName) -OutFile $temporaryFilePath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+            [void](Get-ITToolsVerifiedRemoteUpdateFile `
+                -RelativePath $FileName `
+                -ExpectedHash $expectedHash `
+                -DestinationPath $temporaryFilePath `
+                -ReleaseCommit $releaseCommit `
+                -ProgressPercent 25)
 
-            Write-StreamingLog -Percent 70 -Step 'Verify' -Description "Verifying the official file $FileName."
-            $actualHash = (Get-FileHash -LiteralPath $temporaryFilePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
-            if ($actualHash -ne $expectedHash) {
-                throw "Integrity check failed for '$FileName'."
-            }
+            Write-StreamingLog -Percent 70 -Step 'Verify' -Description "Verified the official file $FileName."
 
             if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
                 Copy-Item -LiteralPath $temporaryFilePath -Destination $filePath -Force -ErrorAction Stop
