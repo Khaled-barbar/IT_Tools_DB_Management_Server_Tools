@@ -55,8 +55,8 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.2.1'
-$Script:ToolReleaseDate = '2026-08-25'
+$Script:ToolVersion = [version]'7.2.2'
+$Script:ToolReleaseDate = '2026-08-28'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1667,7 +1667,7 @@ function Get-SiteMonitoringScriptMetadata {
 
 function Get-SiteMonitoringTemplatePath {
     $scriptFolder = Get-CurrentScriptFolder
-    $templateName = 'D4A-ScheduledMonitor-v5.ps1'
+    $templateName = 'D4A-ScheduledMonitor.ps1'
     $templatePath = Join-Path $scriptFolder $templateName
     $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorTemplate_{0}' -f [guid]::NewGuid().ToString('N'))
 
@@ -1675,6 +1675,10 @@ function Get-SiteMonitoringTemplatePath {
         Write-StreamingLog -Percent 5 -Step 'Release' -Description 'Checking GitHub for the current official monitoring release.'
         $releaseCommit = Get-ITToolsReleaseCommit
         $manifest = (Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName -ReleaseCommit $releaseCommit) | ConvertFrom-Json -ErrorAction Stop
+        $monitoringRelease = $manifest.canonicalMonitoring
+        if ($null -eq $monitoringRelease -or [string]$monitoringRelease.scriptPath -ine $templateName) {
+            throw "The official release manifest does not define the canonical monitoring release '$templateName'."
+        }
         $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $templateName })
         if ($entries.Count -ne 1) {
             throw "The official release manifest does not contain one unique entry for '$templateName'."
@@ -1683,6 +1687,9 @@ function Get-SiteMonitoringTemplatePath {
         $expectedHash = ([string]$entries[0].sha256).Trim().ToUpperInvariant()
         if ($expectedHash -notmatch '^[A-F0-9]{64}$') {
             throw "The official release manifest contains an invalid SHA-256 value for '$templateName'."
+        }
+        if ($expectedHash -ne ([string]$monitoringRelease.sha256).Trim().ToUpperInvariant()) {
+            throw "The canonical monitoring release hash does not match the manifest file entry for '$templateName'."
         }
 
         [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)

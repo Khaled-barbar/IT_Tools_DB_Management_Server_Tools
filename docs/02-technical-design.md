@@ -33,7 +33,8 @@ flowchart TD
 | Component | Responsibility |
 |---|---|
 | `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main menus, input collection, shared helpers, database workflows, intervention audit, server tools, monitor deployment, and updates |
-| `D4A-ScheduledMonitor-v5.ps1` | Unattended checks, autonomous verified updates, stateful alert evaluation, email and optional Discord delivery, logs, retention, and monitor management commands |
+| `D4A-ScheduledMonitor.ps1` | Canonical unattended monitor for new deployments: verified updates, stateful alert evaluation, email and optional Discord delivery, logs, retention, and monitor management commands |
+| `D4A-ScheduledMonitor-v5.ps1` | Identical legacy compatibility payload used only to update already-installed versioned monitor filenames in place |
 | `D4A-DiskSpaceAnalyzer.ps1` | Stand-alone or delegated disk scanning and visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone log timestamp-gap analysis with read sharing |
 | Companion SQL files | Site-standard configuration data executed only by their selected feature |
@@ -245,7 +246,7 @@ sequenceDiagram
 
 The updater always includes the main script and refreshes companion files only when they already exist locally. If GitHub/CDN temporarily returns `version.txt` and `update-manifest.json` from different releases, the updater makes visible five-second retry attempts before rejecting the release as inconsistent. After copying the verified files, it rechecks the installed main-script hash and embedded version before displaying a summary. That summary remains open until the technician presses a key, after which the verified script is reloaded in the same PowerShell window; the original session does not continue to its old menu. If an official companion is missing, the selected feature downloads only that file, validates it against the manifest, and then saves it beside IT Tools. Before a monitoring deployment or version comparison, IT Tools also retrieves the current official monitor with cache-busting, verifies its manifest hash and parser result, and refreshes an outdated local template. Consequently, a stale companion can never make **Update monitoring script version** report that an older installed version is current. Site configuration, credentials, monitoring state, logs, and ignore rules are never release payloads.
 
-The monitoring script independently performs a cache-bypassed release check on every execution unless `-SkipAutomaticUpdate` is supplied. It reads `monitor-version.txt`, then requires the manifest `monitoring` definition, file entry, version, release date, script path, and SHA-256 to agree before it downloads any monitor code. Temporary GitHub/CDN disagreement is retried every five seconds with a finite limit. It then validates the monitor version and release-date headers, PowerShell syntax, and compatibility with the current JSON configuration. A file lock prevents recurring and daily Scheduled Tasks from racing to update the same deployment. Before replacing its own installed path, it backs up the current script, external JSON configuration, and matching Scheduled Task definitions. The installed filename and task settings remain unchanged, version metadata is written back to the JSON, and the verified code starts on the next execution. Update failure restores both the script and configuration, is logged, and does not prevent the health check from continuing.
+The monitoring script independently performs a cache-bypassed release check on every execution unless `-SkipAutomaticUpdate` is supplied. It reads `monitor-version.txt`, then requires the matching manifest definition, file entry, version, release date, script path, and SHA-256 to agree before it downloads any monitor code. New installations use the `canonicalMonitoring` definition and `D4A-ScheduledMonitor.ps1`; an installed versioned filename uses the legacy `monitoring` definition and payload, then replaces its own installed path without changing the Scheduled Task. Temporary GitHub/CDN disagreement is retried every five seconds with a finite limit. It then validates the monitor version and release-date headers, PowerShell syntax, and compatibility with the current JSON configuration. A file lock prevents recurring and daily Scheduled Tasks from racing to update the same deployment. Before replacing its own installed path, it backs up the current script, external JSON configuration, and matching Scheduled Task definitions. The installed filename and task settings remain unchanged, version metadata is written back to the JSON, and the verified code starts on the next execution. Update failure restores both the script and configuration, is logged, and does not prevent the health check from continuing.
 
 For a manual version update, IT Tools checks the matching Scheduled Tasks after the operator confirms `UPDATE`. If a task is running, the tool polls it every five seconds and streams the task name, elapsed time, next check, and 15-minute limit. It proceeds immediately when the task becomes idle; the finite timeout converts a stuck execution into a logged, recoverable error.
 
@@ -323,7 +324,8 @@ IT_Tools_DB_Management_Server_Tools/
 |   |-- 02-technical-design.md
 |   `-- 03-user-guide.md
 |-- IT_Tools_Database_Translations_and_Server_Checks.ps1
-|-- D4A-ScheduledMonitor-v5.ps1
+|-- D4A-ScheduledMonitor.ps1
+|-- D4A-ScheduledMonitor-v5.ps1 (legacy update bridge)
 |-- D4A-DiskSpaceAnalyzer.ps1
 |-- Find-LogGaps.ps1
 |-- AssemblyRules_Luleburgas.sql

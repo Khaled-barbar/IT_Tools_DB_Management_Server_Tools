@@ -20,7 +20,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.2.1, Monitoring 6.10.3 |
+| Current release | IT Tools 7.2.2, Monitoring 7.0.0 |
 
 ## Why it exists
 
@@ -71,7 +71,8 @@ This toolkit supports operational work; it does not replace change-management ap
 | File | Purpose |
 |---|---|
 | `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main interactive toolkit |
-| `D4A-ScheduledMonitor-v5.ps1` | Configuration-driven scheduled health monitor |
+| `D4A-ScheduledMonitor.ps1` | Canonical configuration-driven scheduled health monitor for new deployments |
+| `D4A-ScheduledMonitor-v5.ps1` | Legacy compatibility update bridge for existing versioned monitor installations; do not use for new deployments |
 | `D4A-DiskSpaceAnalyzer.ps1` | Fast NTFS disk-usage analyzer with visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone timestamp-gap analyzer for text logs |
 | `AssemblyRules_Luleburgas.sql` | Companion data for the Luleburgas system-settings workflow |
@@ -84,6 +85,6 @@ This toolkit supports operational work; it does not replace change-management ap
 
 ## Versioning
 
-Patch releases are used for changes in the same release week, minor releases for a later release cycle, and major releases for substantial or breaking changes. IT Tools reads `version.txt`; deployed monitors read `monitor-version.txt` and the `monitoring` definition in `update-manifest.json`. The monitoring component has its own version because it can be updated while preserving each site's local configuration and Scheduled Tasks.
+Patch releases are used for changes in the same release week, minor releases for a later release cycle, and major releases for substantial or breaking changes. IT Tools reads `version.txt`; deployed monitors read `monitor-version.txt` and their matching definition in `update-manifest.json`. New deployments use the `canonicalMonitoring` definition and `D4A-ScheduledMonitor.ps1`; existing versioned monitor files use the legacy `monitoring` definition so they can update safely without a task-path rename. The monitoring component has its own version because it can be updated while preserving each site's local configuration and Scheduled Tasks.
 
 For stronger production assurance, signed GitHub releases or Authenticode signatures can be added in addition to the current HTTPS and SHA-256 controls.

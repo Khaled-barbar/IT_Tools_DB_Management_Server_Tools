@@ -6,6 +6,14 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.2.2 - 2026-08-28
+
+### Monitoring 7.0.0 - 2026-08-28
+
+- Renamed the canonical monitoring release to `D4A-ScheduledMonitor.ps1` for all new deployments.
+- Added a two-channel verified update definition: the canonical file is used by new deployments, while `D4A-ScheduledMonitor-v5.ps1` remains an identical compatibility payload for installed versioned monitors.
+- Existing monitor files continue to update in place with their current filename and Scheduled Task path, including older `v5`, `v6`, and custom versioned filenames; no manual rename is required.
+
 ## 7.2.1 - 2026-08-25
 
 ### Monitoring 6.10.3 - 2026-08-28
