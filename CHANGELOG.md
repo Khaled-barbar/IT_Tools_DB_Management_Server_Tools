@@ -8,6 +8,12 @@ For project context, architecture, and operating procedures, see the [project ov
 
 ## 7.2.1 - 2026-08-25
 
+### Monitoring 6.10.3 - 2026-08-28
+
+- Added optional Discord webhook delivery alongside the existing email path for alerts, recovery notices, test runs, and daily summaries.
+- Discord uses compact native embeds that identify the site, notification type, affected component, server, timestamp, diagnostic details, rule key, and monitoring log; webhook credentials stay only in the local JSON configuration and are never written to logs or release files.
+- Email and Discord deliveries are isolated so an issue in one channel does not block the other. Existing cooldown and recovery state remains tied to successful email delivery to preserve the established alert policy.
+
 ### Corrected
 
 - SSL Checker now uses an explicit TLS 1.2 handshake rather than the legacy-incompatible `SslProtocols.None` value.

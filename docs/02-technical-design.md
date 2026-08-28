@@ -33,7 +33,7 @@ flowchart TD
 | Component | Responsibility |
 |---|---|
 | `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main menus, input collection, shared helpers, database workflows, intervention audit, server tools, monitor deployment, and updates |
-| `D4A-ScheduledMonitor-v5.ps1` | Unattended checks, autonomous verified updates, stateful alert evaluation, email delivery, logs, retention, and monitor management commands |
+| `D4A-ScheduledMonitor-v5.ps1` | Unattended checks, autonomous verified updates, stateful alert evaluation, email and optional Discord delivery, logs, retention, and monitor management commands |
 | `D4A-DiskSpaceAnalyzer.ps1` | Stand-alone or delegated disk scanning and visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone log timestamp-gap analysis with read sharing |
 | Companion SQL files | Site-standard configuration data executed only by their selected feature |
@@ -166,7 +166,7 @@ Site-specific values are stored in:
 monitor-logs\D4A-ScheduledMonitor.config.json
 ```
 
-This file contains sites, friendly names, recipients, paths, thresholds, and schedule metadata. It is intentionally excluded from releases. Monitoring version updates preserve the installed filename and back up the script, configuration, and Scheduled Task definitions before replacing code.
+This file contains sites, friendly names, email recipients, optional Discord webhook credentials, paths, thresholds, and schedule metadata. It is intentionally excluded from releases. Monitoring version updates preserve the installed filename and back up the script, configuration, and Scheduled Task definitions before replacing code. Webhook values are never shown in logs or configuration summaries.
 
 ### Check pipeline
 
@@ -179,10 +179,10 @@ flowchart TD
     Evaluate --> Degraded["Warning or diagnostic evidence"]
     Evaluate --> Failure["Persistent or immediate failure"]
     Healthy --> Recovery["Match explicit OK against previously emailed issue"]
-    Recovery --> RunLog["Send one recovery email and clear resolved state/cooldown"]
+    Recovery --> RunLog["Send one recovery email and Discord notification, then clear resolved state/cooldown"]
     Degraded --> ErrorLog["Write diagnostics without unnecessary notification"]
     Failure --> Ignore["Evaluate active ignore/cooldown rule"]
-    Ignore -->|Not covered| Email["Send email and create automatic cooldown"]
+    Ignore -->|Not covered| Email["Send email and optional Discord notification; create automatic cooldown after email delivery"]
     Ignore -->|Covered| Logs["Record suppression in logs"]
 ```
 

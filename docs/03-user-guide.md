@@ -399,14 +399,14 @@ Prerequisites:
 - Node.js/npm available, or Administrator access to approve its guided WinGet installation;
 - Decide4Action service installed or a known Configuration folder;
 - approved notification recipients;
-- outbound email path available.
+- outbound email path available and, when Discord delivery is required, outbound HTTPS access to `discord.com`.
 
 Procedure:
 
 1. Enter one or more frontend sites separated by commas. Press Enter for `hostname:1200`.
 2. Enter one friendly name for each site when prompted. Its API endpoint is added automatically.
 3. Confirm or select the Configuration deployment folder.
-4. Enter one or more notification addresses separated by commas.
+4. Enter one or more notification addresses separated by commas. An optional Discord webhook can be added afterward to the local monitoring JSON configuration; keep this credential out of shared files and screenshots.
 5. Review the complete deployment summary and type `DEPLOY`.
 6. If Node.js/npm are absent, type `INSTALL` to install or repair the official Node.js LTS package. Node.js, npm, and nodemailer are validated before new monitor files are created.
 7. Choose a recurring frequency; 5 minutes is the recommended default unless the site requires another interval.
@@ -420,7 +420,7 @@ Expected result:
 - nodemailer installed;
 - configuration stored in `monitor-logs\D4A-ScheduledMonitor.config.json`;
 - Scheduled Task runs silently, including when users are logged out;
-- test email confirms delivery.
+- test email confirms delivery; a configured Discord webhook receives the same test result.
 
 If an earlier deployment stopped after creating the monitor/configuration but before Scheduled Tasks were created, the tool can identify that specific incomplete state even when nodemailer finished installing before the error appeared. It displays **Resume incomplete deployment** and requires `RESUME`; the existing JSON is preserved and backed up while runtime paths are repaired. An active or modified monitor is never treated as an incomplete deployment and must be managed through **Update Existing Monitoring Settings**.
 
@@ -436,7 +436,7 @@ The configuration update creates a settings backup. Version update first retriev
 
 The monitor also checks GitHub for its own newer verified version whenever it runs, including Scheduled Task and stand-alone executions. It bypasses cached release responses, validates the release manifest, SHA-256, version metadata, release date, PowerShell syntax, and current JSON configuration; then backs up the installed script, configuration, and related task definitions before replacing its own file. A lock prevents two Scheduled Tasks from installing concurrently. The current health check continues with the loaded version, and the new code is used on the next run. Use `-SkipAutomaticUpdate` only for a temporary troubleshooting execution.
 
-Monitoring configuration is read and written explicitly as UTF-8, so friendly names with accents, such as `Salé`, remain readable in e-mail subjects. Existing corrupted forms such as `SalÃ©` are repaired when loaded. Monitoring e-mails display **D4A Monitoring** as their sender name while keeping the site’s configured sender address.
+Monitoring configuration is read and written explicitly as UTF-8, so friendly names with accents, such as `Salé`, remain readable in email subjects and Discord messages. Existing corrupted forms such as `SalÃ©` are repaired when loaded. Monitoring emails display **D4A Monitoring** as their sender name while keeping the site’s configured sender address. To enable Discord, add `DiscordWebhookUrl` to the local `monitor-logs\D4A-ScheduledMonitor.config.json`; the configuration summary reports only `Configured`, never the URL itself.
 
 ### Execute Monitoring Commands
 
@@ -446,13 +446,14 @@ The menu exposes common management and test commands:
 |---|---|
 | Add site(s) persistently | `-AddSiteAddress 'site1,site2'` |
 | Show configuration | `-ShowConfiguration` |
-| Run test and send complete email | `-SendTestResultsEmail` |
+| Run test and send complete notification | `-SendTestResultsEmail` |
 | Run normal check | no additional argument |
 | Send daily summary now | `-SendDailySummaryEmail` |
 | Validate configuration only | `-ValidateConfiguration` |
 | Temporarily test site(s) | `-SiteAddress 'site1,site2' -SendTestResultsEmail` |
 | Extended CPU test | `-CpuSampleDurationSeconds 120 -SendTestResultsEmail` |
-| Run without email | `-DisableEmail` |
+| Run email-only | `-DisableDiscord` |
+| Run Discord-only | `-DisableEmail` (requires `DiscordWebhookUrl`) |
 | Set cooldown | `-SetIssueCooldown 'issue-key' -IssueCooldownDuration '12h'` |
 | Clear cooldown | `-ClearIssueCooldown 'issue-key'` |
 | Skip monitor update check once | `-SkipAutomaticUpdate` |
@@ -465,7 +466,7 @@ The default log folder is `Configuration\monitor-logs`.
 
 | File | Contents |
 |---|---|
-| `run_log_yyyyMMdd.txt` | Run start/end, configuration, successful checks, warnings, email actions, and diagnostics |
+| `run_log_yyyyMMdd.txt` | Run start/end, configuration, successful checks, warnings, email/Discord actions, and diagnostics |
 | `error_log_yyyyMMdd.txt` | Warnings, alerts, errors, and supporting evidence |
 | `ignore-rules.txt` | Active temporary, permanent, and automatic notification-suppression rules |
 | `D4A-ScheduledMonitor.config.json` | Site-specific settings and schedule metadata |
@@ -483,8 +484,8 @@ Normal endpoint behavior:
 - Data Collector SQL timeout while service runs: degrade/retry before persistent alert;
 - Nginx errors: alert only above 20 errors/minute for two consecutive minutes;
 - relevant Windows event warning/error while services remain available: `error_log` and daily/test reports only;
-- disk space: no warning email; critical alert at 5 GB free or less, or 95 percent used or more;
-- previously notified issue later returns `OK`: one recovery email, then its recovery state and automatic cooldown are cleared;
+- disk space: no warning notification; critical alert at 5 GB free or less, or 95 percent used or more;
+- previously notified issue later returns `OK`: one recovery email and, when configured, Discord notification; then its recovery state and automatic cooldown are cleared;
 - one immediate issue: subject identifies component and level, such as `API Alert` or `Disk Space Critical`; multiple issues use `Multiple Alerts detected`.
 
 The monitor reports and collects evidence. It does not restart services.
@@ -527,12 +528,12 @@ This read-only menu displays the ten newest lines from `C:\Users\edit_log.txt`. 
 - Record the table names and timestamp.
 - Open the daily main error log and provide the full relevant entry to Level 2 or the database administrator.
 
-### Monitoring does not send email
+### Monitoring does not send notifications
 
 - Run Show current monitoring configuration.
 - Run Validate monitoring configuration.
-- Run the test-email mode.
-- Review both daily logs for nodemailer, SMTP, recipient, or configuration errors.
+- Run the test-notification mode.
+- Review both daily logs for nodemailer, SMTP, recipient, Discord, or configuration errors.
 - Confirm the Scheduled Task uses the expected script and configuration paths.
 
 ### Monitoring reports an alert

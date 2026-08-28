@@ -68,6 +68,7 @@ These conditions must be respected whenever `IT_Tools_Database_Translations_and_
 - Validate Node.js, npm, and nodemailer before creating files for a new monitoring deployment. Resolve installed runtimes from both `PATH` and standard Windows installation metadata, record an absolute `node.exe` path in configuration, and never leave a new monitor/configuration pair solely because a prerequisite was missing.
 - Never overwrite an existing monitor while retrying setup. Resume only a positively identified incomplete deployment, preserve its settings, and back up the JSON configuration before repairing runtime paths.
 - Keep site-specific monitoring settings in `monitor-logs\D4A-ScheduledMonitor.config.json`; do not inject them into the monitoring script source.
+- Treat notification webhooks as site-specific credentials: keep them only in local monitoring configuration, never in distributed scripts, manifests, repositories, action logs, error logs, or configuration summaries.
 - Read and write monitoring JSON explicitly as UTF-8. Preserve non-ASCII site names in subjects and configuration updates; repair known UTF-8/Windows-1252 mojibake only in user-facing monitoring name fields.
 - Command-line monitor parameters must override JSON configuration values, and JSON values must override built-in defaults.
 - Preserve each deployed monitor filename because production files may use names such as `D4A-ScheduledMonitor-v5.ps1`, `D4A-ScheduledMonitor-v6.ps1`, or `D4A-ScheduledMonitor-v7.1.2.ps1`.
