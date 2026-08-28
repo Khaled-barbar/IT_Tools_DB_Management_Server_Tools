@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.2.3 - 2026-08-28
+
+### Monitoring 7.0.1 - 2026-08-28
+
+- Added a **Run monitoring and send concise Discord status** command under Site Monitoring > Execute Monitoring Commands.
+- The Discord-only status runs the full health check and sends a compact summary even when healthy, with endpoint availability, D4A and Mosquitto service status, and CPU, memory, and disk usage. It does not send an email or change alert cooldown and recovery state.
+
 ## 7.2.2 - 2026-08-28
 
 ### Monitoring 7.0.0 - 2026-08-28

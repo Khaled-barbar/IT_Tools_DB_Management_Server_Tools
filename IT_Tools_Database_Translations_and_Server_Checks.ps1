@@ -55,7 +55,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.2.2'
+$Script:ToolVersion = [version]'7.2.3'
 $Script:ToolReleaseDate = '2026-08-28'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3381,6 +3381,7 @@ function Show-ExecuteMonitoringCommandsMenu {
         Write-Host '9) Run monitoring without email delivery'
         Write-Host '10) Set automatic alert cooldown'
         Write-Host '11) Clear automatic alert cooldown'
+        Write-Host '12) Run monitoring and send concise Discord status'
         Write-Host 'q) Back to Site Monitoring'
         Write-Host '------------------------------------------------------------------------'
         $choice = Read-Host 'Choose an option'
@@ -3480,6 +3481,13 @@ function Show-ExecuteMonitoringCommandsMenu {
                 if ($null -eq $key) { continue }
                 Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Clear cooldown' -Action {
                     Invoke-SiteMonitoringCommand -Target $target -Title 'Clear Automatic Alert Cooldown' -Description 'Removes the automatic cooldown so a continuing or recurring issue can notify again.' -ArgumentList @('-ClearIssueCooldown', $key)
+                }
+            }
+            '12' {
+                $target = Select-SiteMonitoringCommandTarget
+                if ($null -eq $target) { continue }
+                Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Discord status' -Action {
+                    Invoke-SiteMonitoringCommand -Target $target -Title 'Run Monitoring and Send Concise Discord Status' -Description 'Runs all health checks and sends a Discord-only summary of endpoint availability, D4A service status, and CPU, memory, and disk usage, even when healthy.' -ArgumentList @('-SendDiscordStatus')
                 }
             }
             default {

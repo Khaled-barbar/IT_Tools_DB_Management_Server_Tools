@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.0.0
+# D4A-Monitor-Version: 7.0.1
 # D4A-Monitor-Release-Date: 2026-08-28
 
 <#
@@ -25,7 +25,8 @@
     new issue is detected. The monitor automatically creates a 24-hour cooldown
     rule after successful email delivery. Resolved issues have their automatic
     cooldown removed so a recurrence is reported. Test and daily-summary modes
-    send the complete scan report even when healthy.
+    send the complete scan report even when healthy. Use -SendDiscordStatus for
+    a concise Discord-only health summary.
 
     Frontend and API endpoints alert only when unavailable. Responses above
     4500 ms are recorded in error_log without an email alert. CPU and RAM alert
@@ -58,6 +59,10 @@
 .EXAMPLE
     # Send the daily performance summary even when no issue is detected.
 .\D4A-ScheduledMonitor.ps1 -SendDailySummaryEmail
+
+.EXAMPLE
+    # Send a concise Discord status with endpoint, service, and resource results.
+.\D4A-ScheduledMonitor.ps1 -SendDiscordStatus
 
 .EXAMPLE
     # Add a site to the persistent JSON configuration, then view the result.
@@ -115,6 +120,9 @@ param(
     [switch]$SendTestResultsEmail,
 
     [switch]$SendDailySummaryEmail,
+
+    # Sends a concise Discord-only health summary, including healthy runs.
+    [switch]$SendDiscordStatus,
 
     [switch]$DisableEmail,
 
@@ -232,7 +240,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.0.0'
+$script:MonitorVersion = '7.0.1'
 $script:MonitorReleaseDate = '2026-08-28'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1435,6 +1443,10 @@ Run a test and send a complete email even when there are no issues:
 
 Run a daily-style complete report manually:
 .\D4A-ScheduledMonitor.ps1 -SendDailySummaryEmail
+
+Run a concise Discord-only status report, including healthy endpoint, service,
+CPU, memory, and disk results:
+.\D4A-ScheduledMonitor.ps1 -SendDiscordStatus
 
 Test one site temporarily without changing the configured default:
 .\D4A-ScheduledMonitor.ps1 -SiteAddress 'https://akbou.decide4action.com' -SendTestResultsEmail
@@ -4246,7 +4258,7 @@ function Limit-DiscordText {
 
 function Get-DiscordNotificationColor {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily')][string]$NotificationType,
+        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily', 'Status')][string]$NotificationType,
         [object[]]$IssueResults
     )
 
@@ -4254,6 +4266,12 @@ function Get-DiscordNotificationColor {
         'Recovery' { return 3066993 } # Green
         'Test' { return 3447003 }     # Blue
         'Daily' { return 10181046 }   # Purple
+        'Status' {
+            $severities = @($IssueResults | ForEach-Object { [string]$_.Severity })
+            if ($severities.Count -eq 0) { return 3066993 } # Green
+            if ($severities -contains 'Error' -or $severities -contains 'Alert') { return 15158332 } # Red
+            return 15844367 # Yellow
+        }
         default {
             $severities = @($IssueResults | ForEach-Object { [string]$_.Severity })
             if ($severities -contains 'Error' -or $severities -contains 'Alert') { return 15158332 } # Red
@@ -4262,11 +4280,24 @@ function Get-DiscordNotificationColor {
     }
 }
 
+function Format-DiscordStatusField {
+    param(
+        [object[]]$Results,
+        [Parameter(Mandatory = $true)][string]$Fallback
+    )
+
+    $items = @($Results | Select-Object -First 4 | ForEach-Object {
+            '**{0}** - {1}: {2}' -f $_.Severity, $_.Check, $_.Message
+        })
+    if ($items.Count -eq 0) { return $Fallback }
+    return Limit-DiscordText -Text ($items -join "`n") -MaximumLength 850
+}
+
 function New-DiscordNotificationPayload {
     param(
         [Parameter(Mandatory = $true)][string]$MonitoredSite,
         [Parameter(Mandatory = $true)][string]$MonitoringName,
-        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily')][string]$NotificationType,
+        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily', 'Status')][string]$NotificationType,
         [object[]]$RecoveryResults
     )
 
@@ -4290,6 +4321,7 @@ function New-DiscordNotificationPayload {
         'Recovery' { Get-MonitorRecoverySubjectLabel -RecoveryResults $recoveryResults }
         'Test' { 'Monitoring Test Results' }
         'Daily' { 'Daily Monitoring Results' }
+        'Status' { 'Monitoring Status' }
     }
     $title = Limit-DiscordText -Text ('{0} - {1}' -f $notificationLabel, $MonitoringName) -MaximumLength 256
     $fields = [System.Collections.Generic.List[object]]::new()
@@ -4301,7 +4333,33 @@ function New-DiscordNotificationPayload {
             inline = $false
         }) | Out-Null
 
-    if ($issueResults.Count -eq 0) {
+    if ($NotificationType -eq 'Status') {
+        $endpointResults = @($allResults | Where-Object {
+                $_.Category -eq 'Application' -and $_.Check -in @('Frontend', 'API')
+            })
+        $serviceResults = @($allResults | Where-Object {
+                $_.Category -eq 'Server' -and $_.Check -match '(?i)service|listener'
+            })
+        $resourceResults = @($allResults | Where-Object {
+                $_.Category -eq 'Server' -and $_.Check -in @('Memory', 'CPU', 'Disks')
+            })
+        $fields.Add([ordered]@{
+                name = 'Endpoint availability'
+                value = Format-DiscordStatusField -Results $endpointResults -Fallback 'No endpoint results were produced.'
+                inline = $false
+            }) | Out-Null
+        $fields.Add([ordered]@{
+                name = 'Service status'
+                value = Format-DiscordStatusField -Results $serviceResults -Fallback 'No service results were produced.'
+                inline = $false
+            }) | Out-Null
+        $fields.Add([ordered]@{
+                name = 'Resource usage'
+                value = Format-DiscordStatusField -Results $resourceResults -Fallback 'No CPU, memory, or disk results were produced.'
+                inline = $false
+            }) | Out-Null
+    }
+    elseif ($issueResults.Count -eq 0) {
         $fields.Add([ordered]@{
                 name = 'Result'
                 value = 'All monitored checks completed successfully.'
@@ -4330,11 +4388,13 @@ function New-DiscordNotificationPayload {
         }
     }
 
-    $fields.Add([ordered]@{
-            name = 'Monitoring logs'
-            value = Limit-DiscordText -Text ('`{0}`' -f $script:ErrorLogPath) -MaximumLength 400
-            inline = $false
-        }) | Out-Null
+    if ($NotificationType -ne 'Status') {
+        $fields.Add([ordered]@{
+                name = 'Monitoring logs'
+                value = Limit-DiscordText -Text ('`{0}`' -f $script:ErrorLogPath) -MaximumLength 400
+                inline = $false
+            }) | Out-Null
+    }
 
     return [ordered]@{
         username = 'D4A Monitoring'
@@ -4469,11 +4529,25 @@ function Invoke-D4AMonitor {
     Write-RunLog -Category Monitor -Message ('Monitoring logs={0}' -f $script:MonitorLogDirectory) -Color DarkGray
     Write-RunLog -Category Monitor -Message ('Monitor summary log={0}' -f $script:RunLogPath) -Color DarkGray
 
-    if ($DisableEmail.IsPresent -and
-        ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent) -and
+    if ($SendDiscordStatus.IsPresent -and
+        ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            'Use -SendDiscordStatus by itself; it cannot be combined with test or daily email reports.'
+        )
+        return
+    }
+    if ($SendDiscordStatus.IsPresent -and
         ($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl))) {
         Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
-            '-DisableEmail requires a configured DiscordWebhookUrl when sending test or daily results.'
+            '-SendDiscordStatus requires a configured DiscordWebhookUrl and cannot be used with -DisableDiscord.'
+        )
+        return
+    }
+    if ($DisableEmail.IsPresent -and
+        ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent -or $SendDiscordStatus.IsPresent) -and
+        ($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl))) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            '-DisableEmail requires a configured DiscordWebhookUrl when sending test, daily, or Discord status results.'
         )
         return
     }
@@ -4516,14 +4590,15 @@ function Invoke-D4AMonitor {
                 Label       = $resolvedSiteNames[$index]
             }) | Out-Null
         }
-        Write-RunLog -Category Configuration -Message ('MonitoringName={0}; Sites={1}; APIs={2}; email recipient={3}; Discord={4}; test notification={5}; daily summary={6}' -f
+        Write-RunLog -Category Configuration -Message ('MonitoringName={0}; Sites={1}; APIs={2}; email recipient={3}; Discord={4}; test notification={5}; daily summary={6}; Discord status={7}' -f
             $resolvedMonitoringName,
             (($monitorEndpoints | ForEach-Object { $_.FrontendUri.AbsoluteUri }) -join ', '),
             (($monitorEndpoints | ForEach-Object { $_.ApiUri.AbsoluteUri }) -join ', '),
             $NotificationTo,
             (Get-DiscordDeliveryConfigurationStatus),
             $SendTestResultsEmail.IsPresent,
-            $SendDailySummaryEmail.IsPresent) -Color White
+            $SendDailySummaryEmail.IsPresent,
+            $SendDiscordStatus.IsPresent) -Color White
     }
     catch {
         Add-MonitorResult -Severity Error -Category Configuration -Check 'Site address' -Message $_.Exception.Message
@@ -4619,13 +4694,15 @@ function Invoke-D4AMonitor {
         else {
             'Recovery'
         }
+        $discordNotificationType = if ($SendDiscordStatus.IsPresent) { 'Status' } else { $emailType }
         $notificationRequested = (
             $SendTestResultsEmail.IsPresent -or
             $SendDailySummaryEmail.IsPresent -or
+            $SendDiscordStatus.IsPresent -or
             $unignoredNotifiableIssues.Count -gt 0 -or
             $recoveredNotifiedIssues.Count -gt 0
         )
-        $shouldSendEmail = -not $DisableEmail.IsPresent -and $notificationRequested
+        $shouldSendEmail = -not $DisableEmail.IsPresent -and -not $SendDiscordStatus.IsPresent -and $notificationRequested
         $shouldSendDiscord = -not $DisableDiscord.IsPresent -and
             -not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl) -and
             $notificationRequested
@@ -4671,10 +4748,10 @@ function Invoke-D4AMonitor {
                     $discordPayload = New-DiscordNotificationPayload `
                         -MonitoredSite $siteForNotification `
                         -MonitoringName $resolvedMonitoringName `
-                        -NotificationType $emailType `
+                        -NotificationType $discordNotificationType `
                         -RecoveryResults $recoveredNotifiedIssues
                     Write-RunLog -Category Discord -Color Cyan -Message (
-                        'Sending Discord notification; type={0}; component(s) are included in the formatted message.' -f $emailType
+                        'Sending Discord notification; type={0}; component(s) are included in the formatted message.' -f $discordNotificationType
                     )
                     $discordDelivery = Send-MonitorDiscordNotification -Payload $discordPayload
                     Write-RunLog -Level OK -Category Discord -Color Green -Message (

@@ -46,6 +46,8 @@ At startup, IT Tools resolves the latest `main` commit through GitHub, then comp
 
 Deployed monitoring scripts update independently. New deployments use `D4A-ScheduledMonitor.ps1`. At the beginning of every scheduled or manual monitor run, the monitor compares its embedded version with `monitor-version.txt`, then verifies its matching definition and file hash in `update-manifest.json`. A newer verified monitor replaces the installed script at the same path after backing up its script, configuration, and related Scheduled Task definitions. Existing `D4A-ScheduledMonitor-v5.ps1`, `v6`, and other versioned filenames remain supported and update in place without changing their Scheduled Task path. The current health check finishes with the existing code; the next scheduled run uses the new version. Use `-SkipAutomaticUpdate` only for a troubleshooting run.
 
+To verify healthy operation in Discord without sending an email, use **Site Monitoring > Execute Monitoring Commands > Run monitoring and send concise Discord status**. The action runs the full scan and sends endpoint availability, service status, and CPU, memory, and disk usage to the configured webhook.
+
 If the script folder is not writable, run PowerShell as Administrator or move the full toolkit to a user-owned folder. Do not manually combine files from different releases.
 
 Before a planned production rollout, review [`CHANGELOG.md`](../CHANGELOG.md) for significant new features, behavior changes, and corrections. The changelog is informational; the updater relies on `version.txt` and `update-manifest.json` for version and integrity decisions.
