@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.1.1
+# D4A-Monitor-Version: 7.1.2
 # D4A-Monitor-Release-Date: 2026-08-31
 
 <#
@@ -240,7 +240,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.1.1'
+$script:MonitorVersion = '7.1.2'
 $script:MonitorReleaseDate = '2026-08-31'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1762,7 +1762,7 @@ function Initialize-MonitorLogging {
 
 function Get-MonitorRuntimeState {
     $defaultState = [pscustomobject]@{
-        StateVersion = 3
+        StateVersion = 4
         DataCollectorLastEvent = [pscustomobject]@{
             ConsecutiveFailures = 0
             LastHealthy         = $null
@@ -1803,11 +1803,16 @@ function Get-MonitorRuntimeState {
         else {
             $state.NotifiedIssues = @($state.NotifiedIssues)
         }
+        foreach ($notifiedIssue in @($state.NotifiedIssues)) {
+            if ($null -ne $notifiedIssue -and $null -eq $notifiedIssue.PSObject.Properties['LastMessage']) {
+                $notifiedIssue | Add-Member -MemberType NoteProperty -Name LastMessage -Value ''
+            }
+        }
         if ($null -eq $state.PSObject.Properties['StateVersion']) {
-            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 3
+            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 4
         }
         else {
-            $state.StateVersion = 3
+            $state.StateVersion = 4
         }
         return $state
     }
@@ -2333,16 +2338,16 @@ function Remove-ResolvedAutomaticIssueCooldowns {
 
 function Get-RecoveredNotifiedIssues {
     $state = Get-MonitorRuntimeState
-    $healthyKeys = @{}
+    $healthyResultsByKey = @{}
     foreach ($result in @($script:Results | Where-Object { $_.Severity -eq 'OK' })) {
-        $healthyKeys[(ConvertTo-IgnoreRuleKey -Value $result.Key)] = $true
+        $healthyResultsByKey[(ConvertTo-IgnoreRuleKey -Value $result.Key)] = $result
     }
 
     $recovered = [System.Collections.Generic.List[object]]::new()
     foreach ($notifiedIssue in @($state.NotifiedIssues)) {
         if ($null -eq $notifiedIssue -or [string]::IsNullOrWhiteSpace([string]$notifiedIssue.Key)) { continue }
         $key = ConvertTo-IgnoreRuleKey -Value ([string]$notifiedIssue.Key)
-        if (-not $healthyKeys.ContainsKey($key)) { continue }
+        if (-not $healthyResultsByKey.ContainsKey($key)) { continue }
 
         $lastNotified = if ([string]::IsNullOrWhiteSpace([string]$notifiedIssue.LastNotifiedAt)) {
             'unknown time'
@@ -2350,12 +2355,22 @@ function Get-RecoveredNotifiedIssues {
         else {
             [string]$notifiedIssue.LastNotifiedAt
         }
+        $previousValue = if ($null -eq $notifiedIssue.PSObject.Properties['LastMessage'] -or
+            [string]::IsNullOrWhiteSpace([string]$notifiedIssue.LastMessage)) {
+            'Not available: this alert was sent before recovery measurements were stored.'
+        }
+        else {
+            [string]$notifiedIssue.LastMessage
+        }
+        $currentValue = [string]$healthyResultsByKey[$key].Message
         $recovered.Add([pscustomobject]@{
                 Time                 = Get-Date
                 Severity             = 'OK'
                 Category             = [string]$notifiedIssue.Category
                 Check                = [string]$notifiedIssue.Check
                 Message              = ('Recovery confirmed after a previous {0} notification sent at {1}.' -f $notifiedIssue.Severity, $lastNotified)
+                PreviousValue        = $previousValue
+                CurrentValue         = $currentValue
                 Key                  = $key
                 IgnoreActive         = $false
                 IgnoreMode           = $null
@@ -2397,6 +2412,7 @@ function Update-NotifiedIssueStateAfterDelivery {
             Check          = [string]$issue.Check
             Severity       = [string]$issue.Severity
             LastNotifiedAt = (Get-Date).ToString('o')
+            LastMessage    = [string]$issue.Message
         }
     }
 
@@ -4426,7 +4442,7 @@ function New-DiscordNotificationPayload {
             $component = Get-MonitorSubjectComponentLabel -Result $recovery
             $fields.Add([ordered]@{
                     name = Limit-DiscordText -Text (':green_circle: Recovery | {0}' -f $component) -MaximumLength 100
-                    value = Limit-DiscordText -Text ("**Check:** {0}`n**Status:** {1}`n**Rule:** ``{2}``" -f $recovery.Check, $recovery.Message, $recovery.Key) -MaximumLength 700 -PreserveLineBreaks
+                    value = Limit-DiscordText -Text ("**Check:** {0}`n**Alert value:** {1}`n**Current value:** {2}`n**Status:** {3}`n**Rule:** ``{4}``" -f $recovery.Check, $recovery.PreviousValue, $recovery.CurrentValue, $recovery.Message, $recovery.Key) -MaximumLength 900 -PreserveLineBreaks
                     inline = $false
                 }) | Out-Null
         }
