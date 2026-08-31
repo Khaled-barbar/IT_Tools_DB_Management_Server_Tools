@@ -1,18 +1,18 @@
 {
   "schemaVersion": 2,
-  "version": "7.2.3",
-  "releaseDate": "2026-08-28",
+  "version": "7.3.0",
+  "releaseDate": "2026-08-31",
   "monitoring": {
-    "version": "7.0.1",
-    "releaseDate": "2026-08-28",
+    "version": "7.1.0",
+    "releaseDate": "2026-08-31",
     "scriptPath": "D4A-ScheduledMonitor-v5.ps1",
-    "sha256": "E9B1CE0A8F074A5E1CFE8423268C2961473F241C238A76054CA3EA08C34816AA"
+    "sha256": "BCB985E5321360466C9F557C544C85B8644CA0AAD1AD4408EDDCDD40CDFA5A26"
   },
   "canonicalMonitoring": {
-    "version": "7.0.1",
-    "releaseDate": "2026-08-28",
+    "version": "7.1.0",
+    "releaseDate": "2026-08-31",
     "scriptPath": "D4A-ScheduledMonitor.ps1",
-    "sha256": "E9B1CE0A8F074A5E1CFE8423268C2961473F241C238A76054CA3EA08C34816AA"
+    "sha256": "BCB985E5321360466C9F557C544C85B8644CA0AAD1AD4408EDDCDD40CDFA5A26"
   },
   "files": [
     {
@@ -25,19 +25,19 @@
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
-      "sha256": "E9B1CE0A8F074A5E1CFE8423268C2961473F241C238A76054CA3EA08C34816AA"
+      "sha256": "BCB985E5321360466C9F557C544C85B8644CA0AAD1AD4408EDDCDD40CDFA5A26"
     },
     {
       "path": "D4A-ScheduledMonitor.ps1",
-      "sha256": "E9B1CE0A8F074A5E1CFE8423268C2961473F241C238A76054CA3EA08C34816AA"
+      "sha256": "BCB985E5321360466C9F557C544C85B8644CA0AAD1AD4408EDDCDD40CDFA5A26"
     },
     {
       "path": "monitor-version.txt",
-      "sha256": "318630F32C0DAC5C715D91AECFF9C07B2CE055B792CCB015A815CB013EA80FC6"
+      "sha256": "DA047E879EC2D0884AB8E8937D816ADDDAAD831420C84EACA1A63DB5A9B4436D"
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "281D9631A282A1787B0E41292ED8BEE860FF8868B5A3FFEA83313A3F1274B598"
+      "sha256": "B6DDD3264475A363C48842C63FEED0F09875C9B1ABB0FDAED9FF91CBEB8E98AC"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",

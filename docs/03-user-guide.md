@@ -48,6 +48,8 @@ Deployed monitoring scripts update independently. New deployments use `D4A-Sched
 
 To verify healthy operation in Discord without sending an email, use **Site Monitoring > Execute Monitoring Commands > Run monitoring and send concise Discord status**. The action runs the full scan and sends endpoint availability, service status, and CPU, memory, and disk usage to the configured webhook.
 
+During **Add New Site Monitoring**, enter the Discord webhook URL after the email recipients, or press Enter to skip Discord. The wizard accepts `P` to return to the previous answer before deployment begins; use `q` to cancel safely. The webhook is stored only in `monitor-logs\D4A-ScheduledMonitor.config.json` and is not displayed in the deployment summary or written to logs.
+
 If the script folder is not writable, run PowerShell as Administrator or move the full toolkit to a user-owned folder. Do not manually combine files from different releases.
 
 Before a planned production rollout, review [`CHANGELOG.md`](../CHANGELOG.md) for significant new features, behavior changes, and corrections. The changelog is informational; the updater relies on `version.txt` and `update-manifest.json` for version and integrity decisions.

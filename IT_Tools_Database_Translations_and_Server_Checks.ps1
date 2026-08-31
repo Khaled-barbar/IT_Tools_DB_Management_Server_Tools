@@ -55,8 +55,8 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.2.3'
-$Script:ToolReleaseDate = '2026-08-28'
+$Script:ToolVersion = [version]'7.3.0'
+$Script:ToolReleaseDate = '2026-08-31'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1497,8 +1497,9 @@ function Read-SiteMonitoringHosts {
     while ($true) {
         Write-Host "Site examples: hostname:1200 or akbou.decide4action.com" -ForegroundColor Gray
         Write-Host "For multiple frontend sites, separate entries with a comma. The matching API health endpoint is added automatically." -ForegroundColor Gray
-        $hosts = Read-Host "Enter the site address(es), or press Enter for hostname:1200 (q to go back)"
+        $hosts = Read-Host "Enter the site address(es), or press Enter for hostname:1200 (q to go back; P to previous)"
         if (Test-IsBack $hosts) { return $null }
+        if ($hosts.Trim() -ieq 'p') { return '__D4A_PREVIOUS_STEP__' }
         if ([string]::IsNullOrWhiteSpace($hosts)) { return 'hostname:1200' }
 
         $hosts = Normalize-UserPath $hosts
@@ -1517,8 +1518,9 @@ function Read-SiteMonitoringNames {
     $siteNames = [System.Collections.Generic.List[string]]::new()
     foreach ($siteHost in $hostList) {
         while ($true) {
-            $name = Read-Host "Enter a friendly name for $siteHost, for example Akbou (q to go back)"
+            $name = Read-Host "Enter a friendly name for $siteHost, for example Akbou (q to go back; P to previous)"
             if (Test-IsBack $name) { return $null }
+            if ($name.Trim() -ieq 'p') { return '__D4A_PREVIOUS_STEP__' }
             $name = $name.Trim()
             if (-not [string]::IsNullOrWhiteSpace($name) -and $name -notmatch '[,\r\n]') {
                 $siteNames.Add($name) | Out-Null
@@ -1580,15 +1582,16 @@ function Read-SiteMonitoringFolder {
     while ($true) {
         if (-not [string]::IsNullOrWhiteSpace($DefaultFolder)) {
             Write-Host "Detected default Decide4Action Configuration folder: $DefaultFolder" -ForegroundColor Cyan
-            $folder = Read-Host "Press Enter to use this folder, or paste another existing folder path (q to go back)"
+            $folder = Read-Host "Press Enter to use this folder, or paste another existing folder path (q to go back; P to previous)"
             if ([string]::IsNullOrWhiteSpace($folder)) { return $DefaultFolder }
         }
         else {
             Write-Host "No Decide4Action Configuration folder was detected automatically." -ForegroundColor Yellow
-            $folder = Read-Host "Paste the existing folder where the monitor and nodemailer will be installed (q to go back)"
+            $folder = Read-Host "Paste the existing folder where the monitor and nodemailer will be installed (q to go back; P to previous)"
         }
 
         if (Test-IsBack $folder) { return $null }
+        if ($folder.Trim() -ieq 'p') { return '__D4A_PREVIOUS_STEP__' }
         $folder = Normalize-UserPath $folder
         if (Test-Path -LiteralPath $folder -PathType Container) {
             return (Get-Item -LiteralPath $folder -ErrorAction Stop).FullName
@@ -1616,8 +1619,9 @@ function Read-SiteMonitoringEmailAddresses {
     $defaultAddress = 'techsupport@decide4action.com'
     while ($true) {
         Write-Host "You can enter multiple email addresses separated by commas." -ForegroundColor Gray
-        $addresses = Read-Host "Notification email address(es) (default: $defaultAddress; q to go back)"
+        $addresses = Read-Host "Notification email address(es) (default: $defaultAddress; q to go back; P to previous)"
         if (Test-IsBack $addresses) { return $null }
+        if ($addresses.Trim() -ieq 'p') { return '__D4A_PREVIOUS_STEP__' }
         if ([string]::IsNullOrWhiteSpace($addresses)) { return $defaultAddress }
         $addresses = $addresses.Trim()
         if (Test-SiteMonitoringEmailAddresses -Addresses $addresses) {
@@ -1741,6 +1745,25 @@ function Get-SiteMonitoringTemplatePath {
         if (Test-Path -LiteralPath $temporaryFolder -PathType Container) {
             Remove-Item -LiteralPath $temporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+function Read-SiteMonitoringDiscordWebhook {
+    while ($true) {
+        Write-Host 'Paste the Discord webhook URL to enable Discord notifications, or press Enter to skip it.' -ForegroundColor Gray
+        $webhookUrl = Read-Host 'Discord webhook URL (q to go back; P to previous)'
+        if (Test-IsBack $webhookUrl) { return $null }
+        if ($webhookUrl.Trim() -ieq 'p') { return '__D4A_PREVIOUS_STEP__' }
+        if ([string]::IsNullOrWhiteSpace($webhookUrl)) { return '' }
+
+        try {
+            $uri = [Uri]$webhookUrl.Trim()
+            if ($uri.Scheme -eq 'https' -and $uri.Host -match '(?i)(?:^|\.)discord(?:app)?\.com$' -and $uri.AbsolutePath -match '^/api/webhooks/[^/]+/[^/]+') {
+                return $uri.AbsoluteUri
+            }
+        }
+        catch { }
+        Write-Host 'Enter a valid HTTPS Discord webhook URL, press Enter to skip, P to go back, or q to cancel.' -ForegroundColor Yellow
     }
 }
 
@@ -1907,7 +1930,8 @@ function New-SiteMonitoringConfigurationObject {
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
         [Parameter(Mandatory = $true)][string]$MonitorVersion,
-        [string]$NodeExecutable
+        [string]$NodeExecutable,
+        [string]$DiscordWebhookUrl
     )
 
     $siteAddresses = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -1927,6 +1951,7 @@ function New-SiteMonitoringConfigurationObject {
         SiteAddress          = $siteAddresses
         SiteDisplayNames     = $SiteNames
         NotificationTo       = @($NotificationAddresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        DiscordWebhookUrl    = $DiscordWebhookUrl
         D4AInstallRoot       = $installRoot
         LogDirectory        = $logDirectory
         WatchdogLogRoot     = Join-Path $installRoot 'Log\TaskSchedulerOutput'
@@ -2040,7 +2065,8 @@ function Set-SiteMonitoringDeploymentConfiguration {
         [Parameter(Mandatory = $true)][string[]]$SiteNames,
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
-        [string]$NodeExecutable
+        [string]$NodeExecutable,
+        [string]$DiscordWebhookUrl
     )
 
     $metadata = Get-SiteMonitoringScriptMetadata -ScriptPath $ScriptPath
@@ -2054,7 +2080,8 @@ function Set-SiteMonitoringDeploymentConfiguration {
         -NotificationAddresses $NotificationAddresses `
         -DeploymentFolder $DeploymentFolder `
         -MonitorVersion $metadata.VersionText `
-        -NodeExecutable $NodeExecutable
+        -NodeExecutable $NodeExecutable `
+        -DiscordWebhookUrl $DiscordWebhookUrl
     return Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $configurationPath
 }
 
@@ -2181,6 +2208,7 @@ function Get-SiteMonitoringConfigurationSummary {
         Hosts                 = $sites -join ','
         SiteNames             = $siteNames
         NotificationAddresses = $recipients -join ','
+        DiscordWebhookUrl     = if ($null -eq $configuration.PSObject.Properties['DiscordWebhookUrl']) { '' } else { [string]$configuration.DiscordWebhookUrl }
     }
 }
 
@@ -2833,19 +2861,63 @@ function Show-AddSiteMonitoring {
         $templatePath = Get-SiteMonitoringTemplatePath
         $templateMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $templatePath
 
-        $hosts = Read-SiteMonitoringHosts
-        if ($null -eq $hosts) { return }
-        $siteNames = Read-SiteMonitoringNames -Hosts $hosts
-        if ($null -eq $siteNames) { return }
-        $siteNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $hosts -SiteNames $siteNames
-
-        Write-StreamingLog -Percent 10 -Step "Detect" -Description "Looking for the Decide4Action Configuration folder from the Windows service."
-        $defaultFolder = Get-DefaultD4AConfigurationFolder
-        $deploymentFolder = Read-SiteMonitoringFolder -DefaultFolder $defaultFolder
-        if ($null -eq $deploymentFolder) { return }
-
-        $emailAddresses = Read-SiteMonitoringEmailAddresses
-        if ($null -eq $emailAddresses) { return }
+        $wizardStep = 1
+        $defaultFolder = $null
+        $discordWebhookUrl = ''
+        while ($wizardStep -le 5) {
+            switch ($wizardStep) {
+                1 {
+                    $hosts = Read-SiteMonitoringHosts
+                    if ($null -eq $hosts) { return }
+                    if ($hosts -eq '__D4A_PREVIOUS_STEP__') {
+                        Write-Host 'This is the first question. Enter the site address or type q to return.' -ForegroundColor Yellow
+                        continue
+                    }
+                    $wizardStep = 2
+                }
+                2 {
+                    $siteNames = Read-SiteMonitoringNames -Hosts $hosts
+                    if ($null -eq $siteNames) { return }
+                    if ($siteNames -eq '__D4A_PREVIOUS_STEP__') {
+                        $wizardStep = 1
+                        continue
+                    }
+                    $siteNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $hosts -SiteNames $siteNames
+                    $wizardStep = 3
+                }
+                3 {
+                    if ($null -eq $defaultFolder) {
+                        Write-StreamingLog -Percent 10 -Step 'Detect' -Description 'Looking for the Decide4Action Configuration folder from the Windows service.'
+                        $defaultFolder = Get-DefaultD4AConfigurationFolder
+                    }
+                    $deploymentFolder = Read-SiteMonitoringFolder -DefaultFolder $defaultFolder
+                    if ($null -eq $deploymentFolder) { return }
+                    if ($deploymentFolder -eq '__D4A_PREVIOUS_STEP__') {
+                        $wizardStep = 2
+                        continue
+                    }
+                    $wizardStep = 4
+                }
+                4 {
+                    $emailAddresses = Read-SiteMonitoringEmailAddresses
+                    if ($null -eq $emailAddresses) { return }
+                    if ($emailAddresses -eq '__D4A_PREVIOUS_STEP__') {
+                        $wizardStep = 3
+                        continue
+                    }
+                    $wizardStep = 5
+                }
+                5 {
+                    $discordWebhookUrl = Read-SiteMonitoringDiscordWebhook
+                    if ($null -eq $discordWebhookUrl) { return }
+                    if ($discordWebhookUrl -eq '__D4A_PREVIOUS_STEP__') {
+                        $wizardStep = 4
+                        continue
+                    }
+                    $wizardStep = 6
+                }
+            }
+        }
 
         $targetScriptPath = Join-Path $deploymentFolder ([IO.Path]::GetFileName($templatePath))
         $configurationPath = Get-SiteMonitoringConfigurationPath -DeploymentFolder $deploymentFolder
@@ -2863,6 +2935,7 @@ function Show-AddSiteMonitoring {
             $hosts = $existingSummary.Hosts
             $siteNames = @($existingSummary.SiteNames)
             $emailAddresses = $existingSummary.NotificationAddresses
+            $discordWebhookUrl = $existingSummary.DiscordWebhookUrl
             $siteNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $hosts -SiteNames $siteNames
             Write-Host ''
             Write-Host 'An incomplete deployment from a previous nodemailer failure was detected.' -ForegroundColor Yellow
@@ -2876,6 +2949,7 @@ function Show-AddSiteMonitoring {
         Write-Host "Site address(es): $hosts" -ForegroundColor White
         Write-Host "Friendly site name(s): $siteNameAssignments" -ForegroundColor White
         Write-Host "Notification email(s): $emailAddresses" -ForegroundColor White
+        Write-Host "Discord notifications: $(if ([string]::IsNullOrWhiteSpace($discordWebhookUrl)) { 'Not configured' } else { 'Configured' })" -ForegroundColor White
         Write-Host "Deployment folder: $deploymentFolder" -ForegroundColor White
         Write-Host "Monitor file: $targetScriptPath" -ForegroundColor White
         Write-Host "Configuration file: $configurationPath" -ForegroundColor White
@@ -2921,7 +2995,8 @@ function Show-AddSiteMonitoring {
                     -SiteNames $siteNames `
                     -NotificationAddresses $emailAddresses `
                     -DeploymentFolder $deploymentFolder `
-                    -NodeExecutable $nodeRuntime.NodePath
+                    -NodeExecutable $nodeRuntime.NodePath `
+                    -DiscordWebhookUrl $discordWebhookUrl
             }
             catch {
                 Remove-Item -LiteralPath $configurationPath -Force -ErrorAction SilentlyContinue

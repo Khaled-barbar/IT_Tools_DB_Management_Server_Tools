@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.0.1
-# D4A-Monitor-Release-Date: 2026-08-28
+# D4A-Monitor-Version: 7.1.0
+# D4A-Monitor-Release-Date: 2026-08-31
 
 <#
 .SYNOPSIS
@@ -240,8 +240,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.0.1'
-$script:MonitorReleaseDate = '2026-08-28'
+$script:MonitorVersion = '7.1.0'
+$script:MonitorReleaseDate = '2026-08-31'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -4248,12 +4248,54 @@ function New-EmailContent {
 function Limit-DiscordText {
     param(
         [AllowNull()][string]$Text,
-        [ValidateRange(1, 4000)][int]$MaximumLength
+        [ValidateRange(1, 4000)][int]$MaximumLength,
+        [switch]$PreserveLineBreaks
     )
 
-    $normalizedText = if ($null -eq $Text) { '' } else { (($Text -replace '[\r\n]+', ' ') -replace '\s{2,}', ' ').Trim() }
+    $normalizedText = if ($null -eq $Text) {
+        ''
+    }
+    elseif ($PreserveLineBreaks.IsPresent) {
+        (($Text -replace '\r\n?', "`n") -replace "`n{3,}", "`n`n").Trim()
+    }
+    else {
+        (($Text -replace '[\r\n]+', ' ') -replace '\s{2,}', ' ').Trim()
+    }
     if ($normalizedText.Length -le $MaximumLength) { return $normalizedText }
     return $normalizedText.Substring(0, [Math]::Max(1, $MaximumLength - 3)).TrimEnd() + '...'
+}
+
+function Get-DiscordSeverityEmoji {
+    param([Parameter(Mandatory = $true)][object]$Result)
+
+    switch ([string]$Result.Severity) {
+        'OK' { return ':white_check_mark:' }
+        'Warning' { return ':warning:' }
+        'Alert' {
+            if ([string]$Result.Category -eq 'Application' -or [string]$Result.Check -match '(?i)frontend|api') {
+                return ':rotating_light: :red_circle:'
+            }
+            return ':rotating_light:'
+        }
+        'Error' { return ':rotating_light:' }
+        default { return ':information_source:' }
+    }
+}
+
+function Get-DiscordNotificationEmoji {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily', 'Status')][string]$NotificationType,
+        [object[]]$IssueResults
+    )
+
+    if ($NotificationType -eq 'Recovery') { return ':green_circle:' }
+    if ($NotificationType -eq 'Status') { return ':white_check_mark:' }
+    if ($NotificationType -in @('Test', 'Daily')) { return ':information_source:' }
+    $criticalIssues = @($IssueResults | Where-Object { [string]$_.Severity -in @('Alert', 'Error') })
+    if ($criticalIssues.Count -eq 0 -and @($IssueResults | Where-Object { [string]$_.Severity -eq 'Warning' }).Count -gt 0) { return ':warning:' }
+    $siteIssue = @($criticalIssues | Where-Object { [string]$_.Category -eq 'Application' })
+    if ($siteIssue.Count -gt 0) { return ':rotating_light: :red_circle:' }
+    return ':rotating_light:'
 }
 
 function Get-DiscordNotificationColor {
@@ -4287,10 +4329,10 @@ function Format-DiscordStatusField {
     )
 
     $items = @($Results | Select-Object -First 4 | ForEach-Object {
-            '**{0}** - {1}: {2}' -f $_.Severity, $_.Check, $_.Message
+            '{0} **{1}**`n{2}' -f (Get-DiscordSeverityEmoji -Result $_), $_.Check, $_.Message
         })
     if ($items.Count -eq 0) { return $Fallback }
-    return Limit-DiscordText -Text ($items -join "`n") -MaximumLength 850
+    return Limit-DiscordText -Text ($items -join "`n`n") -MaximumLength 850 -PreserveLineBreaks
 }
 
 function New-DiscordNotificationPayload {
@@ -4314,7 +4356,8 @@ function New-DiscordNotificationPayload {
     }
     $issueResults = @($reportResults | Where-Object { $_.Severity -ne 'OK' })
     $distinctIssues = @($issueResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })
-    $componentLabels = @($distinctIssues | ForEach-Object { Get-MonitorSubjectComponentLabel -Result $_ } | Select-Object -Unique)
+    $subjectResults = if ($NotificationType -eq 'Recovery') { $recoveryResults } else { $distinctIssues }
+    $componentLabels = @($subjectResults | ForEach-Object { Get-MonitorSubjectComponentLabel -Result $_ } | Select-Object -Unique)
     $componentText = if ($componentLabels.Count -eq 0) { 'No active issue' } elseif ($componentLabels.Count -eq 1) { $componentLabels[0] } else { $componentLabels -join ', ' }
     $notificationLabel = switch ($NotificationType) {
         'Alert' { Get-MonitorAlertSubjectLabel -IssueResults $distinctIssues }
@@ -4323,25 +4366,33 @@ function New-DiscordNotificationPayload {
         'Daily' { 'Daily Monitoring Results' }
         'Status' { 'Monitoring Status' }
     }
-    $title = Limit-DiscordText -Text ('{0} - {1}' -f $notificationLabel, $MonitoringName) -MaximumLength 256
+    $title = Limit-DiscordText -Text ('{0} {1} - {2}' -f (Get-DiscordNotificationEmoji -NotificationType $NotificationType -IssueResults $distinctIssues), $notificationLabel, $MonitoringName) -MaximumLength 256
     $fields = [System.Collections.Generic.List[object]]::new()
     $fields.Add([ordered]@{
             name = 'Notification'
             value = Limit-DiscordText -Text (
-                "**Type:** $NotificationType`n**Affected component(s):** $componentText`n**Server:** $env:COMPUTERNAME`n**Detected:** $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))"
-            ) -MaximumLength 600
+                "**Type:** $NotificationType`n**Affected component(s):** $componentText`n**Server:** $env:COMPUTERNAME`n**Time:** $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))"
+            ) -MaximumLength 600 -PreserveLineBreaks
             inline = $false
         }) | Out-Null
 
-    if ($NotificationType -eq 'Status') {
-        $endpointResults = @($allResults | Where-Object {
-                $_.Category -eq 'Application' -and $_.Check -in @('Frontend', 'API')
-            })
+    if ($NotificationType -eq 'Recovery') {
+        foreach ($recovery in @($recoveryResults | Select-Object -First 5)) {
+            $component = Get-MonitorSubjectComponentLabel -Result $recovery
+            $fields.Add([ordered]@{
+                    name = Limit-DiscordText -Text (':green_circle: Recovery | {0}' -f $component) -MaximumLength 100
+                    value = Limit-DiscordText -Text ("**Check:** {0}`n**Status:** {1}`n**Rule:** ``{2}``" -f $recovery.Check, $recovery.Message, $recovery.Key) -MaximumLength 700 -PreserveLineBreaks
+                    inline = $false
+                }) | Out-Null
+        }
+    }
+    elseif ($NotificationType -eq 'Status') {
+        $endpointResults = @($allResults | Where-Object { $_.Category -eq 'Application' })
         $serviceResults = @($allResults | Where-Object {
                 $_.Category -eq 'Server' -and $_.Check -match '(?i)service|listener'
             })
         $resourceResults = @($allResults | Where-Object {
-                $_.Category -eq 'Server' -and $_.Check -in @('Memory', 'CPU', 'Disks')
+                $_.Category -eq 'Server' -and $_.Check -in @('Memory', 'CPU', 'Disk space')
             })
         $fields.Add([ordered]@{
                 name = 'Endpoint availability'
@@ -4362,17 +4413,17 @@ function New-DiscordNotificationPayload {
     elseif ($issueResults.Count -eq 0) {
         $fields.Add([ordered]@{
                 name = 'Result'
-                value = 'All monitored checks completed successfully.'
+                value = ':white_check_mark: All monitored checks completed successfully.'
                 inline = $false
             }) | Out-Null
     }
     else {
         foreach ($result in @($distinctIssues | Select-Object -First 5)) {
             $component = Get-MonitorSubjectComponentLabel -Result $result
-            $fieldName = Limit-DiscordText -Text ('{0} | {1}' -f $result.Severity, $component) -MaximumLength 100
+            $fieldName = Limit-DiscordText -Text ('{0} {1} | {2}' -f (Get-DiscordSeverityEmoji -Result $result), $result.Severity, $component) -MaximumLength 100
             $fieldValue = Limit-DiscordText -Text (
                 "**Check:** $($result.Check)`n**Details:** $($result.Message)`n**Rule:** $(( '`{0}`' -f $result.Key ))"
-            ) -MaximumLength 700
+            ) -MaximumLength 700 -PreserveLineBreaks
             $fields.Add([ordered]@{
                     name = $fieldName
                     value = $fieldValue
@@ -4402,7 +4453,7 @@ function New-DiscordNotificationPayload {
         embeds = @([ordered]@{
                 title = $title
                 color = Get-DiscordNotificationColor -NotificationType $NotificationType -IssueResults $issueResults
-                description = Limit-DiscordText -Text ('**Site:** {0}`n**Monitoring name:** {1}' -f $MonitoredSite, $MonitoringName) -MaximumLength 900
+                description = Limit-DiscordText -Text ("**Site:** {0}`n**Monitoring name:** {1}" -f $MonitoredSite, $MonitoringName) -MaximumLength 900 -PreserveLineBreaks
                 fields = @($fields.ToArray())
                 footer = [ordered]@{ text = ('D4A Monitoring | Version {0}' -f $script:MonitorVersion) }
                 timestamp = [DateTime]::UtcNow.ToString('o')
@@ -4428,7 +4479,7 @@ function Send-MonitorDiscordNotification {
         $request.Method = 'POST'
         $request.ContentType = 'application/json; charset=utf-8'
         $request.Accept = 'application/json'
-        $request.UserAgent = 'D4A-ScheduledMonitor/6.10'
+        $request.UserAgent = 'D4A-ScheduledMonitor/{0}' -f $script:MonitorVersion
         $request.Timeout = $DiscordTimeoutSeconds * 1000
         $request.ReadWriteTimeout = $DiscordTimeoutSeconds * 1000
         $payloadBytes = $script:Utf8NoBom.GetBytes(($Payload | ConvertTo-Json -Depth 8 -Compress))

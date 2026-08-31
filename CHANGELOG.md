@@ -6,6 +6,14 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.3.0 - 2026-08-31
+
+### Monitoring 7.1.0 - 2026-08-31
+
+- Reworked Discord embeds with preserved line breaks, readable sections, and Discord-rendered severity markers for alerts, warnings, site/API outages, and recovery notifications.
+- Added an optional Discord webhook step to the new-monitor deployment wizard. The URL is validated, stored only in the local JSON configuration, and never displayed, logged, or committed.
+- Added `P` navigation to return to the previous answer during the safe monitoring-deployment selection wizard before files, packages, or Scheduled Tasks are changed.
+
 ## 7.2.3 - 2026-08-28
 
 ### Monitoring 7.0.1 - 2026-08-28
