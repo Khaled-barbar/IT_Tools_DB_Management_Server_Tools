@@ -55,7 +55,7 @@ $Global:PlainPass        = ""
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.3.0'
+$Script:ToolVersion = [version]'7.3.1'
 $Script:ToolReleaseDate = '2026-08-31'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1951,7 +1951,10 @@ function New-SiteMonitoringConfigurationObject {
         SiteAddress          = $siteAddresses
         SiteDisplayNames     = $SiteNames
         NotificationTo       = @($NotificationAddresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        DiscordWebhookUrl    = $DiscordWebhookUrl
+        # This is intentionally a valid JSON placeholder, not a credential.
+        # The monitor treats it as disabled until the user replaces it.
+        DiscordWebhookUrl     = if ([string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) { 'your Discord webhook URL' } else { $DiscordWebhookUrl }
+        DiscordWebhookUrlNote = 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.'
         D4AInstallRoot       = $installRoot
         LogDirectory        = $logDirectory
         WatchdogLogRoot     = Join-Path $installRoot 'Log\TaskSchedulerOutput'
@@ -2949,7 +2952,8 @@ function Show-AddSiteMonitoring {
         Write-Host "Site address(es): $hosts" -ForegroundColor White
         Write-Host "Friendly site name(s): $siteNameAssignments" -ForegroundColor White
         Write-Host "Notification email(s): $emailAddresses" -ForegroundColor White
-        Write-Host "Discord notifications: $(if ([string]::IsNullOrWhiteSpace($discordWebhookUrl)) { 'Not configured' } else { 'Configured' })" -ForegroundColor White
+        $discordConfigured = -not [string]::IsNullOrWhiteSpace($discordWebhookUrl) -and $discordWebhookUrl -ine 'your Discord webhook URL'
+        Write-Host "Discord notifications: $(if ($discordConfigured) { 'Configured' } else { 'Not configured' })" -ForegroundColor White
         Write-Host "Deployment folder: $deploymentFolder" -ForegroundColor White
         Write-Host "Monitor file: $targetScriptPath" -ForegroundColor White
         Write-Host "Configuration file: $configurationPath" -ForegroundColor White

@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.1.0
+# D4A-Monitor-Version: 7.1.1
 # D4A-Monitor-Release-Date: 2026-08-31
 
 <#
@@ -240,7 +240,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.1.0'
+$script:MonitorVersion = '7.1.1'
 $script:MonitorReleaseDate = '2026-08-31'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -624,12 +624,18 @@ function Set-MonitorInstalledReleaseMetadata {
 
     $configuration = Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath
     foreach ($property in @(
+            [pscustomobject]@{ Name = 'DiscordWebhookUrl'; Value = 'your Discord webhook URL' },
+            [pscustomobject]@{ Name = 'DiscordWebhookUrlNote'; Value = 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.' },
             [pscustomobject]@{ Name = 'InstalledMonitorVersion'; Value = $Version.ToString() },
             [pscustomobject]@{ Name = 'InstalledMonitorReleaseDate'; Value = $ReleaseDate },
             [pscustomobject]@{ Name = 'LastMonitorUpdate'; Value = (Get-Date).ToString('o') }
         )) {
         if ($null -eq $configuration.PSObject.Properties[$property.Name]) {
             $configuration | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value
+        }
+        elseif ($property.Name -in @('DiscordWebhookUrl', 'DiscordWebhookUrlNote')) {
+            # Preserve a configured webhook; only add missing defaults.
+            continue
         }
         else {
             $configuration.($property.Name) = $property.Value
@@ -805,7 +811,9 @@ function Repair-MonitorTextEncoding {
     $repairedValue = $Value
     $legacyEncoding = [Text.Encoding]::GetEncoding(1252)
     $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
-    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    # Older configurations can have passed through more than one ANSI/UTF-8
+    # conversion. Continue only while each pass measurably reduces corruption.
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
         $currentScore = Get-MonitorTextMojibakeScore -Value $repairedValue
         if ($currentScore -eq 0) { break }
         try {
@@ -889,7 +897,15 @@ function Convert-MonitorConfigurationValue {
             if ([string]::IsNullOrWhiteSpace($pathValue)) { return '' }
             return [Environment]::ExpandEnvironmentVariables($pathValue)
         }
-        default { return (Repair-MonitorTextEncoding -Value ([string]$Value)).Trim() }
+        default {
+            $textValue = (Repair-MonitorTextEncoding -Value ([string]$Value)).Trim()
+            if ($Name -eq 'DiscordWebhookUrl' -and $textValue -ieq 'your Discord webhook URL') {
+                # The generated JSON uses a visible placeholder that must not
+                # be treated as a configured credential.
+                return ''
+            }
+            return $textValue
+        }
     }
 }
 
@@ -914,6 +930,34 @@ function Get-DiscordDeliveryConfigurationStatus {
     return 'Configured'
 }
 
+function Ensure-MonitorConfigurationDefaults {
+    param([Parameter(Mandatory = $true)][object]$Configuration)
+
+    $changed = $false
+    if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrl']) {
+        # JSON does not support comments. The visible placeholder keeps the
+        # setting easy to find while remaining safely disabled at runtime.
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'DiscordWebhookUrl' -Value 'your Discord webhook URL'
+        $changed = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrlNote']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'DiscordWebhookUrlNote' -Value 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.'
+        $changed = $true
+    }
+
+    if ($changed -and -not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
+        $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        try {
+            [IO.File]::WriteAllText($temporaryConfigPath, ($Configuration | ConvertTo-Json -Depth 12) + [Environment]::NewLine, $script:Utf8NoBom)
+            Copy-Item -LiteralPath $temporaryConfigPath -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop
+        }
+        finally {
+            Remove-Item -LiteralPath $temporaryConfigPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $Configuration
+}
+
 function Import-MonitorConfiguration {
     $script:ResolvedConfigPath = Resolve-MonitorConfigurationPath
     if (-not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
@@ -925,6 +969,7 @@ function Import-MonitorConfiguration {
 
     try {
         $configuration = Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath
+        $configuration = Ensure-MonitorConfigurationDefaults -Configuration $configuration
     }
     catch {
         throw "Unable to read monitor configuration '$($script:ResolvedConfigPath)': $($_.Exception.Message)"
@@ -4329,7 +4374,7 @@ function Format-DiscordStatusField {
     )
 
     $items = @($Results | Select-Object -First 4 | ForEach-Object {
-            '{0} **{1}**`n{2}' -f (Get-DiscordSeverityEmoji -Result $_), $_.Check, $_.Message
+            "{0} **{1}**`n{2}" -f (Get-DiscordSeverityEmoji -Result $_), $_.Check, $_.Message
         })
     if ($items.Count -eq 0) { return $Fallback }
     return Limit-DiscordText -Text ($items -join "`n`n") -MaximumLength 850 -PreserveLineBreaks
@@ -4371,7 +4416,7 @@ function New-DiscordNotificationPayload {
     $fields.Add([ordered]@{
             name = 'Notification'
             value = Limit-DiscordText -Text (
-                "**Type:** $NotificationType`n**Affected component(s):** $componentText`n**Server:** $env:COMPUTERNAME`n**Time:** $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz'))"
+                "**Type:** $NotificationType`n**Affected component(s):** $componentText`n**Server:** $env:COMPUTERNAME`n**Time:** $((Get-Date).ToString('ddd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))"
             ) -MaximumLength 600 -PreserveLineBreaks
             inline = $false
         }) | Out-Null

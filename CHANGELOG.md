@@ -6,6 +6,14 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.3.1 - 2026-08-31
+
+### Monitoring 7.1.1 - 2026-08-31
+
+- Corrected Discord embed rendering so line breaks and Markdown markers are sent as actual Discord formatting rather than literal PowerShell escape text.
+- Standardized the notification time as `DAY HH:MM:SS` and strengthened legacy UTF-8/Windows-1252 name repair for accented monitoring names.
+- Added a safe Discord webhook placeholder and explanatory note to new and automatically updated local monitoring configurations. The placeholder is not treated as a configured credential.
+
 ## 7.3.0 - 2026-08-31
 
 ### Monitoring 7.1.0 - 2026-08-31
