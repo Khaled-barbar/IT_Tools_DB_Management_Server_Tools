@@ -8,6 +8,12 @@ For project context, architecture, and operating procedures, see the [project ov
 
 ## 7.3.1 - 2026-08-31
 
+### Monitoring 7.2.0 - 2026-09-01
+
+- Corrected mojibake in recovery notifications by repairing historical alert state before rendering the check name, category, alert value, and current value.
+
+### Monitoring 7.1.2 - 2026-08-31
+
 ### Monitoring 7.1.2 - 2026-08-31
 
 - Recovery notifications now display the alert-time value and the current recovered value for resource, endpoint, and service checks. Existing alert state created by an earlier version remains compatible and identifies when an original measurement is unavailable.

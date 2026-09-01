@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.1.2
-# D4A-Monitor-Release-Date: 2026-08-31
+# D4A-Monitor-Version: 7.2.0
+# D4A-Monitor-Release-Date: 2026-09-01
 
 <#
 .SYNOPSIS
@@ -240,8 +240,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.1.2'
-$script:MonitorReleaseDate = '2026-08-31'
+$script:MonitorVersion = '7.2.0'
+$script:MonitorReleaseDate = '2026-09-01'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -2360,14 +2360,14 @@ function Get-RecoveredNotifiedIssues {
             'Not available: this alert was sent before recovery measurements were stored.'
         }
         else {
-            [string]$notifiedIssue.LastMessage
+            Repair-MonitorTextEncoding -Value ([string]$notifiedIssue.LastMessage)
         }
-        $currentValue = [string]$healthyResultsByKey[$key].Message
+        $currentValue = Repair-MonitorTextEncoding -Value ([string]$healthyResultsByKey[$key].Message)
         $recovered.Add([pscustomobject]@{
                 Time                 = Get-Date
                 Severity             = 'OK'
-                Category             = [string]$notifiedIssue.Category
-                Check                = [string]$notifiedIssue.Check
+                Category             = Repair-MonitorTextEncoding -Value ([string]$notifiedIssue.Category)
+                Check                = Repair-MonitorTextEncoding -Value ([string]$notifiedIssue.Check)
                 Message              = ('Recovery confirmed after a previous {0} notification sent at {1}.' -f $notifiedIssue.Severity, $lastNotified)
                 PreviousValue        = $previousValue
                 CurrentValue         = $currentValue
