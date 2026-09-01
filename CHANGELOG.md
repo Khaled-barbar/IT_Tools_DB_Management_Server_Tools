@@ -11,6 +11,10 @@ For project context, architecture, and operating procedures, see the [project ov
 - Extended user-initiated file searches, Data Collector event tracing, and recent-file scans to a finite 10-minute timeout, with clear progress messaging for large folders and logs.
 - Removed duplicate Monitoring release headings from the changelog.
 
+### Monitoring 7.3.0 - 2026-09-01
+
+- Added automatic database service monitoring for installed SQL Server Database Engine instances, SQL Server Agent instances, and SQL Server Browser. A detected service that is not `Running/OK` sends the existing service alert and recovery notification. SQL CEIP telemetry and SQL VSS Writer are excluded.
+
 ## 7.3.1 - 2026-08-31
 
 ### Monitoring 7.2.0 - 2026-09-01

@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.2.0
+# D4A-Monitor-Version: 7.3.0
 # D4A-Monitor-Release-Date: 2026-09-01
 
 <#
@@ -8,7 +8,8 @@
     optional Discord notifications.
 
 .DESCRIPTION
-    Runs application, service, resource, TLS, Nginx, and Windows event checks.
+    Runs application, service, SQL Server service, resource, TLS, Nginx, and
+    Windows event checks.
     Results are written to daily run_log and error_log files under monitor-logs.
     Monitoring logs are retained for five days by default.
 
@@ -240,7 +241,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.2.0'
+$script:MonitorVersion = '7.3.0'
 $script:MonitorReleaseDate = '2026-09-01'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1327,7 +1328,8 @@ D4A-ScheduledMonitor.ps1 checks D4A site availability and server health.
 It can check one or more frontend site addresses, the corresponding API health
 endpoints, TLS certificates, local D4A Windows services, the local API listener,
   CPU, memory, disk space, Nginx errors, relevant Windows events, and local
-  Decide4Action, Data Collector, MDC, PLC, and Mosquitto/MQTT services.
+  Decide4Action, Data Collector, MDC, PLC, Mosquitto/MQTT, SQL Server Database
+  Engine, SQL Server Agent, and SQL Server Browser services.
 
 Notification behavior
 ---------------------
@@ -1424,8 +1426,9 @@ only at 5 GB free or less, or when used space reaches 95 percent.
 NOTIFICATION AND RECOVERY POLICY
 ================================
 Relevant Windows event warnings and errors are always retained in error_log and
-daily/test reports, but they do not cause immediate email. D4A and Mosquitto
-service checks independently alert when a Windows service is not Running.
+daily/test reports, but they do not cause immediate email. D4A, SQL Server,
+and Mosquitto service checks independently alert when a Windows service is not
+Running.
 
 Disk usage does not generate warning emails. A critical alert is sent when a
 fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
@@ -1567,8 +1570,8 @@ function Get-MonitorLogsReadmeNotificationPolicy {
 NOTIFICATION AND RECOVERY POLICY
 ================================
 Relevant Windows event warnings and errors are always retained in error_log and
-daily/test reports, but they do not cause an immediate notification. D4A and Mosquitto
-service checks independently alert when a Windows service is not Running.
+daily/test reports, but they do not cause an immediate notification. D4A, SQL Server,
+and Mosquitto service checks independently alert when a Windows service is not Running.
 
 Disk usage does not generate warning emails. A critical alert is sent when a
 fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
@@ -2957,6 +2960,49 @@ function Test-MosquittoWindowsService {
     }
 }
 
+function Test-SqlServerWindowsServices {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $matching = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            # Monitor only database availability services. SQL CEIP telemetry
+            # and VSS Writer do not determine database availability.
+            $isDatabaseEngine = $name -ieq 'MSSQLSERVER' -or $name -match '(?i)^MSSQL\$'
+            $isSqlAgent = $name -ieq 'SQLSERVERAGENT' -or $name -match '(?i)^SQLAgent\$'
+            $isSqlBrowser = $name -ieq 'SQLBrowser'
+            if ($isDatabaseEngine -or $isSqlAgent -or $isSqlBrowser) {
+                $service
+            }
+        }
+    )
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server services' -Message (
+            'No SQL Server Database Engine, SQL Server Agent, or SQL Server Browser service was found; SQL service monitoring was skipped.'
+        ) -Key 'server-sql-services'
+        return
+    }
+
+    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
+        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
+            [string]$service.Name
+        }
+        else {
+            [string]$service.DisplayName
+        }
+        $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
+            $display, $service.Name, $service.State, $service.Status, $service.StartMode
+        $serviceKey = 'server-sql-service-{0}' -f $service.Name
+
+        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
+            Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server service' -Message $message -Key $serviceKey
+        }
+        else {
+            Add-MonitorResult -Severity Alert -Category Server -Check 'SQL Server service' -Message $message -Key $serviceKey
+        }
+    }
+}
+
 function Test-ApiListener {
     $listeners = @()
     $connectionQueryFailed = $false
@@ -4024,6 +4070,9 @@ function Get-MonitorSubjectComponentLabel {
     if ($searchText -match '(?i)disk') { return 'Disk Space' }
     if ($searchText -match '(?i)data collector') { return 'Data Collector' }
     if ($searchText -match '(?i)nginx') { return 'Nginx' }
+    if ($searchText -match '(?i)sql server agent|sqlagent') { return 'SQL Server Agent' }
+    if ($searchText -match '(?i)sqlbrowser') { return 'SQL Server Browser' }
+    if ($searchText -match '(?i)sql server|mssql') { return 'SQL Server' }
     if ($searchText -match '(?i)mosquitto|mqtt') { return 'Mosquitto/MQTT' }
     if ($searchText -match '(?i)\bCPU\b') { return 'CPU' }
     if ($searchText -match '(?i)memory|\bRAM\b') { return 'Memory' }
@@ -4752,6 +4801,7 @@ function Invoke-D4AMonitor {
         }
 
     Invoke-SafeMonitorCheck -Category Server -Check 'D4A Windows services' -Action { Test-D4AWindowsServices }
+    Invoke-SafeMonitorCheck -Category Server -Check 'SQL Server services' -Action { Test-SqlServerWindowsServices }
     Invoke-SafeMonitorCheck -Category Server -Check 'Mosquitto/MQTT service' -Action { Test-MosquittoWindowsService }
         Invoke-SafeMonitorCheck -Category Server -Check 'API listener' -Action { Test-ApiListener }
         Invoke-SafeMonitorCheck -Category Server -Check Memory -Action { Test-MemoryHealth }

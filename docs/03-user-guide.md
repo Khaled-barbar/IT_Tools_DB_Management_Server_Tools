@@ -442,6 +442,8 @@ The monitor also checks GitHub for its own newer verified version whenever it ru
 
 Monitoring configuration is read and written explicitly as UTF-8, so friendly names with accents, such as `Salé`, remain readable in email subjects and Discord messages. Existing corrupted forms such as `SalÃ©` are repaired when loaded. Monitoring emails display **D4A Monitoring** as their sender name while keeping the site’s configured sender address. New and updated configurations include `DiscordWebhookUrl` directly after the email recipients with the safe placeholder `your Discord webhook URL`; replace that value with the site webhook to enable Discord. JSON does not support comments, so `DiscordWebhookUrlNote` documents the setting. The configuration summary reports only `Configured`, never the URL itself. Discord recovery notices show both the alert-time value and the current recovered value. Historical state values, including legacy accented site names, are repaired before display.
 
+The monitor automatically discovers and checks local SQL Server Database Engine (`MSSQLSERVER` and `MSSQL$<instance>`), SQL Server Agent (`SQLSERVERAGENT` and `SQLAgent$<instance>`), and SQL Server Browser services. Each detected service must be `Running/OK` or it produces a service alert and later recovery notification. SQL CEIP telemetry and SQL VSS Writer are intentionally excluded because they do not determine database availability.
+
 ### Execute Monitoring Commands
 
 The menu exposes common management and test commands:
