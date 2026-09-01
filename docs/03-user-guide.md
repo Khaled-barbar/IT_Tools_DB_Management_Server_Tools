@@ -331,7 +331,7 @@ Use this last menu option to disconnect and select another instance or database.
 
 ### Search for text in files
 
-Searches files below a selected folder using text and file filters. Use a narrow path and extension whenever possible to reduce execution time.
+Searches files below a selected folder using text and file filters. Searches have a finite 10-minute limit for large folders; use a narrow path and extension whenever possible to reduce execution time.
 
 ### Check system health
 
@@ -379,7 +379,7 @@ Enter a remote IP/hostname or press Enter for `127.0.0.1`, then enter a TCP port
 
 ### Trace events in Data Collector
 
-Purpose: search large or active Data Collector daily logs without requiring the service to stop.
+Purpose: search large or active Data Collector daily logs without requiring the service to stop. The search keeps visible progress and has a finite 10-minute limit.
 
 Procedure:
 

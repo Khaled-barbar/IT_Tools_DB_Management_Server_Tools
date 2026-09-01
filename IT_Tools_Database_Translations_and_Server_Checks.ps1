@@ -54,9 +54,10 @@ $Global:PlainPass        = ""
 
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
+$Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.3.1'
-$Script:ToolReleaseDate = '2026-08-31'
+$Script:ToolVersion = [version]'7.4.0'
+$Script:ToolReleaseDate = '2026-09-01'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -8908,7 +8909,8 @@ function Invoke-DataCollectorEventTrace {
     Write-Host "Log file: $logFile" -ForegroundColor Cyan
     Write-Host "Search text: $searchText | Time window: $($startTime.ToString('hh\:mm\:ss')) to $($endTime.ToString('hh\:mm\:ss'))" -ForegroundColor Cyan
     if ($exclusions.Count -gt 0) { Write-Host "Excluded text: $($exclusions -join '; ')" -ForegroundColor Gray }
-    Write-StreamingLog -Percent 10 -Step 'Read log' -Description 'Searching the selected Data Collector log file.'
+    Write-Host 'Large log searches can take up to 10 minutes. Progress will remain visible.' -ForegroundColor Gray
+    Write-StreamingLog -Percent 10 -Step 'Read log' -Description 'Searching the selected Data Collector log file (10-minute limit).'
 
     $reader = $null
     $lineNumber = 0
@@ -8923,8 +8925,8 @@ function Invoke-DataCollectorEventTrace {
         $reader = New-Object IO.StreamReader($stream)
         while (($line = $reader.ReadLine()) -ne $null) {
             $lineNumber++
-            if ($stopwatch.Elapsed.TotalSeconds -ge $Script:DeepDirectoryScanTimeoutSeconds) {
-                throw "Timed out after $Script:DeepDirectoryScanTimeoutSeconds seconds while searching $($fileInfo.Name). Narrow the time window or search for more specific text."
+            if ($stopwatch.Elapsed.TotalSeconds -ge $Script:FileSearchTimeoutSeconds) {
+                throw "Timed out after $Script:FileSearchTimeoutSeconds seconds while searching $($fileInfo.Name). Narrow the time window or search for more specific text."
             }
             $progress = if ($fileInfo.Length -gt 0) { [int](($reader.BaseStream.Position / [double]$fileInfo.Length) * 85) + 10 } else { 95 }
             if ($progress -ge $nextProgressPercent) {
@@ -9006,8 +9008,8 @@ function Invoke-TextSearch {
         if (Test-IsBack $option) { break }
 
         Write-Host ""
-        Write-Host "Searching files..." -ForegroundColor Gray
-        $results = @(Invoke-OperationWithTimeout -OperationName "search files under $searchPath" -TimeoutSeconds $Script:DeepDirectoryScanTimeoutSeconds -ScriptBlock {
+        Write-Host 'Searching files. Large folders can take up to 10 minutes...' -ForegroundColor Gray
+        $results = @(Invoke-OperationWithTimeout -OperationName "search files under $searchPath" -TimeoutSeconds $Script:FileSearchTimeoutSeconds -ScriptBlock {
             param($SearchArgs)
             Get-ChildItem -Path $SearchArgs.Path -Recurse -File -ErrorAction SilentlyContinue |
                 Select-String -Pattern $SearchArgs.Pattern -SimpleMatch -ErrorAction SilentlyContinue
@@ -9300,7 +9302,7 @@ function Invoke-RecentFilesTracker {
 
         Write-Host ""
         Write-Host "Scanning files changed since $CutoffDate..." -ForegroundColor Gray
-        $AllTargetFiles = @(Invoke-OperationWithTimeout -OperationName "scan recent files under $CurrentPath" -TimeoutSeconds $Script:DeepDirectoryScanTimeoutSeconds -ScriptBlock {
+        $AllTargetFiles = @(Invoke-OperationWithTimeout -OperationName "scan recent files under $CurrentPath" -TimeoutSeconds $Script:FileSearchTimeoutSeconds -ScriptBlock {
             param($Path)
             Get-ChildItem -Path $Path -Recurse -File -ErrorAction SilentlyContinue
         } -Argument $CurrentPath)

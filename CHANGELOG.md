@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.4.0 - 2026-09-01
+
+- Extended user-initiated file searches, Data Collector event tracing, and recent-file scans to a finite 10-minute timeout, with clear progress messaging for large folders and logs.
+- Removed duplicate Monitoring release headings from the changelog.
+
 ## 7.3.1 - 2026-08-31
 
 ### Monitoring 7.2.0 - 2026-09-01
@@ -14,11 +19,7 @@ For project context, architecture, and operating procedures, see the [project ov
 
 ### Monitoring 7.1.2 - 2026-08-31
 
-### Monitoring 7.1.2 - 2026-08-31
-
 - Recovery notifications now display the alert-time value and the current recovered value for resource, endpoint, and service checks. Existing alert state created by an earlier version remains compatible and identifies when an original measurement is unavailable.
-
-### Monitoring 7.1.1 - 2026-08-31
 
 ### Monitoring 7.1.1 - 2026-08-31
 
