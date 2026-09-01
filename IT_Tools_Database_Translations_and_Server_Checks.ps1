@@ -56,7 +56,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.4.1'
+$Script:ToolVersion = [version]'7.4.2'
 $Script:ToolReleaseDate = '2026-09-01'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3879,7 +3879,7 @@ function Connect-DatabaseAutomatically {
     Write-Host "Detected D4A application databases:" -ForegroundColor Cyan
     for ($index = 0; $index -lt $connections.Count; $index++) {
         $connection = $connections[$index]
-        Write-Host "[$($index + 1)] $($connection.Database)  |  $($connection.InstallationName)  |  $($connection.Server)"
+        Write-Host "[$($index + 1)] $($connection.Database)"
     }
     Write-Host "[M] Use the manual SQL Server connection mode" -ForegroundColor Gray
 
@@ -4074,7 +4074,7 @@ function Connect-Database {
 
     Clear-Host
     Show-SectionTitle "Connect to SQL Server"
-    Write-Host "IT Tools can use the encrypted connection already configured for an active Decide4Action Data Collector installation." -ForegroundColor White
+    Write-Host "IT Tools can use the encrypted connection already configured for an active Decide4Action installation." -ForegroundColor White
     Write-Host "Type M at the database selection prompt to use the existing manual SQL Server connection mode." -ForegroundColor Gray
     Write-Host "Type q at any prompt to go back." -ForegroundColor DarkGray
     Write-Host ""
