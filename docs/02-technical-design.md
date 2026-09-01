@@ -69,7 +69,7 @@ flowchart LR
 
 ## Database connection design
 
-Database features share one selected SQL Server instance, database, username, and password during a session. Password entry uses a custom console reader so paste operations work without displaying the value.
+Database features share one selected SQL Server instance, database, username, and password during a session. By default, Database Tools discovers active Decide4Action Data Collector services, derives each application root from the service executable, and reads the associated `Services\API\dbconfig.js` without evaluating JavaScript. It offers the configured application databases for selection, decrypts the selected password in memory using the existing `D4AKEY` and `D4AIV` environment variables, and validates the connection before storing session settings. It never writes or displays the password, key, IV, or connection string. Typing `M` at the selection prompt retains the existing manual instance, username, and hidden-password flow; password entry uses a custom console reader so paste operations work without displaying the value.
 
 The `SqlServer` PowerShell module supplies `Invoke-Sqlcmd`. If it is absent, the tool offers a current-user installation and displays persistent progress while PowerShellGet and NuGet complete. SQL connections tolerate environments with untrusted internal certificates by requesting optional encryption and trusting the server certificate where the installed command supports those parameters. Direct `System.Data.SqlClient` connections use the same compatibility intent.
 

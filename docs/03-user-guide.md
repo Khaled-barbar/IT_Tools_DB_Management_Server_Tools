@@ -71,7 +71,9 @@ The main menu has four areas:
 
 Type the displayed number to select an action. Type `q` at a visible prompt to return to the previous menu. After results or errors, press any key when prompted.
 
-For a database session, the script asks for:
+For a database session, the script first detects active Decide4Action Data Collector services and lists the configured D4A application databases. Select the numbered database to connect with the existing encrypted application credential; the password is decrypted only in memory using the server's existing `D4AKEY` and `D4AIV` environment variables and is never displayed or logged.
+
+Type `M` at that selection prompt when automatic discovery is unavailable or when a different SQL account is required. Manual mode asks for:
 
 - SQL Server name or instance, for example `localhost` or `SERVER\INSTANCE`;
 - database username, default `sa`;

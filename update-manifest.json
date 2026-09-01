@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "version": "7.4.0",
+  "version": "7.4.1",
   "releaseDate": "2026-09-01",
   "monitoring": {
     "version": "7.3.0",
@@ -37,11 +37,11 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "A38D5FADF96E108280B9306F3DA33B6B61124B1D4CAFA84BB1FF85A40619F723"
+      "sha256": "CE2EB630A434961357B768AA6B3D96D6D48EE29CA21C376D116116FB85AC9279"
     },
     {
       "path": "version.txt",
-      "sha256": "2215201B9F61246415261BEC0B633B35AF9BAA62198A2143413FCFDBF04360E0"
+      "sha256": "910121D8FDA1EE513D664110F94BEF46C4791698010DB514C2A71CC1932BC3CF"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",

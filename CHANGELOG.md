@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.4.1 - 2026-09-01
+
+- Added automatic Database Tools connection discovery for active Decide4Action Data Collector installations. The toolkit resolves each installation's `Services\API\dbconfig.js`, selects its configured database, decrypts the existing password only in memory using the installed `D4AKEY` and `D4AIV` environment variables, and verifies the connection before starting the session.
+- Retained the existing username/password workflow as an explicit manual fallback available by typing `M` at the automatic database-selection prompt.
+
 ## 7.4.0 - 2026-09-01
 
 - Extended user-initiated file searches, Data Collector event tracing, and recent-file scans to a finite 10-minute timeout, with clear progress messaging for large folders and logs.

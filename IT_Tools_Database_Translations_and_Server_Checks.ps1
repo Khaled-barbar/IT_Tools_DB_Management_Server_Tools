@@ -56,7 +56,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.4.0'
+$Script:ToolVersion = [version]'7.4.1'
 $Script:ToolReleaseDate = '2026-09-01'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3607,6 +3607,325 @@ function Show-SiteMonitoringMenu {
 # ------------------------------------------------------------------------------
 # Database tools
 # ------------------------------------------------------------------------------
+function Get-D4AEnvironmentSecret {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('D4AKEY', 'D4AIV')]
+        [string]$Name
+    )
+
+    foreach ($scope in @('Process', 'Machine', 'User')) {
+        $value = [Environment]::GetEnvironmentVariable($Name, $scope)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value
+        }
+    }
+
+    throw "Environment variable '$Name' was not found in Process, Machine, or User scope."
+}
+
+function Unprotect-D4APassword {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$EncryptedPassword,
+
+        [string]$KeyBase64 = (Get-D4AEnvironmentSecret -Name D4AKEY),
+
+        [string]$IVBase64 = (Get-D4AEnvironmentSecret -Name D4AIV)
+    )
+
+    $aes = $null
+    $decryptor = $null
+    $keyBytes = $null
+    $ivBytes = $null
+    $encryptedBytes = $null
+    $decryptedBytes = $null
+
+    try {
+        $keyBytes = [Convert]::FromBase64String($KeyBase64)
+        $ivBytes = [Convert]::FromBase64String($IVBase64)
+        $encryptedBytes = [Convert]::FromBase64String($EncryptedPassword)
+
+        if ($keyBytes.Length -ne 32) {
+            throw "D4AKEY must decode to 32 bytes; actual length is $($keyBytes.Length)."
+        }
+
+        if ($ivBytes.Length -ne 16) {
+            throw "D4AIV must decode to 16 bytes; actual length is $($ivBytes.Length)."
+        }
+
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.KeySize = 256
+        $aes.BlockSize = 128
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aes.Key = $keyBytes
+        $aes.IV = $ivBytes
+
+        $decryptor = $aes.CreateDecryptor()
+        $decryptedBytes = $decryptor.TransformFinalBlock($encryptedBytes, 0, $encryptedBytes.Length)
+        return [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
+    }
+    catch {
+        throw "D4A database password decryption failed: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $decryptor) { $decryptor.Dispose() }
+        if ($null -ne $aes) { $aes.Dispose() }
+
+        foreach ($buffer in @($keyBytes, $ivBytes, $encryptedBytes, $decryptedBytes)) {
+            if ($null -ne $buffer) {
+                [Array]::Clear($buffer, 0, $buffer.Length)
+            }
+        }
+    }
+}
+
+function Get-D4AServiceExecutablePath {
+    param([AllowNull()][string]$ServicePath)
+
+    if ([string]::IsNullOrWhiteSpace($ServicePath)) { return '' }
+
+    $expandedPath = [Environment]::ExpandEnvironmentVariables($ServicePath.Trim())
+    $executablePath = ''
+    if ($expandedPath -match '^\s*"(?<Path>[^"]+\.exe)"') {
+        $executablePath = $matches.Path
+    }
+    elseif ($expandedPath -match '^\s*(?<Path>.+?\.exe)(?:\s|$)') {
+        $executablePath = $matches.Path.Trim()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($executablePath)) { return '' }
+
+    try {
+        return [IO.Path]::GetFullPath($executablePath)
+    }
+    catch {
+        return $executablePath
+    }
+}
+
+function Get-D4AJavaScriptObjectBody {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$VariableName
+    )
+
+    # Locate one named object without evaluating site-specific JavaScript.
+    $assignmentPattern = '(?im)\b(?:const|let|var)\s+' + [regex]::Escape($VariableName) + '\s*='
+    $assignment = [regex]::Match($Text, $assignmentPattern)
+    if (-not $assignment.Success) { return '' }
+
+    $openingBrace = $Text.IndexOf('{', $assignment.Index + $assignment.Length)
+    if ($openingBrace -lt 0) { return '' }
+
+    $depth = 0
+    $quote = [char]0
+    $escaped = $false
+    for ($index = $openingBrace; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        if ($quote -ne [char]0) {
+            if ($escaped) {
+                $escaped = $false
+            }
+            elseif ($character -eq '\\') {
+                $escaped = $true
+            }
+            elseif ($character -eq $quote) {
+                $quote = [char]0
+            }
+            continue
+        }
+
+        if ($character -eq '"' -or $character -eq "'") {
+            $quote = $character
+            continue
+        }
+        if ($character -eq '{') {
+            $depth++
+            continue
+        }
+        if ($character -eq '}') {
+            $depth--
+            if ($depth -eq 0) {
+                return $Text.Substring($openingBrace + 1, $index - $openingBrace - 1)
+            }
+        }
+    }
+
+    return ''
+}
+
+function Get-D4AJavaScriptStringProperty {
+    param(
+        [Parameter(Mandatory = $true)][string]$ObjectBody,
+        [Parameter(Mandatory = $true)][string]$PropertyName
+    )
+
+    $escapedName = [regex]::Escape($PropertyName)
+    $propertyPattern = '(?ism)(?:^|[,\r\n])\s*(?:["'']' + $escapedName + '["'']|' + $escapedName + ')\s*:\s*(?<quote>["''])(?<value>(?:\\.|(?!\k<quote>).)*)\k<quote>'
+    $match = [regex]::Match($ObjectBody, $propertyPattern)
+    if (-not $match.Success) { return '' }
+
+    try {
+        return [regex]::Unescape($match.Groups['value'].Value)
+    }
+    catch {
+        return $match.Groups['value'].Value
+    }
+}
+
+function Get-D4ADatabaseConfigFromFile {
+    param([Parameter(Mandatory = $true)][string]$ConfigPath)
+
+    $configText = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop
+    $candidateNames = [System.Collections.Generic.List[string]]::new()
+    $candidateNames.Add('dbConfigTampa') | Out-Null
+    $candidateNames.Add('dbConfig') | Out-Null
+    foreach ($candidate in [regex]::Matches($configText, '(?im)\b(?:const|let|var)\s+(?<name>dbConfig[A-Za-z0-9_]*)\s*=')) {
+        $candidateName = $candidate.Groups['name'].Value
+        if (-not $candidateNames.Contains($candidateName)) {
+            $candidateNames.Add($candidateName) | Out-Null
+        }
+    }
+
+    foreach ($candidateName in $candidateNames) {
+        $body = Get-D4AJavaScriptObjectBody -Text $configText -VariableName $candidateName
+        if ([string]::IsNullOrWhiteSpace($body)) { continue }
+
+        $server = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'server'
+        $database = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'database'
+        $user = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'user'
+        $encryptedPassword = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'password'
+        if (-not [string]::IsNullOrWhiteSpace($server) -and
+            -not [string]::IsNullOrWhiteSpace($database) -and
+            -not [string]::IsNullOrWhiteSpace($user) -and
+            -not [string]::IsNullOrWhiteSpace($encryptedPassword)) {
+            return [pscustomobject]@{
+                Server            = $server
+                Database          = $database
+                User              = $user
+                EncryptedPassword = $encryptedPassword
+            }
+        }
+    }
+
+    throw "The D4A database configuration file does not contain a complete database connection definition."
+}
+
+function Get-D4ADataCollectorDatabaseConnections {
+    $services = @()
+    try {
+        $services = @(Invoke-OperationWithTimeout -OperationName "reading active Decide4Action Data Collector services" -TimeoutSeconds $Script:ServerCheckCimTimeoutSeconds -ScriptBlock {
+            Get-CimInstance -ClassName Win32_Service -ErrorAction Stop |
+                Where-Object {
+                    ($_.Name -match '(?i)^(decide4action|d4a).*data\s*collector' -or
+                     $_.DisplayName -match '(?i)^(decide4action|d4a).*data\s*collector') -and
+                    $_.State -eq 'Running'
+                } |
+                Select-Object Name, DisplayName, PathName, State
+        })
+    }
+    catch {
+        return @()
+    }
+
+    $connections = [System.Collections.Generic.List[object]]::new()
+    $seenConfigPaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($service in $services) {
+        $executablePath = Get-D4AServiceExecutablePath -ServicePath ([string]$service.PathName)
+        if ([string]::IsNullOrWhiteSpace($executablePath)) { continue }
+
+        try {
+            $dataCollectorFolder = Split-Path -Parent ([IO.Path]::GetFullPath($executablePath))
+            $appRoot = Split-Path -Parent $dataCollectorFolder
+            $configPath = Join-Path $appRoot 'Services\API\dbconfig.js'
+            if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { continue }
+            $configPath = (Get-Item -LiteralPath $configPath -ErrorAction Stop).FullName
+            if (-not $seenConfigPaths.Add($configPath)) { continue }
+
+            $config = Get-D4ADatabaseConfigFromFile -ConfigPath $configPath
+            $connections.Add([pscustomobject]@{
+                InstallationName  = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) { [string]$service.Name } else { [string]$service.DisplayName }
+                ServiceName       = [string]$service.Name
+                AppRoot           = $appRoot
+                ConfigPath        = $configPath
+                Server            = $config.Server
+                Database          = $config.Database
+                User              = $config.User
+                EncryptedPassword = $config.EncryptedPassword
+            }) | Out-Null
+        }
+        catch {
+            # Ignore incomplete installations and retain only usable database configurations.
+        }
+    }
+
+    return $connections.ToArray()
+}
+
+function Connect-DatabaseAutomatically {
+    $connections = @(Get-D4ADataCollectorDatabaseConnections)
+    if ($connections.Count -eq 0) {
+        Write-Host "No active Decide4Action Data Collector installation with a usable Services\\API\\dbconfig.js file was found." -ForegroundColor Yellow
+        while ($true) {
+            $choice = Read-Host "Type M for manual connection or q to go back"
+            if (Test-IsBack $choice) { return 'cancel' }
+            if ($choice -ieq 'm') { return 'manual' }
+            Write-Host "Type M for manual connection or q to go back." -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host "Detected D4A application databases:" -ForegroundColor Cyan
+    for ($index = 0; $index -lt $connections.Count; $index++) {
+        $connection = $connections[$index]
+        Write-Host "[$($index + 1)] $($connection.Database)  |  $($connection.InstallationName)  |  $($connection.Server)"
+    }
+    Write-Host "[M] Use the manual SQL Server connection mode" -ForegroundColor Gray
+
+    while ($true) {
+        $selection = Read-Host "Choose an application database (M for manual; q to go back)"
+        if (Test-IsBack $selection) { return 'cancel' }
+        if ($selection -ieq 'm') { return 'manual' }
+
+        $selectedIndex = 0
+        if (-not ([int]::TryParse($selection, [ref]$selectedIndex)) -or
+            $selectedIndex -lt 1 -or $selectedIndex -gt $connections.Count) {
+            Write-Host "That is not a valid choice. Try again." -ForegroundColor Yellow
+            continue
+        }
+
+        $selectedConnection = $connections[$selectedIndex - 1]
+        $sqlPassword = $null
+        try {
+            Write-Host "Connecting to the selected D4A database..." -ForegroundColor Gray
+            $sqlPassword = Unprotect-D4APassword -EncryptedPassword $selectedConnection.EncryptedPassword
+            [void](Invoke-D4ASqlcmd -ServerInstance $selectedConnection.Server -Database $selectedConnection.Database -Username $selectedConnection.User -Password $sqlPassword -Query 'SELECT 1 AS ConnectionTest' -QueryTimeout 30)
+
+            $Global:SelectedInstance = $selectedConnection.Server
+            $Global:SelectedDb = $selectedConnection.Database
+            $Global:User = $selectedConnection.User
+            $Global:PlainPass = $sqlPassword
+            $sqlPassword = $null
+
+            Write-Host "Connected to $($Global:SelectedInstance), database $($Global:SelectedDb)." -ForegroundColor Green
+            Start-Sleep -Seconds 1
+            return 'connected'
+        }
+        catch {
+            Clear-DatabaseConnection
+            Show-LoggedError -Prefix "Could not connect with the selected D4A application database configuration" -Context "Automatic D4A database connection" -ErrorRecord $_
+            Pause-Screen
+            return 'cancel'
+        }
+        finally {
+            if ($null -ne $sqlPassword) {
+                Remove-Variable -Name sqlPassword -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Get-InstanceNames {
     try {
         $instanceKeys = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL' -ErrorAction SilentlyContinue
@@ -3630,7 +3949,7 @@ function Get-InstanceNames {
     }
 }
 
-function Connect-Database {
+function Connect-DatabaseManually {
     if (-not [string]::IsNullOrWhiteSpace($Global:SelectedDb)) {
         return
     }
@@ -3743,6 +4062,26 @@ function Connect-Database {
         Show-LoggedError -Prefix "Could not connect to the database" -Context "Connect to SQL Server" -ErrorRecord $_
         Clear-DatabaseConnection
         Pause-Screen
+    }
+}
+
+function Connect-Database {
+    if (-not [string]::IsNullOrWhiteSpace($Global:SelectedDb)) {
+        return
+    }
+
+    if (-not (Test-SqlCommandAvailable)) { return }
+
+    Clear-Host
+    Show-SectionTitle "Connect to SQL Server"
+    Write-Host "IT Tools can use the encrypted connection already configured for an active Decide4Action Data Collector installation." -ForegroundColor White
+    Write-Host "Type M at the database selection prompt to use the existing manual SQL Server connection mode." -ForegroundColor Gray
+    Write-Host "Type q at any prompt to go back." -ForegroundColor DarkGray
+    Write-Host ""
+
+    $connectionResult = Connect-DatabaseAutomatically
+    if ($connectionResult -eq 'manual') {
+        Connect-DatabaseManually
     }
 }
 
