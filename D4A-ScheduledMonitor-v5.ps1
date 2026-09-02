@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.3.0
-# D4A-Monitor-Release-Date: 2026-09-01
+# D4A-Monitor-Version: 7.4.1
+# D4A-Monitor-Release-Date: 2026-09-02
 
 <#
 .SYNOPSIS
@@ -39,8 +39,8 @@
     calculated expiry timestamp; do not edit only one of those values manually.
 
     Use -AddSiteAddress to persist one or more additional frontend sites in
-    the JSON configuration. Their matching D4A API endpoints are derived and
-    checked automatically during each normal monitoring run.
+    the JSON configuration. ApiAddress stores one API endpoint for each
+    frontend; an omitted API address retains the default derived endpoint.
 
     Every execution checks the official GitHub Monitoring release for a newer
     version. monitor-version.txt, the monitoring release definition in
@@ -98,9 +98,17 @@ param(
     # configuration without running a health scan.
     [string]$AddSiteAddress,
 
+    # Optional API addresses aligned with AddSiteAddress. Omitted values use
+    # the standard API derivation for each added frontend.
+    [string]$AddSiteApiAddress,
+
     # Comma-separated frontend addresses. The corresponding D4A API is always
-    # checked automatically for every configured frontend.
+    # checked for every configured frontend.
     [string]$SiteAddress = 'hostname:1200',
+
+    # Optional comma-separated API addresses aligned with SiteAddress. When an
+    # item is omitted, the established D4A API derivation is retained.
+    [string]$ApiAddress = '',
 
     # Friendly identifier used in email subjects, for example "Akbou".
     [string]$MonitoringName = 'D4A site',
@@ -241,8 +249,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.3.0'
-$script:MonitorReleaseDate = '2026-09-01'
+$script:MonitorVersion = '7.4.1'
+$script:MonitorReleaseDate = '2026-09-02'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -935,6 +943,7 @@ function Ensure-MonitorConfigurationDefaults {
     param([Parameter(Mandatory = $true)][object]$Configuration)
 
     $changed = $false
+    $apiAddressAdded = $false
     if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrl']) {
         # JSON does not support comments. The visible placeholder keeps the
         # setting easy to find while remaining safely disabled at runtime.
@@ -945,10 +954,23 @@ function Ensure-MonitorConfigurationDefaults {
         $Configuration | Add-Member -MemberType NoteProperty -Name 'DiscordWebhookUrlNote' -Value 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.'
         $changed = $true
     }
+    if ($null -eq $Configuration.PSObject.Properties['ApiAddress']) {
+        $frontendAddresses = @($Configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        $apiAddresses = @(Get-DefaultMonitorApiAddresses -FrontendAddresses $frontendAddresses)
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'ApiAddress' -Value $apiAddresses
+        $changed = $true
+        $apiAddressAdded = $true
+    }
 
     if ($changed -and -not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
         $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
         try {
+            if ($apiAddressAdded) {
+                $migrationBackupPath = '{0}.pre-api-address-{1}.json' -f
+                    ([IO.Path]::Combine((Split-Path -Parent $script:ResolvedConfigPath), [IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath))),
+                    (Get-Date -Format 'yyyyMMddHHmmss')
+                Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination $migrationBackupPath -ErrorAction Stop
+            }
             [IO.File]::WriteAllText($temporaryConfigPath, ($Configuration | ConvertTo-Json -Depth 12) + [Environment]::NewLine, $script:Utf8NoBom)
             Copy-Item -LiteralPath $temporaryConfigPath -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop
         }
@@ -986,6 +1008,7 @@ function Import-MonitorConfiguration {
 
     $settingMap = [ordered]@{
         SiteAddress                = 'StringList'
+        ApiAddress                 = 'StringList'
         SiteDisplayNames           = 'StringList'
         MonitoringName             = 'String'
         NotificationTo             = 'StringList'
@@ -1028,6 +1051,13 @@ function Import-MonitorConfiguration {
 
     foreach ($settingName in $settingMap.Keys) {
         if ($script:CommandLineParameterNames -contains $settingName) { continue }
+        if ($settingName -eq 'ApiAddress' -and
+            ($script:CommandLineParameterNames -contains 'SiteAddress') -and
+            -not ($script:CommandLineParameterNames -contains 'ApiAddress')) {
+            # A temporary frontend test must continue to derive its matching
+            # API instead of applying an unrelated saved site API list.
+            continue
+        }
         $property = Get-MonitorConfigurationProperty -Configuration $configuration -Name $settingName
         if ($null -eq $property -or $null -eq $property.Value) { continue }
 
@@ -1104,6 +1134,12 @@ function Test-MonitorConfigurationValues {
     }
 
     $configuredUris = @(ConvertTo-HttpUris -Addresses $SiteAddress)
+    if (-not [string]::IsNullOrWhiteSpace($ApiAddress)) {
+        $configuredApiUris = @(ConvertTo-HttpUris -Addresses $ApiAddress)
+        if ($configuredApiUris.Count -ne $configuredUris.Count) {
+            throw 'ApiAddress must contain one API address for each SiteAddress entry.'
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($SiteDisplayNames)) {
         $configuredNames = @($SiteDisplayNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         if ($configuredNames.Count -ne $configuredUris.Count) {
@@ -1163,17 +1199,26 @@ function Get-MonitorConfigurationForManagement {
 }
 
 function Add-MonitorConfiguredSites {
-    param([Parameter(Mandatory = $true)][string]$Addresses)
+    param(
+        [Parameter(Mandatory = $true)][string]$Addresses,
+        [string]$ApiAddresses
+    )
 
     $configuration = Get-MonitorConfigurationForManagement
     $existingAddresses = @($configuration.SiteAddress | ForEach-Object { [string]$_ })
-    $requestedAddresses = @($Addresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $requestedAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses @($Addresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }))
     if ($requestedAddresses.Count -eq 0) {
         throw 'Enter at least one frontend site address.'
     }
 
+    $requestedFrontendUris = @(ConvertTo-HttpUris -Addresses ($requestedAddresses -join ','))
+    $requestedApiUris = @(Get-MonitorApiUris -FrontendUris $requestedFrontendUris -ConfiguredAddresses $ApiAddresses)
+
     $allAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses @($existingAddresses + $requestedAddresses))
     $existingNormalizedAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses $existingAddresses)
+    $existingFrontendUris = @(ConvertTo-HttpUris -Addresses ($existingNormalizedAddresses -join ','))
+    $existingApiAddresses = if ($null -eq $configuration.PSObject.Properties['ApiAddress']) { '' } else { (@($configuration.ApiAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',') }
+    $existingApiUris = @(Get-MonitorApiUris -FrontendUris $existingFrontendUris -ConfiguredAddresses $existingApiAddresses)
     $existingSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($address in $existingNormalizedAddresses) { $existingSet.Add($address) | Out-Null }
     $addedAddresses = @($allAddresses | Where-Object { -not $existingSet.Contains($_) })
@@ -1201,6 +1246,15 @@ function Add-MonitorConfiguredSites {
     else {
         $configuration.SiteDisplayNames = @($existingNames + $addedNames)
     }
+    $requestedApiByFrontend = @{}
+    for ($index = 0; $index -lt $requestedAddresses.Count; $index++) {
+        $requestedApiByFrontend[$requestedAddresses[$index].TrimEnd('/')] = $requestedApiUris[$index].AbsoluteUri
+    }
+    $addedApiAddresses = @($addedAddresses | ForEach-Object { $requestedApiByFrontend[$_.TrimEnd('/')] })
+    if ($null -eq $configuration.PSObject.Properties['ApiAddress']) {
+        $configuration | Add-Member -MemberType NoteProperty -Name ApiAddress -Value @($existingApiUris | ForEach-Object { $_.AbsoluteUri })
+    }
+    $configuration.ApiAddress = @(@($existingApiUris | ForEach-Object { $_.AbsoluteUri }) + $addedApiAddresses)
     $configuration.MonitoringName = (@($configuration.SiteDisplayNames) -join ', ')
     $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
     $configurationDirectory = Split-Path -Parent $script:ResolvedConfigPath
@@ -1211,9 +1265,7 @@ function Add-MonitorConfiguredSites {
 
     Write-Host "Added site(s): $($addedAddresses -join ', ')" -ForegroundColor Green
     foreach ($address in $addedAddresses) {
-        $frontendUri = (ConvertTo-HttpUris -Addresses $address | Select-Object -First 1)
-        $apiUri = Get-D4AApiUri -FrontendUri $frontendUri
-        Write-Host "Automatic API health check: $($apiUri.AbsoluteUri)" -ForegroundColor Green
+        Write-Host "API health check for ${address}: $($requestedApiByFrontend[$address.TrimEnd('/')])" -ForegroundColor Green
     }
     Write-Host "Configuration updated: $($script:ResolvedConfigPath)" -ForegroundColor Green
     Write-Host "Configuration backup: $backupPath" -ForegroundColor Yellow
@@ -1226,12 +1278,9 @@ function Show-MonitorConfiguration {
     if ($configuredNames.Count -ne $configuredSites.Count) {
         $configuredNames = @($configuredSites | ForEach-Object { $_ })
     }
-    $apiSites = @(
-        foreach ($site in $configuredSites) {
-            $frontendUri = (ConvertTo-HttpUris -Addresses $site | Select-Object -First 1)
-            (Get-D4AApiUri -FrontendUri $frontendUri).AbsoluteUri
-        }
-    )
+    $frontendUris = @(ConvertTo-HttpUris -Addresses ($configuredSites -join ','))
+    $configuredApiAddresses = if ($null -eq $configuration.PSObject.Properties['ApiAddress']) { '' } else { (@($configuration.ApiAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',') }
+    $apiSites = @(Get-MonitorApiUris -FrontendUris $frontendUris -ConfiguredAddresses $configuredApiAddresses | ForEach-Object { $_.AbsoluteUri })
     $schedule = $configuration.TaskScheduler
     $frequency = if ($null -ne $schedule -and $null -ne $schedule.FrequencyMinutes) { "$($schedule.FrequencyMinutes) minute(s)" } else { 'Not recorded in configuration' }
     $dailySummary = if ($null -ne $schedule -and $schedule.DailySummaryEnabled) { "Enabled at $($schedule.DailySummaryTime)" } else { 'Not enabled' }
@@ -1244,7 +1293,7 @@ function Show-MonitorConfiguration {
         ConfigurationFile    = $script:ResolvedConfigPath
         SiteNames            = (@(for ($index = 0; $index -lt $configuredSites.Count; $index++) { '{0} = {1}' -f $configuredSites[$index], $configuredNames[$index] }) -join '; ')
         FrontendSites        = ($configuredSites -join ', ')
-        AutomaticApiSites    = ($apiSites -join ', ')
+        ApiSites             = ($apiSites -join ', ')
         NotificationAddresses = $NotificationTo
         DiscordNotifications = (Get-DiscordDeliveryConfigurationStatus)
         ScheduledFrequency   = $frequency
@@ -1325,11 +1374,12 @@ D4A SCHEDULED MONITOR - MONITOR LOGS README
 Purpose
 -------
 D4A-ScheduledMonitor.ps1 checks D4A site availability and server health.
-It can check one or more frontend site addresses, the corresponding API health
+It can check one or more frontend site addresses, configured API health
 endpoints, TLS certificates, local D4A Windows services, the local API listener,
   CPU, memory, disk space, Nginx errors, relevant Windows events, and local
-  Decide4Action, Data Collector, MDC, PLC, Mosquitto/MQTT, SQL Server Database
-  Engine, SQL Server Agent, and SQL Server Browser services.
+  Decide4Action, Data Collector, MDC, PLC, Mosquitto/MQTT, Node-RED, Nginx,
+  reverse proxy, IIS, SQL Server Database Engine, SQL Server Agent, and SQL
+  Server Browser services.
 
 Notification behavior
 ---------------------
@@ -1347,8 +1397,9 @@ daily-summary runs send an email even when the server is healthy.
 External configuration
 ----------------------
 D4A-ScheduledMonitor.config.json is stored in monitor-logs. It contains the
-site name, frontend addresses, email recipients, optional Discord webhook,
-installation paths, log retention, and optional thresholds. Scheduled Task
+site name, frontend addresses, API addresses aligned to each frontend, email
+recipients, optional Discord webhook, installation paths, log retention, and
+optional thresholds. Scheduled Task
 frequency is recorded there as deployment metadata but remains controlled by
 Windows Task Scheduler.
 Command-line parameters override JSON values for temporary manual tests.
@@ -1476,9 +1527,11 @@ TaskSchedulerOutput folder when a nonstandard path is used.
 
 Manual run examples
 -------------------
-Add one or more sites permanently to the JSON configuration. The monitor
-derives and checks the matching API endpoint automatically:
+Add one or more sites permanently to the JSON configuration. An omitted API
+address uses the matching derived endpoint; provide AddSiteApiAddress to save
+a custom API endpoint:
 .\D4A-ScheduledMonitor.ps1 -AddSiteAddress 'hostname:1200,akbou.decide4action.com'
+.\D4A-ScheduledMonitor.ps1 -AddSiteAddress 'https://site.example.com' -AddSiteApiAddress 'https://api.example.net/health'
 
 Show the effective configuration without running a health check:
 .\D4A-ScheduledMonitor.ps1 -ShowConfiguration
@@ -2522,6 +2575,49 @@ function Get-D4AApiUri {
     return $builder.Uri
 }
 
+function Get-D4AApiHealthUri {
+    param([Parameter(Mandatory = $true)][Uri]$ApiUri)
+
+    # An API hostname is enough for the wizard; preserve an explicit custom
+    # path, but use the standard health endpoint when no path was supplied.
+    if ([string]::IsNullOrWhiteSpace($ApiUri.AbsolutePath) -or $ApiUri.AbsolutePath -eq '/') {
+        $builder = [UriBuilder]::new($ApiUri)
+        $builder.Path = '/health'
+        $builder.Query = ''
+        $builder.Fragment = ''
+        return $builder.Uri
+    }
+    return $ApiUri
+}
+
+function Get-DefaultMonitorApiAddresses {
+    param([Parameter(Mandatory = $true)][string[]]$FrontendAddresses)
+
+    $frontendText = (@($FrontendAddresses | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
+    if ([string]::IsNullOrWhiteSpace($frontendText)) { return @() }
+    return @(
+        ConvertTo-HttpUris -Addresses $frontendText |
+            ForEach-Object { (Get-D4AApiUri -FrontendUri $_).AbsoluteUri }
+    )
+}
+
+function Get-MonitorApiUris {
+    param(
+        [Parameter(Mandatory = $true)][Uri[]]$FrontendUris,
+        [string]$ConfiguredAddresses = $ApiAddress
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ConfiguredAddresses)) {
+        return @($FrontendUris | ForEach-Object { Get-D4AApiUri -FrontendUri $_ })
+    }
+
+    $apiUris = @(ConvertTo-HttpUris -Addresses $ConfiguredAddresses | ForEach-Object { Get-D4AApiHealthUri -ApiUri $_ })
+    if ($apiUris.Count -ne $FrontendUris.Count) {
+        throw 'ApiAddress must contain one API address for each SiteAddress entry.'
+    }
+    return @($apiUris)
+}
+
 function Get-AuthorityBaseUri {
     param([Parameter(Mandatory = $true)][Uri]$Uri)
 
@@ -2956,6 +3052,46 @@ function Test-MosquittoWindowsService {
         }
         else {
             Add-MonitorResult -Severity Alert -Category Server -Check 'Mosquitto/MQTT service' -Message $message -Key $serviceKey
+        }
+    }
+}
+
+function Test-WebInfrastructureWindowsServices {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $serviceScopePattern = '(?i)(?:\bnode[-_\s]?red\b|\bnginx\b|\breverse[-_\s]?proxy\b|\biis\b|\bworld\s+wide\s+web\s+publishing\s+service\b|\binternet\s+information\s+services\b)'
+    $matching = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            $displayName = [string]$service.DisplayName
+            if ($name -match $serviceScopePattern -or $displayName -match $serviceScopePattern) {
+                $service
+            }
+        }
+    )
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'Web infrastructure services' -Message (
+            'No configured Node-RED, Nginx, reverse proxy, or IIS Windows service was found; web infrastructure service monitoring was skipped.'
+        ) -Key 'server-web-infrastructure-services'
+        return
+    }
+
+    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
+        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
+            [string]$service.Name
+        }
+        else {
+            [string]$service.DisplayName
+        }
+        $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
+            $display, $service.Name, $service.State, $service.Status, $service.StartMode
+        $serviceKey = 'server-web-infrastructure-service-{0}' -f $service.Name
+
+        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
+            Add-MonitorResult -Severity OK -Category Server -Check 'Web infrastructure service' -Message $message -Key $serviceKey
+        }
+        else {
+            Add-MonitorResult -Severity Alert -Category Server -Check 'Web infrastructure service' -Message $message -Key $serviceKey
         }
     }
 }
@@ -4742,9 +4878,10 @@ function Invoke-D4AMonitor {
         $frontendUris = @(ConvertTo-HttpUris -Addresses $script:SiteAddressFromPrompt)
         $resolvedSiteNames = @(Get-MonitorSiteDisplayNames -FrontendUris $frontendUris)
         $resolvedMonitoringName = if ($resolvedSiteNames.Count -gt 0) { $resolvedSiteNames -join ', ' } elseif ([string]::IsNullOrWhiteSpace($MonitoringName)) { $env:COMPUTERNAME } else { $MonitoringName.Trim() }
+        $apiUris = @(Get-MonitorApiUris -FrontendUris $frontendUris)
         for ($index = 0; $index -lt $frontendUris.Count; $index++) {
             $frontendUri = $frontendUris[$index]
-            $apiUri = Get-D4AApiUri -FrontendUri $frontendUri
+            $apiUri = $apiUris[$index]
             $monitorEndpoints.Add([pscustomobject]@{
                 FrontendUri = $frontendUri
                 ApiUri      = $apiUri
@@ -4803,6 +4940,7 @@ function Invoke-D4AMonitor {
     Invoke-SafeMonitorCheck -Category Server -Check 'D4A Windows services' -Action { Test-D4AWindowsServices }
     Invoke-SafeMonitorCheck -Category Server -Check 'SQL Server services' -Action { Test-SqlServerWindowsServices }
     Invoke-SafeMonitorCheck -Category Server -Check 'Mosquitto/MQTT service' -Action { Test-MosquittoWindowsService }
+    Invoke-SafeMonitorCheck -Category Server -Check 'Web infrastructure services' -Action { Test-WebInfrastructureWindowsServices }
         Invoke-SafeMonitorCheck -Category Server -Check 'API listener' -Action { Test-ApiListener }
         Invoke-SafeMonitorCheck -Category Server -Check Memory -Action { Test-MemoryHealth }
         Invoke-SafeMonitorCheck -Category Server -Check CPU -Action { Test-CpuHealth }
@@ -4991,6 +5129,9 @@ try {
     Test-MonitorConfigurationValues
     Initialize-MonitorLogging
     Invoke-MonitorAutomaticUpdate
+    if (-not [string]::IsNullOrWhiteSpace($AddSiteApiAddress) -and [string]::IsNullOrWhiteSpace($AddSiteAddress)) {
+        throw 'AddSiteApiAddress requires AddSiteAddress so each API address can be matched to a frontend site.'
+    }
     $managementModes = @(@(
             $ValidateConfiguration.IsPresent,
             $ShowConfiguration.IsPresent,
@@ -4999,7 +5140,7 @@ try {
             -not [string]::IsNullOrWhiteSpace($ClearIssueCooldown)
         ) | Where-Object { $_ })
     if ($managementModes.Count -gt 1) {
-        throw 'Use only one management command at a time: ValidateConfiguration, ShowConfiguration, AddSiteAddress, SetIssueCooldown, or ClearIssueCooldown.'
+        throw 'Use only one management command at a time: ValidateConfiguration, ShowConfiguration, AddSiteAddress/AddSiteApiAddress, SetIssueCooldown, or ClearIssueCooldown.'
     }
 
     if ($ShowConfiguration.IsPresent) {
@@ -5007,7 +5148,7 @@ try {
         $finalExitCode = 0
     }
     elseif (-not [string]::IsNullOrWhiteSpace($AddSiteAddress)) {
-        Add-MonitorConfiguredSites -Addresses $AddSiteAddress
+        Add-MonitorConfiguredSites -Addresses $AddSiteAddress -ApiAddresses $AddSiteApiAddress
         $finalExitCode = 0
     }
     elseif ($ValidateConfiguration.IsPresent) {

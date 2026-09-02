@@ -56,7 +56,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.4.2'
+$Script:ToolVersion = [version]'7.4.3'
 $Script:ToolReleaseDate = '2026-09-01'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1548,6 +1548,91 @@ function Format-SiteMonitoringNameAssignments {
     ) -join '; ')
 }
 
+function Get-DefaultSiteMonitoringApiAddress {
+    param([Parameter(Mandatory = $true)][string]$FrontendAddress)
+
+    $candidate = if ($FrontendAddress -match '^[A-Za-z][A-Za-z0-9+.-]*://') { $FrontendAddress } else { "https://$FrontendAddress" }
+    $frontendUri = $null
+    if (-not [Uri]::TryCreate($candidate, [UriKind]::Absolute, [ref]$frontendUri)) {
+        throw "A default API address could not be derived from: $FrontendAddress"
+    }
+
+    $hostName = $frontendUri.DnsSafeHost
+    $ipAddress = $null
+    $isLocalName = $hostName -notmatch '\.'
+    if ($frontendUri.Port -eq 1200 -or [Net.IPAddress]::TryParse($hostName, [ref]$ipAddress) -or $isLocalName) {
+        return [UriBuilder]::new($frontendUri.Scheme, $hostName, 32167, '/health').Uri.AbsoluteUri
+    }
+
+    $labels = $hostName.Split('.')
+    if ($labels[0] -notmatch '(?i)-api$') {
+        $labels[0] = '{0}-api' -f $labels[0]
+    }
+    $builder = [UriBuilder]::new($frontendUri.Scheme, ($labels -join '.'))
+    $builder.Port = -1
+    $builder.Path = '/health'
+    $builder.Query = ''
+    $builder.Fragment = ''
+    return $builder.Uri.AbsoluteUri
+}
+
+function Read-SiteMonitoringApiAddresses {
+    param(
+        [Parameter(Mandatory = $true)][string]$Hosts,
+        [string[]]$CurrentApiAddresses = @(),
+        [switch]$AllowPrevious
+    )
+
+    $hostList = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $apiAddresses = [System.Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $hostList.Count; $index++) {
+        $defaultApiAddress = if ($index -lt $CurrentApiAddresses.Count -and -not [string]::IsNullOrWhiteSpace($CurrentApiAddresses[$index])) {
+            $CurrentApiAddresses[$index]
+        }
+        else {
+            Get-DefaultSiteMonitoringApiAddress -FrontendAddress $hostList[$index]
+        }
+
+        while ($true) {
+            $navigation = if ($AllowPrevious.IsPresent) { '; P to previous' } else { '' }
+            Write-Host "The default API health endpoint is: $defaultApiAddress" -ForegroundColor Gray
+            $apiAddress = Read-Host "API address for $($hostList[$index]) (Enter keeps default; q to go back$navigation)"
+            if (Test-IsBack $apiAddress) { return $null }
+            if ($AllowPrevious.IsPresent -and ([string]$apiAddress).Trim() -ieq 'p') { return '__D4A_PREVIOUS_STEP__' }
+            if ([string]::IsNullOrWhiteSpace($apiAddress)) {
+                $apiAddresses.Add($defaultApiAddress) | Out-Null
+                break
+            }
+
+            $apiAddress = Normalize-UserPath $apiAddress
+            if (Test-SiteMonitoringHostList -Hosts $apiAddress) {
+                $apiAddresses.Add($apiAddress) | Out-Null
+                break
+            }
+            Write-Host 'Enter a valid API host or URL, for example api.example.com or https://api.example.com/health.' -ForegroundColor Yellow
+        }
+    }
+
+    return $apiAddresses.ToArray()
+}
+
+function Format-SiteMonitoringApiAssignments {
+    param(
+        [Parameter(Mandatory = $true)][string]$Hosts,
+        [Parameter(Mandatory = $true)][string[]]$ApiAddresses
+    )
+
+    $hostList = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($hostList.Count -ne $ApiAddresses.Count) {
+        throw 'Each monitored frontend site must have one API address.'
+    }
+    return (@(
+        for ($index = 0; $index -lt $hostList.Count; $index++) {
+            '{0} = {1}' -f $hostList[$index], $ApiAddresses[$index]
+        }
+    ) -join '; ')
+}
+
 function Read-SiteMonitoringNamesForSettings {
     param(
         [Parameter(Mandatory = $true)][string]$Hosts,
@@ -1928,6 +2013,7 @@ function New-SiteMonitoringConfigurationObject {
     param(
         [Parameter(Mandatory = $true)][string]$Hosts,
         [Parameter(Mandatory = $true)][string[]]$SiteNames,
+        [Parameter(Mandatory = $true)][string[]]$ApiAddresses,
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
         [Parameter(Mandatory = $true)][string]$MonitorVersion,
@@ -1936,8 +2022,8 @@ function New-SiteMonitoringConfigurationObject {
     )
 
     $siteAddresses = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    if ($siteAddresses.Count -ne $SiteNames.Count) {
-        throw 'Each monitored site must have one friendly monitoring name.'
+    if ($siteAddresses.Count -ne $SiteNames.Count -or $siteAddresses.Count -ne $ApiAddresses.Count) {
+        throw 'Each monitored site must have one friendly monitoring name and one API address.'
     }
 
     if ([string]::IsNullOrWhiteSpace($NodeExecutable)) {
@@ -1950,6 +2036,7 @@ function New-SiteMonitoringConfigurationObject {
         ConfigurationVersion = 1
         MonitoringName       = ($SiteNames -join ', ')
         SiteAddress          = $siteAddresses
+        ApiAddress           = $ApiAddresses
         SiteDisplayNames     = $SiteNames
         NotificationTo       = @($NotificationAddresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         # This is intentionally a valid JSON placeholder, not a credential.
@@ -2067,6 +2154,7 @@ function Set-SiteMonitoringDeploymentConfiguration {
         [Parameter(Mandatory = $true)][string]$ScriptPath,
         [Parameter(Mandatory = $true)][string]$Hosts,
         [Parameter(Mandatory = $true)][string[]]$SiteNames,
+        [Parameter(Mandatory = $true)][string[]]$ApiAddresses,
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
         [string]$NodeExecutable,
@@ -2081,6 +2169,7 @@ function Set-SiteMonitoringDeploymentConfiguration {
     $configuration = New-SiteMonitoringConfigurationObject `
         -Hosts $Hosts `
         -SiteNames $SiteNames `
+        -ApiAddresses $ApiAddresses `
         -NotificationAddresses $NotificationAddresses `
         -DeploymentFolder $DeploymentFolder `
         -MonitorVersion $metadata.VersionText `
@@ -2203,6 +2292,10 @@ function Get-SiteMonitoringConfigurationSummary {
         $fallbackName = if ([string]::IsNullOrWhiteSpace([string]$configuration.MonitoringName)) { $env:COMPUTERNAME } else { [string]$configuration.MonitoringName }
         $siteNames = @($sites | ForEach-Object { $fallbackName })
     }
+    $apiAddresses = @($configuration.ApiAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($apiAddresses.Count -ne $sites.Count) {
+        $apiAddresses = @($sites | ForEach-Object { Get-DefaultSiteMonitoringApiAddress -FrontendAddress $_ })
+    }
     $recipients = @($configuration.NotificationTo | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
     if ($sites.Count -eq 0 -or $recipients.Count -eq 0) {
         throw "The incomplete monitoring configuration is missing sites or notification recipients: $ConfigurationPath"
@@ -2211,6 +2304,7 @@ function Get-SiteMonitoringConfigurationSummary {
     return [pscustomobject]@{
         Hosts                 = $sites -join ','
         SiteNames             = $siteNames
+        ApiAddresses          = $apiAddresses
         NotificationAddresses = $recipients -join ','
         DiscordWebhookUrl     = if ($null -eq $configuration.PSObject.Properties['DiscordWebhookUrl']) { '' } else { [string]$configuration.DiscordWebhookUrl }
     }
@@ -2467,9 +2561,11 @@ function Get-SiteMonitoringLegacySettings {
     $monitoringName = if ([string]::IsNullOrWhiteSpace([string]$defaults.MonitoringName)) { $env:COMPUTERNAME } else { [string]$defaults.MonitoringName }
     $notificationTo = if ([string]::IsNullOrWhiteSpace([string]$defaults.NotificationTo)) { 'techsupport@decide4action.com' } else { [string]$defaults.NotificationTo }
     $siteNames = @($hosts -split ',' | ForEach-Object { $monitoringName })
+    $apiAddresses = @($hosts -split ',' | ForEach-Object { Get-DefaultSiteMonitoringApiAddress -FrontendAddress $_ })
     $configuration = New-SiteMonitoringConfigurationObject `
         -Hosts $hosts `
         -SiteNames $siteNames `
+        -ApiAddresses $apiAddresses `
         -NotificationAddresses $notificationTo `
         -DeploymentFolder $DeploymentFolder `
         -MonitorVersion $MonitorVersion
@@ -2856,7 +2952,7 @@ function Show-AddSiteMonitoring {
     Clear-Host
     Show-SectionTitle "Add New Site Monitoring"
     Write-Host "Create a scheduled D4A site and server health monitor that sends email notifications when issues are detected." -ForegroundColor Cyan
-    Write-Host "The monitor checks selected frontend site(s), their API endpoint(s), local D4A services, performance, disk space, logs, and relevant Windows events." -ForegroundColor Gray
+        Write-Host "The monitor checks selected frontend site(s), their configured API endpoint(s), local D4A services, performance, disk space, logs, and relevant Windows events." -ForegroundColor Gray
     Write-Host "Type q at any prompt to return to the previous menu." -ForegroundColor DarkGray
     if (-not $Script:IsAdmin) {
         Write-Host "Note: Administrator rights are required when creating scheduled tasks that run silently as SYSTEM." -ForegroundColor Yellow
@@ -2868,7 +2964,7 @@ function Show-AddSiteMonitoring {
         $wizardStep = 1
         $defaultFolder = $null
         $discordWebhookUrl = ''
-        while ($wizardStep -le 5) {
+        while ($wizardStep -le 6) {
             switch ($wizardStep) {
                 1 {
                     $hosts = Read-SiteMonitoringHosts
@@ -2890,6 +2986,16 @@ function Show-AddSiteMonitoring {
                     $wizardStep = 3
                 }
                 3 {
+                    $apiAddresses = Read-SiteMonitoringApiAddresses -Hosts $hosts -AllowPrevious
+                    if ($null -eq $apiAddresses) { return }
+                    if ($apiAddresses -eq '__D4A_PREVIOUS_STEP__') {
+                        $wizardStep = 2
+                        continue
+                    }
+                    $apiAddressAssignments = Format-SiteMonitoringApiAssignments -Hosts $hosts -ApiAddresses $apiAddresses
+                    $wizardStep = 4
+                }
+                4 {
                     if ($null -eq $defaultFolder) {
                         Write-StreamingLog -Percent 10 -Step 'Detect' -Description 'Looking for the Decide4Action Configuration folder from the Windows service.'
                         $defaultFolder = Get-DefaultD4AConfigurationFolder
@@ -2897,25 +3003,25 @@ function Show-AddSiteMonitoring {
                     $deploymentFolder = Read-SiteMonitoringFolder -DefaultFolder $defaultFolder
                     if ($null -eq $deploymentFolder) { return }
                     if ($deploymentFolder -eq '__D4A_PREVIOUS_STEP__') {
-                        $wizardStep = 2
-                        continue
-                    }
-                    $wizardStep = 4
-                }
-                4 {
-                    $emailAddresses = Read-SiteMonitoringEmailAddresses
-                    if ($null -eq $emailAddresses) { return }
-                    if ($emailAddresses -eq '__D4A_PREVIOUS_STEP__') {
                         $wizardStep = 3
                         continue
                     }
                     $wizardStep = 5
                 }
                 5 {
+                    $emailAddresses = Read-SiteMonitoringEmailAddresses
+                    if ($null -eq $emailAddresses) { return }
+                    if ($emailAddresses -eq '__D4A_PREVIOUS_STEP__') {
+                        $wizardStep = 4
+                        continue
+                    }
+                    $wizardStep = 6
+                }
+                6 {
                     $discordWebhookUrl = Read-SiteMonitoringDiscordWebhook
                     if ($null -eq $discordWebhookUrl) { return }
                     if ($discordWebhookUrl -eq '__D4A_PREVIOUS_STEP__') {
-                        $wizardStep = 4
+                        $wizardStep = 5
                         continue
                     }
                     $wizardStep = 6
@@ -2938,9 +3044,11 @@ function Show-AddSiteMonitoring {
             $existingSummary = Get-SiteMonitoringConfigurationSummary -ConfigurationPath $configurationPath
             $hosts = $existingSummary.Hosts
             $siteNames = @($existingSummary.SiteNames)
+            $apiAddresses = @($existingSummary.ApiAddresses)
             $emailAddresses = $existingSummary.NotificationAddresses
             $discordWebhookUrl = $existingSummary.DiscordWebhookUrl
             $siteNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $hosts -SiteNames $siteNames
+            $apiAddressAssignments = Format-SiteMonitoringApiAssignments -Hosts $hosts -ApiAddresses $apiAddresses
             Write-Host ''
             Write-Host 'An incomplete deployment from a previous nodemailer failure was detected.' -ForegroundColor Yellow
             Write-Host 'The existing monitor and site configuration will be preserved and the missing prerequisite will be repaired.' -ForegroundColor Gray
@@ -2952,6 +3060,7 @@ function Show-AddSiteMonitoring {
         Write-Host "Monitor release date: $($templateMetadata.ReleaseDate)" -ForegroundColor White
         Write-Host "Site address(es): $hosts" -ForegroundColor White
         Write-Host "Friendly site name(s): $siteNameAssignments" -ForegroundColor White
+        Write-Host "API address(es): $apiAddressAssignments" -ForegroundColor White
         Write-Host "Notification email(s): $emailAddresses" -ForegroundColor White
         $discordConfigured = -not [string]::IsNullOrWhiteSpace($discordWebhookUrl) -and $discordWebhookUrl -ine 'your Discord webhook URL'
         Write-Host "Discord notifications: $(if ($discordConfigured) { 'Configured' } else { 'Not configured' })" -ForegroundColor White
@@ -2998,6 +3107,7 @@ function Show-AddSiteMonitoring {
                     -ScriptPath $targetScriptPath `
                     -Hosts $hosts `
                     -SiteNames $siteNames `
+                    -ApiAddresses $apiAddresses `
                     -NotificationAddresses $emailAddresses `
                     -DeploymentFolder $deploymentFolder `
                     -NodeExecutable $nodeRuntime.NodePath `
@@ -3125,6 +3235,10 @@ function Show-UpdateExistingMonitoringConfiguration {
         if ($currentSiteNames.Count -ne $currentSiteCount) {
             $currentSiteNames = @($currentSites -split ',' | ForEach-Object { $currentName })
         }
+        $currentApiAddresses = @($configuration.ApiAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        if ($currentApiAddresses.Count -ne $currentSiteCount) {
+            $currentApiAddresses = @($currentSites -split ',' | ForEach-Object { Get-DefaultSiteMonitoringApiAddress -FrontendAddress $_ })
+        }
         $currentRecipients = (@($configuration.NotificationTo | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
         if ([string]::IsNullOrWhiteSpace($currentSites) -or [string]::IsNullOrWhiteSpace($currentName) -or [string]::IsNullOrWhiteSpace($currentRecipients)) {
             throw "The selected configuration is missing required site, name, or notification settings: $($target.ConfigPath)"
@@ -3137,6 +3251,7 @@ function Show-UpdateExistingMonitoringConfiguration {
             ConfigurationFile      = $target.ConfigPath
             FrontendSites          = $currentSites
             SiteNames              = (Format-SiteMonitoringNameAssignments -Hosts $currentSites -SiteNames $currentSiteNames)
+            ApiSites               = (Format-SiteMonitoringApiAssignments -Hosts $currentSites -ApiAddresses $currentApiAddresses)
             NotificationRecipients = $currentRecipients
         } | Format-List
 
@@ -3155,6 +3270,10 @@ function Show-UpdateExistingMonitoringConfiguration {
         $newSiteNames = Read-SiteMonitoringNamesForSettings -Hosts $newSites -CurrentSiteNames $currentSiteNames
         if ($null -eq $newSiteNames) { return }
         $newNameAssignments = Format-SiteMonitoringNameAssignments -Hosts $newSites -SiteNames $newSiteNames
+        $apiDefaults = if ($newSites -ieq $currentSites) { $currentApiAddresses } else { @() }
+        $newApiAddresses = Read-SiteMonitoringApiAddresses -Hosts $newSites -CurrentApiAddresses $apiDefaults
+        if ($null -eq $newApiAddresses) { return }
+        $newApiAssignments = Format-SiteMonitoringApiAssignments -Hosts $newSites -ApiAddresses $newApiAddresses
 
         while ($true) {
             $recipientInput = Read-Host "New notification email(s), comma-separated (Enter keeps: $currentRecipients; q to go back)"
@@ -3173,6 +3292,7 @@ function Show-UpdateExistingMonitoringConfiguration {
         Write-Host "Configuration: $($target.ConfigPath)" -ForegroundColor White
         Write-Host "Site address(es): $newSites" -ForegroundColor White
         Write-Host "Friendly site name(s): $newNameAssignments" -ForegroundColor White
+        Write-Host "API address(es): $newApiAssignments" -ForegroundColor White
         Write-Host "Notification email(s): $newRecipients" -ForegroundColor White
         Write-Host 'The current JSON configuration will be backed up before it is changed. Scheduled Tasks and monitor code are not changed.' -ForegroundColor Yellow
         $confirmation = Read-Host 'Type SAVE to back up and apply these monitoring settings (q to go back)'
@@ -3205,6 +3325,12 @@ function Show-UpdateExistingMonitoringConfiguration {
         else {
             $configuration.SiteDisplayNames = @($newSiteNames)
         }
+        if ($null -eq $configuration.PSObject.Properties['ApiAddress']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name ApiAddress -Value @($newApiAddresses)
+        }
+        else {
+            $configuration.ApiAddress = @($newApiAddresses)
+        }
         $configuration.NotificationTo = @($newRecipients -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         if ($null -eq $configuration.PSObject.Properties['LastSettingsUpdate']) {
             $configuration | Add-Member -MemberType NoteProperty -Name LastSettingsUpdate -Value (Get-Date).ToString('o')
@@ -3213,7 +3339,7 @@ function Show-UpdateExistingMonitoringConfiguration {
             $configuration.LastSettingsUpdate = (Get-Date).ToString('o')
         }
 
-        Write-StreamingLog -Percent 75 -Step 'Save' -Description 'Saving the updated site, recipient, and monitoring name settings.'
+        Write-StreamingLog -Percent 75 -Step 'Save' -Description 'Saving the updated site, API, recipient, and monitoring name settings.'
         Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $target.ConfigPath -AllowOverwrite | Out-Null
         Write-StreamingLog -Percent 100 -Step 'Done' -Description 'Monitoring settings update completed.'
         Complete-ScriptActionAudit -AuditRecord $actionAudit
@@ -3237,7 +3363,7 @@ function Show-UpdateExistingMonitoringMenu {
         Clear-Host
         Show-SectionTitle 'Update Existing Monitoring Settings'
         Write-Host 'Select an update for an installed monitor. No new monitor is deployed from this menu.' -ForegroundColor Cyan
-        Write-Host '1) Update sites, monitoring name, and notification emails'
+        Write-Host '1) Update sites, API addresses, monitoring name, and notification emails'
         Write-Host '2) Update monitoring script version'
         Write-Host '3) Update Scheduled Tasks to run silently as SYSTEM'
         Write-Host 'q) Back to Site Monitoring'
@@ -3410,7 +3536,7 @@ function Invoke-SiteMonitoringCommand {
 
 function Read-AdditionalMonitoringSites {
     while ($true) {
-        Write-Host 'Enter one or more additional frontend sites separated by commas. Their API health checks are added automatically.' -ForegroundColor Gray
+        Write-Host 'Enter one or more additional frontend sites separated by commas. You will select an API address for each site next.' -ForegroundColor Gray
         $sites = Read-Host 'Additional site address(es) (q to go back)'
         if (Test-IsBack $sites) { return $null }
         $sites = Normalize-UserPath $sites
@@ -3473,6 +3599,9 @@ function Show-ExecuteMonitoringCommandsMenu {
                 if ($null -eq $target) { continue }
                 $sites = Read-AdditionalMonitoringSites
                 if ($null -eq $sites) { continue }
+                $apiAddresses = Read-SiteMonitoringApiAddresses -Hosts $sites
+                if ($null -eq $apiAddresses) { continue }
+                $apiAddressText = $apiAddresses -join ','
                 $currentSites = ''
                 try {
                     $currentConfiguration = Read-SiteMonitoringConfiguration -ConfigurationPath $target.ConfigPath
@@ -3482,14 +3611,14 @@ function Show-ExecuteMonitoringCommandsMenu {
                 $addedSites = @(Get-AddedMonitoringValues -CurrentValues $currentSites -NewValues $sites)
                 $addedSitesText = if ($addedSites.Count -gt 0) { $addedSites -join ',' } else { 'None' }
                 Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Add site' -Action {
-                    Invoke-SiteMonitoringCommand -Target $target -Title 'Add Site to Existing Monitoring' -Description 'Adds the entered frontend site(s) to the persistent JSON configuration. Matching API health checks are derived automatically.' -ArgumentList @('-AddSiteAddress', $sites) -AuditIntervention 'Site Monitoring - Add Sites to Existing Monitoring' -AuditVariables "AddedSiteHostnames=$addedSitesText; AddedNotificationEmails=None; ConfigurationFile=$($target.ConfigPath)"
+                    Invoke-SiteMonitoringCommand -Target $target -Title 'Add Site to Existing Monitoring' -Description 'Adds the entered frontend site(s) and their selected API health endpoints to the persistent JSON configuration.' -ArgumentList @('-AddSiteAddress', $sites, '-AddSiteApiAddress', $apiAddressText) -AuditIntervention 'Site Monitoring - Add Sites to Existing Monitoring' -AuditVariables "AddedSiteHostnames=$addedSitesText; AddedApiAddresses=$apiAddressText; AddedNotificationEmails=None; ConfigurationFile=$($target.ConfigPath)"
                 }
             }
             '2' {
                 $target = Select-SiteMonitoringCommandTarget
                 if ($null -eq $target) { continue }
                 Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Show configuration' -Action {
-                    Invoke-SiteMonitoringCommand -Target $target -Title 'Show Current Monitoring Configuration' -Description 'Displays configured frontend sites, automatic API sites, scheduled frequency, recipients, log paths, and thresholds.' -ArgumentList @('-ShowConfiguration')
+                    Invoke-SiteMonitoringCommand -Target $target -Title 'Show Current Monitoring Configuration' -Description 'Displays configured frontend and API sites, scheduled frequency, recipients, log paths, and thresholds.' -ArgumentList @('-ShowConfiguration')
                 }
             }
             '3' {

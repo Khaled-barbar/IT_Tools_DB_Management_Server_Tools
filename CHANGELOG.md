@@ -6,6 +6,16 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.4.3 - 2026-09-02
+
+### Monitoring 7.4.1 - 2026-09-02
+
+- Added configurable API endpoints aligned with each frontend site in `D4A-ScheduledMonitor.config.json`. New deployments and site-addition workflows prompt for an API endpoint per site, with Enter retaining the established derived default. Existing configurations are migrated safely to their current derived API endpoints and can be updated through **Update Existing Monitoring Settings**.
+
+## Monitoring 7.4.0 - 2026-09-02
+
+- Added Windows-service monitoring for detected Node-RED, Nginx, reverse proxy, IIS, World Wide Web Publishing Service, and Internet Information Services services. A service outside `Running/OK` uses the established alert and recovery notification workflow.
+
 ## 7.4.2 - 2026-09-01
 
 - Simplified automatic D4A database selection: the connection screen now refers to active Decide4Action installations and displays only numbered database names.
