@@ -56,8 +56,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.4.3'
-$Script:ToolReleaseDate = '2026-09-01'
+$Script:ToolVersion = [version]'7.4.4'
+$Script:ToolReleaseDate = '2026-09-02'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -381,8 +381,9 @@ function Get-ITToolsVerifiedRemoteUpdateFile {
 
         Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
         if ($attempt -lt $MaximumAttempts) {
+            $retryReason = if ([string]::IsNullOrWhiteSpace($lastIssue)) { 'The downloaded file did not pass verification yet.' } else { $lastIssue }
             Write-StreamingLog -Percent $ProgressPercent -Step 'Update' -Description (
-                "GitHub file $RelativePath is still synchronizing (attempt $attempt of $MaximumAttempts). Retrying in $RetrySeconds second(s)."
+                "GitHub file $RelativePath did not yet match the signed release (attempt $attempt of $MaximumAttempts). $retryReason Retrying in $RetrySeconds second(s)."
             )
             Start-Sleep -Seconds $RetrySeconds
         }

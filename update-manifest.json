@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "version": "7.4.3",
-  "releaseDate": "2026-09-01",
+  "version": "7.4.4",
+  "releaseDate": "2026-09-02",
   "monitoring": {
     "version": "7.4.1",
     "releaseDate": "2026-09-02",
@@ -21,7 +21,7 @@
     },
     {
       "path": "D4A-DiskSpaceAnalyzer.ps1",
-      "sha256": "87E81C2201413206B4E84B6DDD24A03B9A20E191398BA1DD525ABE548692098F"
+      "sha256": "A741BC234F7E1A9668566E7F5BF5355D3F704C5EF5E19828E7CA2FAA0E46E3E5"
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
@@ -37,11 +37,11 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "2094179D5523F766571DCDF4A8F11C3F1E2334D295821BB6447BF3915684CCEA"
+      "sha256": "6CA0224573B23EFE1990E8EB305EF0509DB043B90FA8CD5B5C857976B30CBC71"
     },
     {
       "path": "version.txt",
-      "sha256": "767773AB4218AC1B37ECB5092AE134DFBC6A7AEBAAA6B613A151C7C886749648"
+      "sha256": "84E2ED3AB3870C35497C45E49FEE87B5BE2E199D0F4276F00CB81D8307D61DC0"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",

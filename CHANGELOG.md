@@ -6,6 +6,10 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.4.4 - 2026-09-02
+
+- Corrected automatic-update integrity validation to use the exact LF byte stream published by GitHub rather than local Windows line endings. The updater now provides the SHA-256 verification reason while it retries a temporarily inconsistent release.
+
 ## 7.4.3 - 2026-09-02
 
 ### Monitoring 7.4.1 - 2026-09-02
