@@ -20,7 +20,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.4.3, Monitoring 7.4.1 |
+| Current release | IT Tools 7.4.6, Monitoring 7.4.2 |
 
 ## Why it exists
 
@@ -33,6 +33,7 @@ The goal is not simply to save commands. It is to reduce dependence on individua
 - Database translation export, import, cleanup, search, migration, rollback, and performance diagnostics.
 - Guided D4A and Danone configuration operations with previews, confirmations, and timestamped backups.
 - Local server health checks, full SSL/TLS diagnostics, file and log searches, disk analysis, SQL backup-folder permissions, and port tests.
+- A DBConfig.js diagnostic launcher that validates D4A configuration syntax, declared settings, certificates, SMTP reachability, and approved database connectivity tests.
 - Scheduled site monitoring for application endpoints, APIs, services, resources, Nginx, Windows events, and Watchdog evidence, with actionable alert thresholds, explicit recovery notifications, email delivery, and optional Discord delivery.
 - Operator-attributed database intervention and monitoring-change logging with selected non-sensitive variables and success or failure status.
 - Daily error logging, progress reporting, input validation, finite timeouts, and recoverable database changes.
@@ -75,6 +76,8 @@ This toolkit supports operational work; it does not replace change-management ap
 | `D4A-ScheduledMonitor-v5.ps1` | Legacy compatibility update bridge for existing versioned monitor installations; do not use for new deployments |
 | `D4A-DiskSpaceAnalyzer.ps1` | Fast NTFS disk-usage analyzer with visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone timestamp-gap analyzer for text logs |
+| `Test-DBConfigFile.ps1` | On-demand DBConfig.js diagnostic companion, automatically updated after its first verified download |
+| `Test-DBConfigFile-CHANGELOG.md` | Version history for the DBConfig.js diagnostic companion |
 | `AssemblyRules_Luleburgas.sql` | Companion data for the Luleburgas system-settings workflow |
 | `RoleAdminLuleburgaz-DanoneStandard-090426.sql` | Companion data for the Luleburgas roles workflow |
 | `CHANGELOG.md` | Human-readable history of significant releases, features, and corrections |

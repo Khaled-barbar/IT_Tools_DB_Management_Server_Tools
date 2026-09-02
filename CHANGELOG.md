@@ -6,6 +6,17 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.4.6 - 2026-09-02
+
+- Added **Troubleshooting** as the third top-level menu and the on-demand **DBConfig.js Diagnostic** feature. It downloads `Test-DBConfigFile.ps1` only when selected, verifies its manifest hash and PowerShell syntax before launch, and automatically refreshes an existing downloaded copy through future IT Tools releases.
+- Added DBConfig Diagnostic 1.4.1 with `q` support at the interactive configuration-path prompt.
+
+## 7.4.5 - 2026-09-02
+
+### Monitoring 7.4.2 - 2026-09-02
+
+- Added the editable `LocalApiAddress` setting for the Direct API performance probe. New deployments write `http://127.0.0.1:32167/`; existing canonical and legacy monitoring configurations add it automatically with a one-time pre-migration backup, preserving all public site and API endpoint settings.
+
 ## 7.4.4 - 2026-09-02
 
 - Corrected automatic-update integrity validation to use the exact LF byte stream published by GitHub rather than local Windows line endings. The updater now provides the SHA-256 verification reason while it retries a temporarily inconsistent release.

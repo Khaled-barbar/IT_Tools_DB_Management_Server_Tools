@@ -8,7 +8,7 @@
 # | . \ | | | | (_| | |  __/ (_| | | | |_) | (_| | |  | |_) | (_| | |
 # |_|\_\__| |_|\__,_|_|\___|\__,_| | |____/ \__,_|_|  |_.__/ \__,_|_|
 # ==============================================================================
-# This script contains four groups of tools:
+# This script contains five groups of tools:
 #   1. Database tools:
 #      - Export language files
 #      - Import new languages with translated CSV files
@@ -30,9 +30,11 @@
 #      - Manage SQL backup folder permissions
 #      - Check whether a TCP port is open
 #      - Run a full SSL health check
-#   3. Site monitoring:
+#   3. Troubleshooting:
+#      - Diagnose a D4A dbconfig.js file
+#   4. Site monitoring:
 #      - Deploy and schedule the D4A health and performance monitor
-#   4. Logs:
+#   5. Logs:
 #      - Review the latest database and monitoring actions performed by this script
 # ==============================================================================
 
@@ -56,7 +58,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.4.4'
+$Script:ToolVersion = [version]'7.4.6'
 $Script:ToolReleaseDate = '2026-09-02'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -2038,6 +2040,8 @@ function New-SiteMonitoringConfigurationObject {
         MonitoringName       = ($SiteNames -join ', ')
         SiteAddress          = $siteAddresses
         ApiAddress           = $ApiAddresses
+        # Editable local D4A API base URL for direct on-server performance checks.
+        LocalApiAddress      = 'http://127.0.0.1:32167/'
         SiteDisplayNames     = $SiteNames
         NotificationTo       = @($NotificationAddresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         # This is intentionally a valid JSON placeholder, not a credential.
@@ -10573,6 +10577,67 @@ function Show-ServerInfrastructureSuite {
 }
 
 # ------------------------------------------------------------------------------
+# Troubleshooting
+# ------------------------------------------------------------------------------
+function Test-PowerShellCompanionScriptSyntax {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$FeatureName
+    )
+
+    $tokens = $null
+    $parserErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$tokens, [ref]$parserErrors)
+    if ($parserErrors.Count -gt 0) {
+        throw "$FeatureName cannot run because its verified companion script has a syntax error: $($parserErrors[0].Message)"
+    }
+}
+
+function Invoke-DbConfigDiagnostic {
+    Clear-Host
+    Show-SectionTitle 'DBConfig.js Diagnostic'
+    Write-Host 'Scans a selected D4A dbconfig.js file for JavaScript syntax, exported declarations, certificate references, SMTP connectivity, and database connection issues.' -ForegroundColor Cyan
+    Write-Host 'The diagnostic has its own guided launcher. Default checks can perform approved read-only SQL and SMTP authentication tests; it does not display passwords.' -ForegroundColor Gray
+    Write-Host 'Type q in the diagnostic path prompt, or press Enter, to return to this menu.' -ForegroundColor DarkGray
+    Write-Host ''
+
+    $diagnosticPath = Get-RequiredScriptFolderFilePath `
+        -FileName 'Test-DBConfigFile.ps1' `
+        -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/Test-DBConfigFile.ps1' `
+        -FeatureName 'DBConfig.js Diagnostic'
+
+    Write-StreamingLog -Percent 20 -Step 'Verify diagnostic' -Description 'Validating the downloaded DBConfig diagnostic script before launch.'
+    Test-PowerShellCompanionScriptSyntax -ScriptPath $diagnosticPath -FeatureName 'DBConfig.js Diagnostic'
+    Unblock-File -LiteralPath $diagnosticPath -ErrorAction SilentlyContinue
+    Write-StreamingLog -Percent 50 -Step 'Launch diagnostic' -Description 'Starting the interactive DBConfig.js diagnostic.'
+    & $diagnosticPath
+    Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'DBConfig.js diagnostic closed.'
+    Pause-Screen
+}
+
+function Show-TroubleshootingMenu {
+    while ($true) {
+        Clear-Host
+        Show-SectionTitle 'Troubleshooting'
+        Write-Host 'Run focused diagnostics for common D4A configuration and connectivity issues.' -ForegroundColor Cyan
+        Write-Host ''
+        Write-Host '1) DBConfig.js Diagnostic'
+        Write-Host 'q) Back to main menu'
+        Write-Host '------------------------------------------------------------------------'
+        $choice = Read-Host 'Choose an option'
+
+        if (Test-IsBack $choice) { return }
+        switch ($choice) {
+            '1' { Invoke-LoggedToolAction -Context 'Troubleshooting - DBConfig.js Diagnostic' -Action { Invoke-DbConfigDiagnostic } }
+            default {
+                Write-Host 'That is not a valid choice. Try again.' -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
+}
+
+# ------------------------------------------------------------------------------
 # Logs
 # ------------------------------------------------------------------------------
 function Show-LastScriptDatabaseActions {
@@ -10636,8 +10701,9 @@ function Show-MasterMainMenu {
         Write-Host "========================================================================" -ForegroundColor DarkGray
         Write-Host "1) Database Tools"
         Write-Host "2) Local server and file tools"
-        Write-Host "3) Site Monitoring"
-        Write-Host "4) Logs"
+        Write-Host "3) Troubleshooting"
+        Write-Host "4) Site Monitoring"
+        Write-Host "5) Logs"
         Write-Host "q) Quit"
         Write-Host "------------------------------------------------------------------------"
         $MainChoice = Read-Host "Choose an option"
@@ -10653,8 +10719,9 @@ function Show-MasterMainMenu {
         switch ($MainChoice) {
             '1' { Invoke-LoggedToolAction -Context "Main menu - Database Tools" -Action { Show-DatabaseMasterSuite } }
             '2' { Invoke-LoggedToolAction -Context "Main menu - Local server and file tools" -Action { Show-ServerInfrastructureSuite } }
-            '3' { Invoke-LoggedToolAction -Context "Main menu - Site Monitoring" -Action { Show-SiteMonitoringMenu } }
-            '4' { Invoke-LoggedToolAction -Context "Main menu - Logs" -Action { Show-LogsMenu } }
+            '3' { Invoke-LoggedToolAction -Context 'Main menu - Troubleshooting' -Action { Show-TroubleshootingMenu } }
+            '4' { Invoke-LoggedToolAction -Context "Main menu - Site Monitoring" -Action { Show-SiteMonitoringMenu } }
+            '5' { Invoke-LoggedToolAction -Context "Main menu - Logs" -Action { Show-LogsMenu } }
             default {
                 Write-Host "That is not a valid choice. Try again." -ForegroundColor Yellow
                 Start-Sleep -Seconds 1

@@ -62,12 +62,13 @@ To skip the network update check for one troubleshooting run:
 
 ## Navigation and common behavior
 
-The main menu has four areas:
+The main menu has five areas:
 
 1. Database Tools
 2. Local server and file tools
-3. Site Monitoring
-4. Logs
+3. Troubleshooting
+4. Site Monitoring
+5. Logs
 
 Type the displayed number to select an action. Type `q` at a visible prompt to return to the previous menu. After results or errors, press any key when prompted.
 
@@ -393,6 +394,12 @@ Procedure:
 
 The file is opened with read/write sharing so a currently active Data Collector log can be searched.
 
+## Troubleshooting
+
+### DBConfig.js Diagnostic
+
+Use **Troubleshooting > DBConfig.js Diagnostic** to inspect a D4A `dbconfig.js` file. The feature downloads `Test-DBConfigFile.ps1` only when it is first selected, verifies its SHA-256 against the release manifest, validates PowerShell syntax, and launches its guided diagnostic. The companion then prompts for the configuration file and offers default or custom checks for JavaScript syntax, exported database declarations, certificate paths, SMTP reachability/authentication, and database connectivity. Type `q` or press Enter at its path prompt to return. Once downloaded, the companion is automatically updated whenever a later IT Tools release includes a newer verified version.
+
 ## Site Monitoring
 
 ### Add New Site Monitoring
@@ -410,7 +417,7 @@ Prerequisites:
 Procedure:
 
 1. Enter one or more frontend sites separated by commas. Press Enter for `hostname:1200`.
-2. Enter one friendly name for each site when prompted. Its API endpoint is added automatically.
+2. Enter one friendly name for each site, then confirm or override the API health endpoint for each frontend site.
 3. Confirm or select the Configuration deployment folder.
 4. Enter one or more notification addresses separated by commas. An optional Discord webhook can be added afterward to the local monitoring JSON configuration; keep this credential out of shared files and screenshots.
 5. Review the complete deployment summary and type `DEPLOY`.
@@ -445,6 +452,8 @@ The monitor also checks GitHub for its own newer verified version whenever it ru
 Monitoring configuration is read and written explicitly as UTF-8, so friendly names with accents, such as `Salé`, remain readable in email subjects and Discord messages. Existing corrupted forms such as `SalÃ©` are repaired when loaded. Monitoring emails display **D4A Monitoring** as their sender name while keeping the site’s configured sender address. New and updated configurations include `DiscordWebhookUrl` directly after the email recipients with the safe placeholder `your Discord webhook URL`; replace that value with the site webhook to enable Discord. JSON does not support comments, so `DiscordWebhookUrlNote` documents the setting. The configuration summary reports only `Configured`, never the URL itself. Discord recovery notices show both the alert-time value and the current recovered value. Historical state values, including legacy accented site names, are repaired before display.
 
 Each `SiteAddress` entry has a matching `ApiAddress` entry in `monitor-logs\D4A-ScheduledMonitor.config.json`. During new deployment, IT Tools asks for the API address for every frontend site; press Enter to keep the derived default, such as `https://site-api.example.com/health`, or provide a different API host or full health path. Use **Site Monitoring > Update Existing Monitoring Settings > Update sites, API addresses, monitoring name, and notification emails** to change an installed site's API address. Existing configurations without `ApiAddress` are automatically populated with their current derived endpoints after the updated monitor runs.
+
+`LocalApiAddress` controls the Direct API performance probe run from the monitored server. New configurations use `http://127.0.0.1:32167/`. If the local D4A API listens on another loopback host or port, edit that single value in the same JSON file, then run the monitor with `-ValidateConfiguration`. Existing monitor configurations receive the setting automatically after version 7.4.2 starts, with a one-time pre-migration JSON backup retained beside the configuration.
 
 The monitor automatically discovers and checks local SQL Server Database Engine (`MSSQLSERVER` and `MSSQL$<instance>`), SQL Server Agent (`SQLSERVERAGENT` and `SQLAgent$<instance>`), and SQL Server Browser services. It also checks any detected Node-RED, Nginx, reverse proxy, IIS, World Wide Web Publishing Service, or Internet Information Services Windows service. Each detected service must be `Running/OK` or it produces a service alert and later recovery notification. SQL CEIP telemetry and SQL VSS Writer are intentionally excluded because they do not determine database availability.
 
@@ -506,7 +515,7 @@ The monitor reports and collects evidence. It does not restart services.
 
 This read-only menu displays the ten newest lines from `C:\Users\edit_log.txt`. Database intervention entries include the date/time, operator name entered before execution, intervention name, selected non-sensitive variables, and a `Success` or `Failed` result. Monitoring creation and update entries use the current Windows identity and include the relevant hostnames, schedule or daily-monitoring status, and newly added notification addresses. The daily detailed error files remain under the IT Tools `Logs` folder and provide stack traces when troubleshooting is required.
 
-## Troubleshooting
+## General troubleshooting
 
 ### The script will not start
 

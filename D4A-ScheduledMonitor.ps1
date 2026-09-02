@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.4.1
+# D4A-Monitor-Version: 7.4.2
 # D4A-Monitor-Release-Date: 2026-09-02
 
 <#
@@ -41,6 +41,9 @@
     Use -AddSiteAddress to persist one or more additional frontend sites in
     the JSON configuration. ApiAddress stores one API endpoint for each
     frontend; an omitted API address retains the default derived endpoint.
+    LocalApiAddress stores the local D4A API base URL used for direct API
+    performance checks. It defaults to http://127.0.0.1:32167/ and can be
+    adjusted in the JSON file when an installation uses another local host or port.
 
     Every execution checks the official GitHub Monitoring release for a newer
     version. monitor-version.txt, the monitoring release definition in
@@ -109,6 +112,10 @@ param(
     # Optional comma-separated API addresses aligned with SiteAddress. When an
     # item is omitted, the established D4A API derivation is retained.
     [string]$ApiAddress = '',
+
+    # Local D4A API base address used for direct, on-server API performance
+    # checks. This is normally stored in the site-specific JSON configuration.
+    [string]$LocalApiAddress = 'http://127.0.0.1:32167/',
 
     # Friendly identifier used in email subjects, for example "Akbou".
     [string]$MonitoringName = 'D4A site',
@@ -249,7 +256,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.4.1'
+$script:MonitorVersion = '7.4.2'
 $script:MonitorReleaseDate = '2026-09-02'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -944,6 +951,7 @@ function Ensure-MonitorConfigurationDefaults {
 
     $changed = $false
     $apiAddressAdded = $false
+    $localApiAddressAdded = $false
     if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrl']) {
         # JSON does not support comments. The visible placeholder keeps the
         # setting easy to find while remaining safely disabled at runtime.
@@ -961,12 +969,17 @@ function Ensure-MonitorConfigurationDefaults {
         $changed = $true
         $apiAddressAdded = $true
     }
+    if ($null -eq $Configuration.PSObject.Properties['LocalApiAddress']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'LocalApiAddress' -Value 'http://127.0.0.1:32167/'
+        $changed = $true
+        $localApiAddressAdded = $true
+    }
 
     if ($changed -and -not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
         $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
         try {
-            if ($apiAddressAdded) {
-                $migrationBackupPath = '{0}.pre-api-address-{1}.json' -f
+            if ($apiAddressAdded -or $localApiAddressAdded) {
+                $migrationBackupPath = '{0}.pre-endpoint-settings-{1}.json' -f
                     ([IO.Path]::Combine((Split-Path -Parent $script:ResolvedConfigPath), [IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath))),
                     (Get-Date -Format 'yyyyMMddHHmmss')
                 Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination $migrationBackupPath -ErrorAction Stop
@@ -1009,6 +1022,7 @@ function Import-MonitorConfiguration {
     $settingMap = [ordered]@{
         SiteAddress                = 'StringList'
         ApiAddress                 = 'StringList'
+        LocalApiAddress            = 'String'
         SiteDisplayNames           = 'StringList'
         MonitoringName             = 'String'
         NotificationTo             = 'StringList'
@@ -1139,6 +1153,10 @@ function Test-MonitorConfigurationValues {
         if ($configuredApiUris.Count -ne $configuredUris.Count) {
             throw 'ApiAddress must contain one API address for each SiteAddress entry.'
         }
+    }
+    $localApiUris = @(ConvertTo-HttpUris -Addresses $LocalApiAddress)
+    if ($localApiUris.Count -ne 1) {
+        throw 'LocalApiAddress must contain exactly one HTTP or HTTPS base address.'
     }
     if (-not [string]::IsNullOrWhiteSpace($SiteDisplayNames)) {
         $configuredNames = @($SiteDisplayNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -1294,6 +1312,7 @@ function Show-MonitorConfiguration {
         SiteNames            = (@(for ($index = 0; $index -lt $configuredSites.Count; $index++) { '{0} = {1}' -f $configuredSites[$index], $configuredNames[$index] }) -join '; ')
         FrontendSites        = ($configuredSites -join ', ')
         ApiSites             = ($apiSites -join ', ')
+        LocalApiAddress      = $LocalApiAddress
         NotificationAddresses = $NotificationTo
         DiscordNotifications = (Get-DiscordDeliveryConfigurationStatus)
         ScheduledFrequency   = $frequency
@@ -2787,7 +2806,7 @@ function Test-ApplicationPerformance {
     )
 
     $targets = @(
-        [pscustomobject]@{ Name = 'Direct API'; BaseUri = [Uri]'http://127.0.0.1:32167/' },
+        [pscustomobject]@{ Name = 'Direct API'; BaseUri = (Get-AuthorityBaseUri -Uri (@(ConvertTo-HttpUris -Addresses $LocalApiAddress)[0])) },
         [pscustomobject]@{ Name = 'Public API'; BaseUri = $PublicApiBaseUri }
     )
     $endpoints = @(

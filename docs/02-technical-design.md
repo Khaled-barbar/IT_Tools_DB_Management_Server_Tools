@@ -52,7 +52,7 @@ The main script is organized around shared services and feature suites:
 
 1. Startup initializes shared state, checks the release version, and invokes the automatic updater when needed.
 2. Shared helpers provide navigation, logging, progress, timeouts, password input, SQL access, validation, backup creation, and result formatting.
-3. The main menu routes to Database Tools, Local server and file tools, Site Monitoring, or Logs.
+3. The main menu routes to Database Tools, Local server and file tools, Troubleshooting, Site Monitoring, or Logs.
 4. Feature functions collect and validate inputs before invoking SQL, filesystem, service, or child-script operations.
 5. Exceptions are caught at feature boundaries and written to a daily log before control returns to the menu.
 

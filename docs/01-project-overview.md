@@ -60,10 +60,11 @@ Those issues led to reusable patterns rather than one-off fixes:
 
 ### Evolution into a toolkit
 
-As more recurring work was added, disconnected scripts became a maintenance problem of their own. The solution evolved into one central interface with four operational areas:
+As more recurring work was added, disconnected scripts became a maintenance problem of their own. The solution evolved into one central interface with five operational areas:
 
 - Database Tools for translations, imports, migrations, D4A configuration, diagnostics, and recovery.
 - Local server and file tools for health checks, full SSL/TLS diagnostics, searches, disk analysis, permissions, ports, and Data Collector logs.
+- Troubleshooting for focused, verified configuration diagnostics such as `dbconfig.js` analysis.
 - Site Monitoring for deployment, configuration, scheduled execution, updates, testing, alert controls, and diagnostics.
 - Logs for reviewing the latest operator-attributed database interventions and monitoring changes performed by the toolkit.
 
@@ -98,6 +99,7 @@ flowchart TD
     User["Level 1 or Level 2 technician"] --> Main["Central IT Tools menu"]
     Main --> DB["Database Tools"]
     Main --> Server["Local server and file tools"]
+    Main --> Troubleshoot["Troubleshooting"]
     Main --> Monitor["Site Monitoring"]
     Main --> Logs["Action Logs"]
     DB --> SQL["SQL Server and D4A data"]
