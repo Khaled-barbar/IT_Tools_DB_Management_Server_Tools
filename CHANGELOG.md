@@ -6,6 +6,10 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.4.8 - 2026-09-03
+
+- Fixed DBConfig Diagnostic 1.5.1 so the detailed scan report is rendered in the same PowerShell window after interactive launch instead of being lost in a child process.
+
 ## 7.4.7 - 2026-09-03
 
 - Updated DBConfig Diagnostic to 1.5.0. It discovers D4A `dbconfig.js` files from active Data Collector service executable paths, lists multiple detected installations by full path, and retains manual selection when discovery is unavailable.

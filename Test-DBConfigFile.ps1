@@ -74,7 +74,7 @@ results so it is friendlier when launched interactively.
 Bypass the right-click menu and run once with the supplied command-line
 parameters. Intended for scheduled tasks and automation.
 #>
-# D4A-DBConfigDiagnostic-Version: 1.5.0
+# D4A-DBConfigDiagnostic-Version: 1.5.1
 # D4A-DBConfigDiagnostic-ReleaseDate: 2026-09-03
 [CmdletBinding()]
 param(
@@ -120,8 +120,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:DbConfigDiagnosticVersion = '1.5.0'
+$script:DbConfigDiagnosticVersion = '1.5.1'
 $script:DbConfigDiagnosticReleaseDate = '2026-09-03'
+$script:DbConfigDiagnosticScriptPath = [string]$PSCommandPath
 
 function Show-InteractiveParameterHelp {
     Write-Host ''
@@ -386,15 +387,13 @@ function Invoke-InteractiveLauncher {
         Write-Host ("Parameters: {0}" -f $(if (@($currentArguments).Count -gt 0) { @($currentArguments) -join ' ' } else { '<defaults>' })) -ForegroundColor DarkGray
         Write-Host ''
 
-        $powerShellExe = Join-Path $PSHOME 'powershell.exe'
-        if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) {
-            $powerShellExe = (Get-Process -Id $PID).Path
-        }
-        $childArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-InternalExecution') + @($currentArguments)
+        $childArguments = @('-InternalExecution') + @($currentArguments)
 
         try {
-            & $powerShellExe @childArguments
-            $childExitCode = $LASTEXITCODE
+            # Run the scanner in this console so its detailed report remains
+            # visible beneath the launcher instead of disappearing in a child process.
+            & $script:DbConfigDiagnosticScriptPath @childArguments
+            $childExitCode = 0
             Write-Host ''
             Write-Host "Execution finished with exit code $childExitCode." -ForegroundColor $(if ($childExitCode -eq 0) { 'Green' } else { 'Yellow' })
         }
@@ -2870,7 +2869,8 @@ if ($LegacyRunExtendedSimulationsRequested -and $SkipExtendedDbConfigSimulations
 }
 
 if ([string]::IsNullOrWhiteSpace($Path)) {
-    $Path = Read-Host 'Enter the full path to DBConfig.js'
+    $Path = Read-DbConfigPathFromDataCollectorDiscovery
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
 }
 
 $resolvedConfig = Resolve-Path -LiteralPath $Path -ErrorAction SilentlyContinue

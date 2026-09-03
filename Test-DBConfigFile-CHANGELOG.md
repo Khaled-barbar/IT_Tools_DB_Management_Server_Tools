@@ -7,6 +7,11 @@ Versioning follows semantic versioning in a practical way:
 - Minor versions are for new diagnostic capabilities or default behavior changes.
 - Patch versions are for corrections, compatibility fixes, and output refinements.
 
+## [1.5.1] - 2026-09-03
+
+### Fixed
+- Restored the detailed diagnostic report in the same PowerShell window after an interactive launch. The launcher now invokes the scan in-process rather than opening a child PowerShell process whose output could be lost.
+
 ## [1.5.0] - 2026-09-03
 
 ### Added
