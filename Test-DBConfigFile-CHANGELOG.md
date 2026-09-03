@@ -7,6 +7,11 @@ Versioning follows semantic versioning in a practical way:
 - Minor versions are for new diagnostic capabilities or default behavior changes.
 - Patch versions are for corrections, compatibility fixes, and output refinements.
 
+## [1.5.2] - 2026-09-03
+
+### Fixed
+- Fixed interactive diagnostic launches that could bind `-Path` as the `ConnectionTimeoutSeconds` positional value. The launcher now forwards each allowed setting as an explicit named parameter while retaining the report in the current PowerShell window.
+
 ## [1.5.1] - 2026-09-03
 
 ### Fixed

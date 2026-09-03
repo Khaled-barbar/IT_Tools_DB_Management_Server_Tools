@@ -74,7 +74,7 @@ results so it is friendlier when launched interactively.
 Bypass the right-click menu and run once with the supplied command-line
 parameters. Intended for scheduled tasks and automation.
 #>
-# D4A-DBConfigDiagnostic-Version: 1.5.1
+# D4A-DBConfigDiagnostic-Version: 1.5.2
 # D4A-DBConfigDiagnostic-ReleaseDate: 2026-09-03
 [CmdletBinding()]
 param(
@@ -120,7 +120,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:DbConfigDiagnosticVersion = '1.5.1'
+$script:DbConfigDiagnosticVersion = '1.5.2'
 $script:DbConfigDiagnosticReleaseDate = '2026-09-03'
 $script:DbConfigDiagnosticScriptPath = [string]$PSCommandPath
 
@@ -193,6 +193,79 @@ function ConvertFrom-InteractiveParameterText {
     }
 
     return @($tokens)
+}
+
+function ConvertTo-DbConfigDiagnosticInvocationParameters {
+    param([string[]]$Arguments)
+
+    # Splat a named parameter map instead of a raw argument array. This avoids
+    # PowerShell treating a later parameter token as a positional timeout value.
+    $parameters = @{ InternalExecution = $true }
+    $valueParameters = @{
+        path                     = 'Path'
+        connectiontimeoutseconds = 'ConnectionTimeoutSeconds'
+        probedbconfigname        = 'ProbeDbConfigName'
+        probepayloadsizes        = 'ProbePayloadSizes'
+        smtptimeoutseconds       = 'SmtpTimeoutSeconds'
+    }
+    $switchParameters = @{
+        skipdatabasetests                = 'SkipDatabaseTests'
+        nodatabasepasswordprompt         = 'NoDatabasePasswordPrompt'
+        runusertablesettingsprobe         = 'RunUserTableSettingsProbe'
+        skipusertablesettingsprobe        = 'SkipUserTableSettingsProbe'
+        allowunencryptedsqldiagnostic     = 'AllowUnencryptedSqlDiagnostic'
+        skipunencryptedsqldiagnostic      = 'SkipUnencryptedSqlDiagnostic'
+        runextendeddbconfigsimulations    = 'RunExtendedDbConfigSimulations'
+        skipextendeddbconfigsimulations   = 'SkipExtendedDbConfigSimulations'
+        skipsmtptcptest                   = 'SkipSmtpTcpTest'
+        skipsmtpauthtest                  = 'SkipSmtpAuthTest'
+        setexitcode                       = 'SetExitCode'
+    }
+
+    for ($index = 0; $index -lt @($Arguments).Count; $index++) {
+        $token = [string]$Arguments[$index]
+        if ($token -notmatch '^-(?<name>[A-Za-z][A-Za-z0-9]*)(?::(?<value>.*))?$') {
+            throw "Unexpected launcher argument '$token'. Enter H at the menu to view the supported parameters."
+        }
+
+        $parameterName = $Matches['name']
+        $key = $parameterName.ToLowerInvariant()
+        $hasInlineValue = $token.Contains(':')
+        $rawValue = if ($hasInlineValue) { $Matches['value'] } else { $null }
+
+        if ($valueParameters.ContainsKey($key)) {
+            if (-not $hasInlineValue) {
+                if (($index + 1) -ge @($Arguments).Count -or [string]$Arguments[$index + 1] -match '^-') {
+                    throw "Parameter '-$parameterName' requires a value."
+                }
+                $index++
+                $rawValue = [string]$Arguments[$index]
+            }
+
+            switch ($key) {
+                'connectiontimeoutseconds' { $parameters[$valueParameters[$key]] = [int]$rawValue; break }
+                'smtptimeoutseconds' { $parameters[$valueParameters[$key]] = [int]$rawValue; break }
+                'probepayloadsizes' {
+                    $parameters[$valueParameters[$key]] = @($rawValue -split ',' | ForEach-Object { [int]$_.Trim() })
+                    break
+                }
+                default { $parameters[$valueParameters[$key]] = $rawValue; break }
+            }
+            continue
+        }
+
+        if ($switchParameters.ContainsKey($key)) {
+            if ($hasInlineValue) {
+                throw "Switch '-$parameterName' does not accept a value."
+            }
+            $parameters[$switchParameters[$key]] = $true
+            continue
+        }
+
+        throw "Unknown parameter '-$parameterName'. Enter H at the menu to view the supported parameters."
+    }
+
+    return $parameters
 }
 
 function Get-D4ADataCollectorDbConfigCandidates {
@@ -387,12 +460,11 @@ function Invoke-InteractiveLauncher {
         Write-Host ("Parameters: {0}" -f $(if (@($currentArguments).Count -gt 0) { @($currentArguments) -join ' ' } else { '<defaults>' })) -ForegroundColor DarkGray
         Write-Host ''
 
-        $childArguments = @('-InternalExecution') + @($currentArguments)
-
         try {
             # Run the scanner in this console so its detailed report remains
             # visible beneath the launcher instead of disappearing in a child process.
-            & $script:DbConfigDiagnosticScriptPath @childArguments
+            $childParameters = ConvertTo-DbConfigDiagnosticInvocationParameters -Arguments $currentArguments
+            & $script:DbConfigDiagnosticScriptPath @childParameters
             $childExitCode = 0
             Write-Host ''
             Write-Host "Execution finished with exit code $childExitCode." -ForegroundColor $(if ($childExitCode -eq 0) { 'Green' } else { 'Yellow' })
