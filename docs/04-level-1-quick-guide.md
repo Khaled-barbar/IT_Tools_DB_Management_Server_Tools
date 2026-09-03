@@ -4,7 +4,7 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 
 ## Start the tool
 
-1. [Download the latest IT Tools script](https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/IT_Tools_Database_Translations_and_Server_Checks.ps1).
+1. <a href="https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/IT_Tools_Database_Translations_and_Server_Checks.ps1" download>Download the latest IT Tools script</a>.
 2. Save it in a user-owned folder, such as `Desktop\IT Tools`.
 3. Right-click `IT_Tools_Database_Translations_and_Server_Checks.ps1` and select **Run with PowerShell**.
 4. Wait for the automatic update check to finish. Press a key when asked.
