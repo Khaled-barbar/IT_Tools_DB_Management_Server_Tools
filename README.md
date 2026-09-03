@@ -20,7 +20,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.4.6, Monitoring 7.4.2 |
+| Current release | IT Tools 7.4.7, Monitoring 7.4.2 |
 
 ## Why it exists
 
@@ -33,7 +33,7 @@ The goal is not simply to save commands. It is to reduce dependence on individua
 - Database translation export, import, cleanup, search, migration, rollback, and performance diagnostics.
 - Guided D4A and Danone configuration operations with previews, confirmations, and timestamped backups.
 - Local server health checks, full SSL/TLS diagnostics, file and log searches, disk analysis, SQL backup-folder permissions, and port tests.
-- A DBConfig.js diagnostic launcher that validates D4A configuration syntax, declared settings, certificates, SMTP reachability, and approved database connectivity tests.
+- A DBConfig.js diagnostic launcher that detects installed D4A configurations from Data Collector services, then validates syntax, declared settings, certificates, SMTP reachability, and approved database connectivity tests.
 - Scheduled site monitoring for application endpoints, APIs, services, resources, Nginx, Windows events, and Watchdog evidence, with actionable alert thresholds, explicit recovery notifications, email delivery, and optional Discord delivery.
 - Operator-attributed database intervention and monitoring-change logging with selected non-sensitive variables and success or failure status.
 - Daily error logging, progress reporting, input validation, finite timeouts, and recoverable database changes.

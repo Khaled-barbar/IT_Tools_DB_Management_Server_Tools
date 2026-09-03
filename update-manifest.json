@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "version": "7.4.6",
-  "releaseDate": "2026-09-02",
+  "version": "7.4.7",
+  "releaseDate": "2026-09-03",
   "monitoring": {
     "version": "7.4.2",
     "releaseDate": "2026-09-02",
@@ -37,15 +37,15 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "9FC5C86730E774047F98603B15249EA9C0D16176329B38295EBB316F1514ACFB"
+      "sha256": "3F9E0044D451FDF7A79E109C12BACFBCA47BF17550DD8A88F0365F56765A9669"
     },
     {
       "path": "version.txt",
-      "sha256": "D341AD280FCDCE7D798F149CD02F65562DCEC97E06D005BC61692CAB8A563A96"
+      "sha256": "A8229AC6CB19B83D81C4900D4AEA61F9EC4A5F0C8B704DBAE2EED02FA90EA460"
     },
     {
       "path": "Test-DBConfigFile.ps1",
-      "sha256": "41E9354F2E2967F8318D82B57CCC8FC2E847F2E29EFB14D2A8F33ECF417B475F"
+      "sha256": "52BCAE6AD9C1A01B7384B8998FC1A6A03856829F1FB44650A91AB36C82EB0360"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",

@@ -11,7 +11,9 @@ When started with Run with PowerShell, an interactive launcher offers default
 or custom parameters and keeps the window open after every scan.
 
 .PARAMETER Path
-Path to the DBConfig.js file. If omitted, the script prompts for it.
+Path to the DBConfig.js file. If omitted, the interactive launcher discovers
+dbconfig.js files from active D4A Data Collector service paths before offering
+manual entry.
 
 .PARAMETER ConnectionTimeoutSeconds
 SQL connection timeout used for each database credential test.
@@ -72,8 +74,8 @@ results so it is friendlier when launched interactively.
 Bypass the right-click menu and run once with the supplied command-line
 parameters. Intended for scheduled tasks and automation.
 #>
-# D4A-DBConfigDiagnostic-Version: 1.4.1
-# D4A-DBConfigDiagnostic-ReleaseDate: 2026-09-02
+# D4A-DBConfigDiagnostic-Version: 1.5.0
+# D4A-DBConfigDiagnostic-ReleaseDate: 2026-09-03
 [CmdletBinding()]
 param(
     [string]$Path,
@@ -118,8 +120,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:DbConfigDiagnosticVersion = '1.4.1'
-$script:DbConfigDiagnosticReleaseDate = '2026-09-02'
+$script:DbConfigDiagnosticVersion = '1.5.0'
+$script:DbConfigDiagnosticReleaseDate = '2026-09-03'
 
 function Show-InteractiveParameterHelp {
     Write-Host ''
@@ -192,6 +194,107 @@ function ConvertFrom-InteractiveParameterText {
     return @($tokens)
 }
 
+function Get-D4ADataCollectorDbConfigCandidates {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    try {
+        $services = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop | Where-Object {
+                ([string]$_.Name -match '(?i)^(?:Decide4Action|D4A).*data\s*collector') -or
+                ([string]$_.DisplayName -match '(?i)^(?:Decide4Action|D4A).*data\s*collector')
+            })
+    }
+    catch {
+        return @()
+    }
+
+    foreach ($service in $services) {
+        $pathName = [Environment]::ExpandEnvironmentVariables([string]$service.PathName)
+        if ([string]::IsNullOrWhiteSpace($pathName)) { continue }
+
+        $executablePath = if ($pathName -match '^\s*"(?<Path>[^"]+\.exe)"') {
+            $Matches['Path']
+        }
+        elseif ($pathName -match '(?i)^\s*(?<Path>.+?\.exe)(?:\s|$)') {
+            $Matches['Path'].Trim()
+        }
+        else {
+            continue
+        }
+
+        try {
+            # The Data Collector executable lives directly under
+            # <D4A root>\Data Collector, including paths using Configuration\.. .
+            $normalizedExecutablePath = [IO.Path]::GetFullPath($executablePath)
+            $dataCollectorFolder = Split-Path -Parent $normalizedExecutablePath
+            $applicationRoot = Split-Path -Parent $dataCollectorFolder
+            if ([string]::IsNullOrWhiteSpace($applicationRoot)) { continue }
+
+            $candidatePath = Join-Path $applicationRoot 'Services\API\dbconfig.js'
+            if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) { continue }
+
+            $resolvedCandidatePath = (Resolve-Path -LiteralPath $candidatePath -ErrorAction Stop).Path
+            if ($seen.Add($resolvedCandidatePath)) {
+                $candidates.Add($resolvedCandidatePath) | Out-Null
+            }
+        }
+        catch {
+            # One malformed service path must not block discovery for other D4A installations.
+        }
+    }
+
+    return @($candidates.ToArray() | Sort-Object)
+}
+
+function Read-ManualDbConfigPath {
+    while ($true) {
+        Write-Host ''
+        $enteredPath = (Read-Host 'Enter the full path to dbconfig.js, press Enter to return, or type q').Trim().Trim('"').Trim("'")
+        if ($enteredPath -ieq 'q' -or [string]::IsNullOrWhiteSpace($enteredPath)) { return $null }
+
+        $resolvedPath = Resolve-Path -LiteralPath $enteredPath -ErrorAction SilentlyContinue
+        if ($resolvedPath -and (Test-Path -LiteralPath $resolvedPath.Path -PathType Leaf)) {
+            return $resolvedPath.Path
+        }
+
+        Write-Host "The file was not found: $enteredPath" -ForegroundColor Red
+        Write-Host 'Check the path and try again.' -ForegroundColor Yellow
+    }
+}
+
+function Read-DbConfigPathFromDataCollectorDiscovery {
+    $candidates = @(Get-D4ADataCollectorDbConfigCandidates)
+    if ($candidates.Count -eq 0) {
+        Write-Host 'No dbconfig.js file was detected from Decide4Action Data Collector services.' -ForegroundColor Yellow
+        return Read-ManualDbConfigPath
+    }
+
+    Write-Host ''
+    Write-Host 'Detected D4A dbconfig.js file(s)' -ForegroundColor Cyan
+    for ($index = 0; $index -lt $candidates.Count; $index++) {
+        Write-Host ('[{0}] {1}' -f ($index + 1), $candidates[$index])
+    }
+
+    while ($true) {
+        $prompt = if ($candidates.Count -eq 1) {
+            'Press Enter to use [1], type M for a manual path, or type q to return'
+        }
+        else {
+            'Enter the number of the dbconfig.js file to scan, type M for a manual path, or type q to return'
+        }
+        $selection = (Read-Host $prompt).Trim()
+        if ($selection -ieq 'q') { return $null }
+        if ($selection -ieq 'm') { return Read-ManualDbConfigPath }
+        if ([string]::IsNullOrWhiteSpace($selection) -and $candidates.Count -eq 1) { return $candidates[0] }
+
+        $selectedIndex = 0
+        if ([int]::TryParse($selection, [ref]$selectedIndex) -and $selectedIndex -ge 1 -and $selectedIndex -le $candidates.Count) {
+            return $candidates[$selectedIndex - 1]
+        }
+        Write-Host 'Enter a listed number, M for a manual path, or q to return.' -ForegroundColor Yellow
+    }
+}
+
 function Add-InteractiveConfigPath {
     param([string[]]$Arguments)
 
@@ -202,28 +305,11 @@ function Add-InteractiveConfigPath {
             break
         }
     }
-    if ($hasPath) {
-        return @($Arguments)
-    }
+    if ($hasPath) { return @($Arguments) }
 
-    while ($true) {
-        Write-Host ''
-        $enteredPath = (Read-Host 'Enter the full path to dbconfig.js, press Enter to return, or type q').Trim().Trim('"').Trim("'")
-        if ($enteredPath -ieq 'q') {
-            return $null
-        }
-        if ([string]::IsNullOrWhiteSpace($enteredPath)) {
-            return $null
-        }
-
-        $resolvedPath = Resolve-Path -LiteralPath $enteredPath -ErrorAction SilentlyContinue
-        if ($resolvedPath -and (Test-Path -LiteralPath $resolvedPath.Path -PathType Leaf)) {
-            return @($Arguments) + @('-Path', $resolvedPath.Path)
-        }
-
-        Write-Host "The file was not found: $enteredPath" -ForegroundColor Red
-        Write-Host 'Check the path and try again.' -ForegroundColor Yellow
-    }
+    $selectedPath = Read-DbConfigPathFromDataCollectorDiscovery
+    if ([string]::IsNullOrWhiteSpace($selectedPath)) { return $null }
+    return @($Arguments) + @('-Path', $selectedPath)
 }
 
 function Read-PostExecutionChoice {

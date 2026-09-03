@@ -7,6 +7,12 @@ Versioning follows semantic versioning in a practical way:
 - Minor versions are for new diagnostic capabilities or default behavior changes.
 - Patch versions are for corrections, compatibility fixes, and output refinements.
 
+## [1.5.0] - 2026-09-03
+
+### Added
+- Added automatic `dbconfig.js` discovery from active Decide4Action and D4A Data Collector service executable paths. The diagnostic normalizes each service path, derives the D4A installation root, and checks `Services\API\dbconfig.js`.
+- Added numbered selection when multiple D4A installations and dbconfig files are found on the same server, with manual-path and `q` return options retained.
+
 ## [1.4.1] - 2026-09-02
 
 ### Changed
