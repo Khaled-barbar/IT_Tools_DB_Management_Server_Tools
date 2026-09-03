@@ -58,7 +58,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.4.9'
+$Script:ToolVersion = [version]'7.4.10'
 $Script:ToolReleaseDate = '2026-09-03'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3909,6 +3909,89 @@ function Get-D4AJavaScriptStringProperty {
     }
 }
 
+function Get-D4AJavaScriptIntegerProperty {
+    param(
+        [Parameter(Mandatory = $true)][string]$ObjectBody,
+        [Parameter(Mandatory = $true)][string]$PropertyName
+    )
+
+    $escapedName = [regex]::Escape($PropertyName)
+    $propertyPattern = '(?ism)(?:^|[,\r\n])\s*(?:["'']' + $escapedName + '["'']|' + $escapedName + ')\s*:\s*(?:["''](?<quoted>\d+)["'']|(?<value>\d+))'
+    $match = [regex]::Match($ObjectBody, $propertyPattern)
+    if (-not $match.Success) { return 0 }
+
+    $rawValue = if ($match.Groups['quoted'].Success) { $match.Groups['quoted'].Value } else { $match.Groups['value'].Value }
+    $port = 0
+    if ([int]::TryParse($rawValue, [ref]$port) -and $port -ge 1 -and $port -le 65535) {
+        return $port
+    }
+
+    return 0
+}
+
+function ConvertTo-D4ASqlServerInstance {
+    param(
+        [Parameter(Mandatory = $true)][string]$Server,
+        [int]$Port = 0
+    )
+
+    $endpoint = $Server.Trim()
+    $hasTcpPrefix = $endpoint -match '^(?i)tcp:'
+    if ($hasTcpPrefix) {
+        $endpoint = $endpoint.Substring(4)
+    }
+    if ([string]::IsNullOrWhiteSpace($endpoint)) {
+        throw 'The D4A database configuration contains an empty server value.'
+    }
+
+    $hasExplicitPort = $endpoint -match ',\s*\d+\s*$'
+    $isLocalEndpoint = $endpoint -match '^(?i)(?:localhost|\.|\(local\)|127\.0\.0\.1|::1)(?:[\\,].*)?$' -or
+        $endpoint -match ('^(?i)' + [regex]::Escape($env:COMPUTERNAME) + '(?:[\\,].*)?$')
+
+    if ($Port -gt 0 -and -not $hasExplicitPort -and $endpoint -notmatch '\\') {
+        $endpoint = '{0},{1}' -f $endpoint, $Port
+    }
+
+    # Explicit TCP prevents remote targets from being redirected to local
+    # shared-memory or named-pipe resolution on the Data Collector server.
+    if ($hasTcpPrefix -or -not $isLocalEndpoint) {
+        return "tcp:$endpoint"
+    }
+
+    return $endpoint
+}
+
+function Resolve-D4ADatabasePassword {
+    param(
+        [Parameter(Mandatory = $true)][string]$StoredPassword
+    )
+
+    try {
+        return Unprotect-D4APassword -EncryptedPassword $StoredPassword
+    }
+    catch {
+        $decodedPassword = $null
+        try {
+            $decodedPassword = [Convert]::FromBase64String($StoredPassword)
+            if ($decodedPassword.Length -lt 16 -or ($decodedPassword.Length % 16) -ne 0) {
+                # Valid Base64 alone is not enough to identify AES ciphertext.
+                return $StoredPassword
+            }
+        }
+        catch {
+            # Older dbconfig.js files can contain a plaintext password.
+            return $StoredPassword
+        }
+        finally {
+            if ($null -ne $decodedPassword) {
+                [Array]::Clear($decodedPassword, 0, $decodedPassword.Length)
+            }
+        }
+
+        throw
+    }
+}
+
 function Get-D4ADatabaseConfigFromFile {
     param([Parameter(Mandatory = $true)][string]$ConfigPath)
 
@@ -3923,11 +4006,16 @@ function Get-D4ADatabaseConfigFromFile {
         }
     }
 
+    $configurations = [System.Collections.Generic.List[object]]::new()
     foreach ($candidateName in $candidateNames) {
         $body = Get-D4AJavaScriptObjectBody -Text $configText -VariableName $candidateName
         if ([string]::IsNullOrWhiteSpace($body)) { continue }
 
         $server = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'server'
+        if ([string]::IsNullOrWhiteSpace($server)) {
+            $server = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'host'
+        }
+        $port = Get-D4AJavaScriptIntegerProperty -ObjectBody $body -PropertyName 'port'
         $database = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'database'
         $user = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'user'
         $encryptedPassword = Get-D4AJavaScriptStringProperty -ObjectBody $body -PropertyName 'password'
@@ -3935,16 +4023,23 @@ function Get-D4ADatabaseConfigFromFile {
             -not [string]::IsNullOrWhiteSpace($database) -and
             -not [string]::IsNullOrWhiteSpace($user) -and
             -not [string]::IsNullOrWhiteSpace($encryptedPassword)) {
-            return [pscustomobject]@{
+            $configurations.Add([pscustomobject]@{
+                ConfigName         = $candidateName
                 Server            = $server
+                ServerInstance    = ConvertTo-D4ASqlServerInstance -Server $server -Port $port
+                Port              = $port
                 Database          = $database
                 User              = $user
                 EncryptedPassword = $encryptedPassword
-            }
+            }) | Out-Null
         }
     }
 
-    throw "The D4A database configuration file does not contain a complete database connection definition."
+    if ($configurations.Count -eq 0) {
+        throw "The D4A database configuration file does not contain a complete database connection definition."
+    }
+
+    return $configurations.ToArray()
 }
 
 function Get-D4ADataCollectorDatabaseConnections {
@@ -3966,6 +4061,7 @@ function Get-D4ADataCollectorDatabaseConnections {
 
     $connections = [System.Collections.Generic.List[object]]::new()
     $seenConfigPaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $seenConnections = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($service in $services) {
         $executablePath = Get-D4AServiceExecutablePath -ServicePath ([string]$service.PathName)
         if ([string]::IsNullOrWhiteSpace($executablePath)) { continue }
@@ -3978,17 +4074,25 @@ function Get-D4ADataCollectorDatabaseConnections {
             $configPath = (Get-Item -LiteralPath $configPath -ErrorAction Stop).FullName
             if (-not $seenConfigPaths.Add($configPath)) { continue }
 
-            $config = Get-D4ADatabaseConfigFromFile -ConfigPath $configPath
-            $connections.Add([pscustomobject]@{
-                InstallationName  = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) { [string]$service.Name } else { [string]$service.DisplayName }
-                ServiceName       = [string]$service.Name
-                AppRoot           = $appRoot
-                ConfigPath        = $configPath
-                Server            = $config.Server
-                Database          = $config.Database
-                User              = $config.User
-                EncryptedPassword = $config.EncryptedPassword
-            }) | Out-Null
+            $configs = @(Get-D4ADatabaseConfigFromFile -ConfigPath $configPath)
+            foreach ($config in $configs) {
+                $connectionKey = '{0}|{1}|{2}|{3}' -f $configPath, $config.ServerInstance, $config.Database, $config.User
+                if (-not $seenConnections.Add($connectionKey)) { continue }
+
+                $connections.Add([pscustomobject]@{
+                    InstallationName  = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) { [string]$service.Name } else { [string]$service.DisplayName }
+                    ServiceName       = [string]$service.Name
+                    AppRoot           = $appRoot
+                    ConfigPath        = $configPath
+                    ConfigName        = $config.ConfigName
+                    Server            = $config.Server
+                    ServerInstance    = $config.ServerInstance
+                    Port              = $config.Port
+                    Database          = $config.Database
+                    User              = $config.User
+                    EncryptedPassword = $config.EncryptedPassword
+                }) | Out-Null
+            }
         }
         catch {
             # Ignore incomplete installations and retain only usable database configurations.
@@ -4033,10 +4137,10 @@ function Connect-DatabaseAutomatically {
         $sqlPassword = $null
         try {
             Write-Host "Connecting to the selected D4A database..." -ForegroundColor Gray
-            $sqlPassword = Unprotect-D4APassword -EncryptedPassword $selectedConnection.EncryptedPassword
-            [void](Invoke-D4ASqlcmd -ServerInstance $selectedConnection.Server -Database $selectedConnection.Database -Username $selectedConnection.User -Password $sqlPassword -Query 'SELECT 1 AS ConnectionTest' -QueryTimeout 30)
+            $sqlPassword = Resolve-D4ADatabasePassword -StoredPassword $selectedConnection.EncryptedPassword
+            [void](Invoke-D4ASqlcmd -ServerInstance $selectedConnection.ServerInstance -Database $selectedConnection.Database -Username $selectedConnection.User -Password $sqlPassword -Query 'SELECT 1 AS ConnectionTest' -QueryTimeout 30)
 
-            $Global:SelectedInstance = $selectedConnection.Server
+            $Global:SelectedInstance = $selectedConnection.ServerInstance
             $Global:SelectedDb = $selectedConnection.Database
             $Global:User = $selectedConnection.User
             $Global:PlainPass = $sqlPassword

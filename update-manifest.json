@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "version": "7.4.9",
+  "version": "7.4.10",
   "releaseDate": "2026-09-03",
   "monitoring": {
     "version": "7.4.2",
@@ -37,11 +37,11 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "489F7F11BE49D69EBF71343AD4531348B805FD7F149B3B2DC66BE9E51B21D333"
+      "sha256": "C4E554016CC52FD9D28B1780950B748F7C3ACBA68FD270E8FFA3AEC09E6D9B1F"
     },
     {
       "path": "version.txt",
-      "sha256": "5ABC0EA1D5E49D141E79CD2A68186693B612235574B5E320542743CB8E8EB5E8"
+      "sha256": "DB0C7133AB7307FA1BF9C90226D0C68FF51B22627AD0EF844F94A1172278A4D5"
     },
     {
       "path": "Test-DBConfigFile.ps1",
