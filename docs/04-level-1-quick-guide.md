@@ -4,9 +4,9 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 
 ## Start the tool
 
-1. Keep all IT Tools files in the same folder.
-2. Right-click `IT_Tools_Database_Translations_and_Server_Checks.ps1`.
-3. Select **Run with PowerShell**.
+1. [Download the latest IT Tools script](https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/IT_Tools_Database_Translations_and_Server_Checks.ps1).
+2. Save it in a user-owned folder, such as `Desktop\IT Tools`.
+3. Right-click `IT_Tools_Database_Translations_and_Server_Checks.ps1` and select **Run with PowerShell**.
 4. Wait for the automatic update check to finish. Press a key when asked.
 5. Use **Run as Administrator** only when the tool requests it or when working with Scheduled Tasks, services, or disk analysis.
 
@@ -21,7 +21,7 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 
 | Menu | Use it for | Level 1 guidance |
 |---|---|---|
-| **1. Database Tools** | Read-only searches, performance checks, translation exports | Do not import, migrate, copy, delete, roll back, or change database data unless the task is approved. |
+| **1. Database Tools** | Translation files, approved Danone features, searches, and performance checks | Do not import, migrate, copy, delete, roll back, or change database data unless the task is approved. |
 | **2. Local server and file tools** | File searches, Data Collector log tracing, system health, port checks, SSL checks, disk report | Use this menu to collect evidence before escalation. |
 | **3. Troubleshooting** | `DBConfig.js Diagnostic` | Select the detected `dbconfig.js` file and run the default scan. Do not share passwords or configuration secrets. |
 | **4. Site Monitoring** | Review monitor configuration, run monitor commands, deploy or update monitoring | Only add sites or change monitoring settings when the request is approved. |
@@ -58,6 +58,29 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 3. Press Enter to run the default scan.
 4. Record the summary and any errors or warnings. Do not copy credentials from the file.
 
+### Export or import language files
+
+1. Open **Database Tools** > **Import/Export operations**.
+2. For an export, select **Export Language File**, choose the language, then choose all content or missing translations only.
+3. For an import, select **Import new Language with a translated CSV file** and choose the approved translated file.
+4. Check the database, language, row preview, and counts.
+5. Type `IMPORT` only when the request is approved and the preview is correct.
+
+### Apply approved Danone settings or roles
+
+1. Open **Database Tools** > **Danone Features**.
+2. Select **Import Luleburgas System Settings** or **Import Luleburgas User Roles and Privileges**.
+3. Verify the target database and review the displayed summary.
+4. Enter your name and the requested confirmation only when the change is approved.
+5. Record the final result in the ticket.
+
+### Investigate a database performance issue
+
+1. Open **Database Tools** > **Database Performance**.
+2. Start with **Pending SQL queries**, then use heavy-query, SQL CPU, and table disk-usage checks when needed.
+3. Record the session ID, start time, duration, query summary, and relevant resource values.
+4. Escalate with the results. These checks are read-only.
+
 ## Stop And Escalate
 
 Stop and escalate when:
@@ -75,4 +98,3 @@ Include the action used, target, time, error message, and any relevant log lines
 - IT Tools errors are saved in the `Logs` folder beside the script.
 - Database and monitoring actions are recorded in `C:\Users\edit_log.txt`.
 - Use **Logs** > **Last Actions done by this script** to view the latest 10 entries.
-
