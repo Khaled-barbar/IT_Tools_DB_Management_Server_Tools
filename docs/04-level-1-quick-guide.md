@@ -29,6 +29,8 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 
 ## Common Level 1 Tasks
 
+Use these actions in this order: check availability first, collect evidence next, then complete approved planned changes.
+
 ### Check a website or API issue
 
 1. Open **Site Monitoring**.
@@ -43,6 +45,21 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 2. Select the correct log file or date.
 3. Enter the incident time window and search text.
 4. Copy the relevant timestamps and messages into the incident ticket.
+
+### Investigate a database performance issue
+
+1. Open **Database Tools** > **Database Performance**.
+2. Start with **Pending SQL queries**, then use heavy-query, SQL CPU, and table disk-usage checks when needed.
+3. Record the session ID, start time, duration, query summary, and relevant resource values.
+4. Escalate with the results. These checks are read-only.
+
+### Find text in files or the database
+
+1. To find a file containing text, open **Local server and file tools** > **Search for text in files**.
+2. Select the folder, enter the search text, and record the matching file names and lines.
+3. To search database text, open **Database Tools** > **Database Search Tools** > **Search text in Database**. Record the returned table, column, and matching value.
+4. To find a column, select **Find which table has a specific column**. Use `%text%` to find a partial column-name match.
+5. Use **Text Search in Sprocs** only when the issue may be caused by stored-procedure logic.
 
 ### Check SSL or a network port
 
@@ -73,13 +90,6 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 3. Verify the target database and review the displayed summary.
 4. Enter your name and the requested confirmation only when the change is approved.
 5. Record the final result in the ticket.
-
-### Investigate a database performance issue
-
-1. Open **Database Tools** > **Database Performance**.
-2. Start with **Pending SQL queries**, then use heavy-query, SQL CPU, and table disk-usage checks when needed.
-3. Record the session ID, start time, duration, query summary, and relevant resource values.
-4. Escalate with the results. These checks are read-only.
 
 ## Stop And Escalate
 
