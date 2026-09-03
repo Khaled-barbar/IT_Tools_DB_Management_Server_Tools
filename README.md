@@ -7,6 +7,7 @@ An interactive Windows PowerShell toolkit for repeatable database administration
 - 📘 **[Project Overview](docs/01-project-overview.md)** - Story, problem, solution, evolution, and impact
 - 🏗️ **[Technical Design](docs/02-technical-design.md)** - Architecture, implementation, safety, and monitoring
 - 🛠️ **[User Guide](docs/03-user-guide.md)** - Installation, workflows, commands, and troubleshooting
+- ⚡ **[Level 1 Quick Guide](docs/04-level-1-quick-guide.md)** - Safe, concise steps for common support tasks
 - 📋 **[Changelog](CHANGELOG.md)** - Project evolution and significant release history
 
 Developer: Khaled Barbar
@@ -20,7 +21,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.4.8, Monitoring 7.4.2 |
+| Current release | IT Tools 7.4.9, Monitoring 7.4.2 |
 
 ## Why it exists
 
