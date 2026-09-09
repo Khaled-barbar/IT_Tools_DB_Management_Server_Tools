@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.5.0
+# D4A-Monitor-Version: 7.5.1
 # D4A-Monitor-Release-Date: 2026-09-09
 
 <#
@@ -260,7 +260,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.5.0'
+$script:MonitorVersion = '7.5.1'
 $script:MonitorReleaseDate = '2026-09-09'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1147,8 +1147,8 @@ function Test-MonitorConfigurationValues {
     if (-not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
         Test-DiscordWebhookUrl -WebhookUrl $DiscordWebhookUrl
     }
-    if ($DisableEmail.IsPresent -and ($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl))) {
-        throw 'No notification channel is enabled. Configure DiscordWebhookUrl or leave email notifications enabled.'
+    if ($DisableEmail.IsPresent -and -not $DisableDiscord.IsPresent -and [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+        throw 'DisableEmail requires a configured DiscordWebhookUrl unless DisableDiscord is also specified for a no-notification run.'
     }
 
     $configuredUris = @(ConvertTo-HttpUris -Addresses $SiteAddress)
@@ -1682,8 +1682,8 @@ daily error-log location. Up to five affected checks are displayed directly;
 additional checks remain available in the monitoring logs.
 
 Use -DisableDiscord for a one-off email-only execution. Use -DisableEmail only
-when DiscordWebhookUrl is configured; this keeps Discord available for a future
-email-to-Discord migration without changing the monitoring rules.
+when DiscordWebhookUrl is configured, or use -DisableEmail -DisableDiscord to
+run the health checks and logs without any outbound notification delivery.
 '@
 }
 

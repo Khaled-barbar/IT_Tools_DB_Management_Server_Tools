@@ -21,7 +21,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.5.0, Monitoring 7.5.0 |
+| Current release | IT Tools 7.5.1, Monitoring 7.5.1 |
 
 ## Why it exists
 

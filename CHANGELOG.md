@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.5.1 - 2026-09-09
+
+### Monitoring 7.5.1 - 2026-09-09
+
+- Fixed the no-notification validation path so a run using both `-DisableEmail` and `-DisableDiscord` completes its health checks and logs without requiring an enabled delivery channel.
+
 ## 7.5.0 - 2026-09-09
 
 ### Monitoring 7.5.0 - 2026-09-09
