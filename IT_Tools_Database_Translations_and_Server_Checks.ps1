@@ -58,8 +58,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.4.10'
-$Script:ToolReleaseDate = '2026-09-03'
+$Script:ToolVersion = [version]'7.5.0'
+$Script:ToolReleaseDate = '2026-09-09'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -3589,7 +3589,7 @@ function Show-ExecuteMonitoringCommandsMenu {
         Write-Host '6) Validate monitoring configuration'
         Write-Host '7) Temporarily test specific site(s) and send email'
         Write-Host '8) Run extended CPU performance test and send email'
-        Write-Host '9) Run monitoring without email delivery'
+        Write-Host '9) Run monitoring without notifications'
         Write-Host '10) Set automatic alert cooldown'
         Write-Host '11) Clear automatic alert cooldown'
         Write-Host '12) Run monitoring and send concise Discord status'
@@ -3674,7 +3674,7 @@ function Show-ExecuteMonitoringCommandsMenu {
                 $target = Select-SiteMonitoringCommandTarget
                 if ($null -eq $target) { continue }
                 Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - No-email run' -Action {
-                    Invoke-SiteMonitoringCommand -Target $target -Title 'Run Monitoring Without Email' -Description 'Runs all health checks and writes logs, but does not send an email.' -ArgumentList @('-DisableEmail')
+                Invoke-SiteMonitoringCommand -Target $target -Title 'Run Monitoring Without Notifications' -Description 'Runs all health checks and writes logs, but does not send email or Discord webhook notifications.' -ArgumentList @('-DisableEmail', '-DisableDiscord')
                 }
             }
             '10' {

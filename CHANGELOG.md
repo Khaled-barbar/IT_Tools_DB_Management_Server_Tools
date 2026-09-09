@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.5.0 - 2026-09-09
+
+### Monitoring 7.5.0 - 2026-09-09
+
+- Changed **Site Monitoring > Execute Monitoring Commands > Run monitoring without notifications** to run the full health check and write logs while suppressing both email and Discord webhook delivery. The monitor records the intentional suppression in its run log.
+
 ## 7.4.10 - 2026-09-03
 
 - Extended automatic D4A database connection discovery to evaluate every complete `dbConfig*` object in a detected `dbconfig.js` file. Remote SQL Server hostnames and IP addresses now retain their configured TCP port and use an explicit TCP SQL endpoint, while local configurations continue to work normally.

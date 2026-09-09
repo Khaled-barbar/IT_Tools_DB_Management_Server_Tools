@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.4.2
-# D4A-Monitor-Release-Date: 2026-09-02
+# D4A-Monitor-Version: 7.5.0
+# D4A-Monitor-Release-Date: 2026-09-09
 
 <#
 .SYNOPSIS
@@ -28,6 +28,8 @@
     cooldown removed so a recurrence is reported. Test and daily-summary modes
     send the complete scan report even when healthy. Use -SendDiscordStatus for
     a concise Discord-only health summary.
+    Use -DisableEmail -DisableDiscord to run all checks and write logs without
+    delivering an email or Discord webhook notification.
 
     Frontend and API endpoints alert only when unavailable. Responses above
     4500 ms are recorded in error_log without an email alert. CPU and RAM alert
@@ -140,6 +142,8 @@ param(
     # Sends a concise Discord-only health summary, including healthy runs.
     [switch]$SendDiscordStatus,
 
+    # Use both switches for a full no-notification run; the checks and logs
+    # still run, but neither outbound delivery channel is used.
     [switch]$DisableEmail,
 
     [switch]$DisableDiscord,
@@ -256,8 +260,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.4.2'
-$script:MonitorReleaseDate = '2026-09-02'
+$script:MonitorVersion = '7.5.0'
+$script:MonitorReleaseDate = '2026-09-09'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -5109,6 +5113,9 @@ function Invoke-D4AMonitor {
                     }
                 }
             }
+        }
+        elseif ($DisableEmail.IsPresent -and $DisableDiscord.IsPresent) {
+            Write-RunLog -Category Notification -Color DarkGray -Message 'Email and Discord delivery are disabled for this run; health checks and logs completed without outbound notifications.'
         }
         elseif ($DisableEmail.IsPresent -and -not $DisableDiscord.IsPresent -and -not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
             Write-RunLog -Category Discord -Color DarkGray -Message 'No notification was required; email delivery is disabled and Discord remains available.'
