@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.5.1
-# D4A-Monitor-Release-Date: 2026-09-09
+# D4A-Monitor-Version: 7.6.0
+# D4A-Monitor-Release-Date: 2026-09-10
 
 <#
 .SYNOPSIS
@@ -8,8 +8,8 @@
     optional Discord notifications.
 
 .DESCRIPTION
-    Runs application, service, SQL Server service, resource, TLS, Nginx, and
-    Windows event checks.
+    Runs application, service, database connectivity, SQL Server service,
+    resource, TLS, Nginx, and Windows event checks.
     Results are written to daily run_log and error_log files under monitor-logs.
     Monitoring logs are retained for five days by default.
 
@@ -163,6 +163,11 @@ param(
     [Alias('EmailDbConfigPath')]
     [string]$DbConfigPath,
 
+    # Maximum connection and query duration for each discovered dbconfig.js
+    # database health probe. The probe performs only SELECT 1.
+    [ValidateRange(1, 120)]
+    [int]$DatabaseConnectionTimeoutSeconds = 10,
+
     [string]$NodeExecutable,
     [string]$NodemailerModulePath,
     [string]$FromAddress,
@@ -260,8 +265,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.5.1'
-$script:MonitorReleaseDate = '2026-09-09'
+$script:MonitorVersion = '7.6.0'
+$script:MonitorReleaseDate = '2026-09-10'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -956,6 +961,10 @@ function Ensure-MonitorConfigurationDefaults {
     $changed = $false
     $apiAddressAdded = $false
     $localApiAddressAdded = $false
+    if ($null -eq $Configuration.PSObject.Properties['DatabaseConnectionTimeoutSeconds']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'DatabaseConnectionTimeoutSeconds' -Value 10
+        $changed = $true
+    }
     if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrl']) {
         # JSON does not support comments. The visible placeholder keeps the
         # setting easy to find while remaining safely disabled at runtime.
@@ -1038,6 +1047,7 @@ function Import-MonitorConfiguration {
         D4AInstallRoot             = 'Path'
         NginxErrorLog              = 'Path'
         DbConfigPath               = 'Path'
+        DatabaseConnectionTimeoutSeconds = 'Int'
         NodeExecutable             = 'Path'
         NodemailerModulePath       = 'Path'
         FromAddress                = 'String'
@@ -1094,6 +1104,7 @@ function Test-MonitorConfigurationValues {
         DiscordTimeoutSeconds    = @(5, 300)
         SmtpPort                 = @(1, 65535)
         HttpTimeoutSeconds       = @(1, 300)
+        DatabaseConnectionTimeoutSeconds = @(1, 120)
         ApplicationAttempts      = @(1, 10)
         ApplicationWarningMs     = @(1, 60000)
         ApplicationAlertMs       = @(1, 120000)
@@ -1335,6 +1346,7 @@ function Show-MonitorConfiguration {
         DiskCriticalFreeGb                  = $script:DiskCriticalFreeGb
         DiskCriticalUsedPercent             = $script:DiskCriticalUsedPercent
         ApiHealthFailureAttempts            = $ApiHealthFailureAttempts
+        DatabaseConnectionTimeoutSeconds    = $DatabaseConnectionTimeoutSeconds
         NginxErrorsPerMinuteThreshold       = $NginxErrorsPerMinuteThreshold
         NginxConsecutiveMinutes             = $NginxConsecutiveMinutes
         DataCollectorFailureAlertThreshold  = $DataCollectorConsecutiveFailureThreshold
@@ -1398,8 +1410,8 @@ Purpose
 -------
 D4A-ScheduledMonitor.ps1 checks D4A site availability and server health.
 It can check one or more frontend site addresses, configured API health
-endpoints, TLS certificates, local D4A Windows services, the local API listener,
-  CPU, memory, disk space, Nginx errors, relevant Windows events, and local
+    endpoints, TLS certificates, configured D4A database connectivity, local D4A
+  Windows services, the local API listener, CPU, memory, disk space, Nginx errors, relevant Windows events, and local
   Decide4Action, Data Collector, MDC, PLC, Mosquitto/MQTT, Node-RED, Nginx,
   reverse proxy, IIS, SQL Server Database Engine, SQL Server Agent, and SQL
   Server Browser services.
@@ -1430,6 +1442,9 @@ Endpoint latency is logged only above 4500 ms and never triggers an email.
 ApiHealthFailureAttempts (default 3), ApiHealthRetryIntervalSeconds (default
 5), and NssmExcludedLogRotationEventIds (default 1063,1077) remain available
 through the configuration file.
+Database connectivity discovers dbconfig.js from active Data Collector service
+paths, decrypts its configured password only in memory, and runs SELECT 1 for
+each complete dbConfig object. DatabaseConnectionTimeoutSeconds defaults to 10.
 
 Automatic updates
 -----------------
@@ -3160,6 +3175,428 @@ function Test-SqlServerWindowsServices {
             Add-MonitorResult -Severity Alert -Category Server -Check 'SQL Server service' -Message $message -Key $serviceKey
         }
     }
+}
+
+function Get-D4ADatabaseConfigPaths {
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-D4ADatabaseConfigPath {
+        param([AllowNull()][string]$Path)
+
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        try {
+            $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
+            if (-not (Test-Path -LiteralPath $expandedPath -PathType Leaf)) { return }
+            $resolvedPath = (Resolve-Path -LiteralPath $expandedPath -ErrorAction Stop).Path
+            if ($seen.Add($resolvedPath)) {
+                $paths.Add($resolvedPath) | Out-Null
+            }
+        }
+        catch {
+            # One unavailable installation must not prevent checks for others.
+        }
+    }
+
+    Add-D4ADatabaseConfigPath -Path $DbConfigPath
+    foreach ($root in @($D4AInstallRoot, $env:D4A_HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
+            Add-D4ADatabaseConfigPath -Path (Join-Path ([Environment]::ExpandEnvironmentVariables([string]$root)) 'Services\API\dbconfig.js')
+        }
+    }
+
+    try {
+        $dataCollectorServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop | Where-Object {
+                ([string]$_.Name -match '(?i)^(?:Decide4Action|D4A).*data\s*collector') -or
+                ([string]$_.DisplayName -match '(?i)^(?:Decide4Action|D4A).*data\s*collector')
+            })
+        foreach ($service in $dataCollectorServices) {
+            $pathName = [Environment]::ExpandEnvironmentVariables([string]$service.PathName)
+            $executablePath = if ($pathName -match '^\s*"(?<Path>[^"]+\.exe)"') {
+                $Matches['Path']
+            }
+            elseif ($pathName -match '(?i)^\s*(?<Path>.+?\.exe)(?:\s|$)') {
+                $Matches['Path'].Trim()
+            }
+            else {
+                $null
+            }
+            if ([string]::IsNullOrWhiteSpace($executablePath)) { continue }
+
+            try {
+                # Data Collector.exe is located below <D4A root>\Data Collector.
+                $dataCollectorFolder = Split-Path -Parent ([IO.Path]::GetFullPath($executablePath))
+                $applicationRoot = Split-Path -Parent $dataCollectorFolder
+                Add-D4ADatabaseConfigPath -Path (Join-Path $applicationRoot 'Services\API\dbconfig.js')
+            }
+            catch {
+                # Keep checking other installed Data Collectors.
+            }
+        }
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Database -Color Yellow -Message (
+            'Unable to discover dbconfig.js files from Data Collector services: {0}' -f $_.Exception.Message
+        )
+    }
+
+    return @($paths.ToArray() | Sort-Object)
+}
+
+function Find-D4AJavaScriptMatchingBrace {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][int]$OpenIndex
+    )
+
+    $depth = 0
+    $quote = $null
+    $escaped = $false
+    $lineComment = $false
+    $blockComment = $false
+    for ($index = $OpenIndex; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        $nextCharacter = if ($index + 1 -lt $Text.Length) { $Text[$index + 1] } else { [char]0 }
+        if ($lineComment) {
+            if ($character -eq "`n") { $lineComment = $false }
+            continue
+        }
+        if ($blockComment) {
+            if ($character -eq '*' -and $nextCharacter -eq '/') { $blockComment = $false; $index++ }
+            continue
+        }
+        if ($null -ne $quote) {
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq $quote) { $quote = $null }
+            continue
+        }
+        if ($character -eq '/' -and $nextCharacter -eq '/') { $lineComment = $true; $index++; continue }
+        if ($character -eq '/' -and $nextCharacter -eq '*') { $blockComment = $true; $index++; continue }
+        if ($character -eq "'" -or $character -eq '"' -or $character -eq '`') { $quote = $character; continue }
+        if ($character -eq '{') { $depth++ }
+        elseif ($character -eq '}') {
+            $depth--
+            if ($depth -eq 0) { return $index }
+        }
+    }
+    return -1
+}
+
+function Split-D4AJavaScriptTopLevelComma {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $items = [System.Collections.Generic.List[string]]::new()
+    $start = 0
+    $quote = $null
+    $escaped = $false
+    $lineComment = $false
+    $blockComment = $false
+    $depthParen = 0
+    $depthBrace = 0
+    $depthBracket = 0
+    for ($index = 0; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        $nextCharacter = if ($index + 1 -lt $Text.Length) { $Text[$index + 1] } else { [char]0 }
+        if ($lineComment) {
+            if ($character -eq "`n") { $lineComment = $false }
+            continue
+        }
+        if ($blockComment) {
+            if ($character -eq '*' -and $nextCharacter -eq '/') { $blockComment = $false; $index++ }
+            continue
+        }
+        if ($null -ne $quote) {
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq $quote) { $quote = $null }
+            continue
+        }
+        if ($character -eq '/' -and $nextCharacter -eq '/') { $lineComment = $true; $index++; continue }
+        if ($character -eq '/' -and $nextCharacter -eq '*') { $blockComment = $true; $index++; continue }
+        if ($character -eq "'" -or $character -eq '"' -or $character -eq '`') { $quote = $character; continue }
+        switch ($character) {
+            '(' { $depthParen++ }
+            ')' { $depthParen-- }
+            '{' { $depthBrace++ }
+            '}' { $depthBrace-- }
+            '[' { $depthBracket++ }
+            ']' { $depthBracket-- }
+            ',' {
+                if ($depthParen -eq 0 -and $depthBrace -eq 0 -and $depthBracket -eq 0) {
+                    $items.Add($Text.Substring($start, $index - $start).Trim()) | Out-Null
+                    $start = $index + 1
+                }
+            }
+        }
+    }
+    if ($start -lt $Text.Length) { $items.Add($Text.Substring($start).Trim()) | Out-Null }
+    return @($items | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function ConvertFrom-D4AJavaScriptLiteral {
+    param([AllowNull()][string]$Value)
+
+    if ($null -eq $Value) { return $null }
+    $trimmedValue = $Value.Trim()
+    if ($trimmedValue -match "^'(.*)'$" -or $trimmedValue -match '^"(.*)"$') {
+        $inner = $Matches[1]
+        return ($inner -replace "\\'", "'" -replace '\\"', '"' -replace '\\\\', '\')
+    }
+    if ($trimmedValue -match '^(?i:true)$') { return $true }
+    if ($trimmedValue -match '^(?i:false)$') { return $false }
+    if ($trimmedValue -match '^(?i:null|undefined)$') { return $null }
+    if ($trimmedValue -match '^-?\d+$') { return [int]$trimmedValue }
+    return $trimmedValue
+}
+
+function Get-D4AJavaScriptTopLevelProperty {
+    param(
+        [Parameter(Mandatory = $true)][string]$ObjectText,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $openIndex = $ObjectText.IndexOf('{')
+    $closeIndex = if ($openIndex -ge 0) { Find-D4AJavaScriptMatchingBrace -Text $ObjectText -OpenIndex $openIndex } else { -1 }
+    if ($openIndex -lt 0 -or $closeIndex -le $openIndex) { return $null }
+    $inner = $ObjectText.Substring($openIndex + 1, $closeIndex - $openIndex - 1)
+    $pattern = '^(?s)\s*(?:[''"]?{0}[''"]?)\s*:\s*(?<value>.+)$' -f [regex]::Escape($Name)
+    foreach ($item in @(Split-D4AJavaScriptTopLevelComma -Text $inner)) {
+        $match = [regex]::Match($item, $pattern)
+        if ($match.Success) { return ConvertFrom-D4AJavaScriptLiteral -Value $match.Groups['value'].Value }
+    }
+    return $null
+}
+
+function Get-D4ADatabaseConfigurationsFromFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $content = [IO.File]::ReadAllText($Path)
+    $configs = [System.Collections.Generic.List[object]]::new()
+    $declarationPattern = '(?m)^\s*(?:var|let|const)\s+(?<name>dbConfig[A-Za-z0-9_$]*)\s*='
+    foreach ($declaration in [regex]::Matches($content, $declarationPattern)) {
+        $valueStart = $declaration.Index + $declaration.Length
+        while ($valueStart -lt $content.Length -and [char]::IsWhiteSpace($content[$valueStart])) { $valueStart++ }
+        if ($valueStart -ge $content.Length -or $content[$valueStart] -ne '{') { continue }
+        $valueEnd = Find-D4AJavaScriptMatchingBrace -Text $content -OpenIndex $valueStart
+        if ($valueEnd -lt 0) { continue }
+
+        $objectText = $content.Substring($valueStart, $valueEnd - $valueStart + 1)
+        $user = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'user'
+        $password = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'password'
+        $server = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'server'
+        $database = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'database'
+        if ($null -eq $user -or $null -eq $password -or $null -eq $server -or $null -eq $database) { continue }
+
+        $optionsText = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'options'
+        $configs.Add([pscustomobject]@{
+                Name = $declaration.Groups['name'].Value
+                User = [string]$user
+                Password = [string]$password
+                Server = [string]$server
+                Database = [string]$database
+                Port = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'port'
+                Encrypt = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'encrypt' } else { $null }
+                TrustServerCertificate = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'trustServerCertificate' } else { $null }
+            }) | Out-Null
+    }
+    return @($configs.ToArray())
+}
+
+function Test-D4AEncryptedPassword {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Trim().Length -lt 16 -or $Value.Trim() -notmatch '^[A-Za-z0-9+/]+={0,2}$') { return $false }
+    try {
+        $bytes = [Convert]::FromBase64String($Value.Trim())
+        if ($bytes.Length -eq 0) { return $false }
+        $nonPrintable = @($bytes | Where-Object { ($_ -lt 32 -and $_ -notin @(9, 10, 13)) -or $_ -gt 126 }).Count
+        return (($nonPrintable / [double]$bytes.Length) -gt 0.2)
+    }
+    catch { return $false }
+}
+
+function Get-D4AEnvironmentSecret {
+    param([Parameter(Mandatory = $true)][ValidateSet('D4AKEY', 'D4AIV')][string]$Name)
+
+    foreach ($scope in 'Process', 'Machine', 'User') {
+        $value = [Environment]::GetEnvironmentVariable($Name, $scope)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+    throw "Environment variable '$Name' was not found in Process, Machine, or User scope."
+}
+
+function Unprotect-D4APassword {
+    param(
+        [Parameter(Mandatory = $true)][string]$EncryptedPassword,
+        [string]$KeyBase64 = (Get-D4AEnvironmentSecret -Name D4AKEY),
+        [string]$IVBase64 = (Get-D4AEnvironmentSecret -Name D4AIV)
+    )
+
+    $aes = $null
+    $decryptor = $null
+    $keyBytes = $null
+    $ivBytes = $null
+    $encryptedBytes = $null
+    $decryptedBytes = $null
+    try {
+        $keyBytes = [Convert]::FromBase64String($KeyBase64)
+        $ivBytes = [Convert]::FromBase64String($IVBase64)
+        $encryptedBytes = [Convert]::FromBase64String($EncryptedPassword)
+        if ($keyBytes.Length -ne 32) { throw "D4AKEY must decode to 32 bytes; actual length is $($keyBytes.Length)." }
+        if ($ivBytes.Length -ne 16) { throw "D4AIV must decode to 16 bytes; actual length is $($ivBytes.Length)." }
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.KeySize = 256
+        $aes.BlockSize = 128
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aes.Key = $keyBytes
+        $aes.IV = $ivBytes
+        $decryptor = $aes.CreateDecryptor()
+        $decryptedBytes = $decryptor.TransformFinalBlock($encryptedBytes, 0, $encryptedBytes.Length)
+        return [Text.Encoding]::UTF8.GetString($decryptedBytes)
+    }
+    catch { throw "D4A database password decryption failed: $($_.Exception.Message)" }
+    finally {
+        if ($decryptor) { $decryptor.Dispose() }
+        if ($aes) { $aes.Dispose() }
+        foreach ($buffer in @($keyBytes, $ivBytes, $encryptedBytes, $decryptedBytes)) {
+            if ($buffer) { [Array]::Clear($buffer, 0, $buffer.Length) }
+        }
+    }
+}
+
+function ConvertTo-D4ADatabaseBoolean {
+    param([AllowNull()][object]$Value, [bool]$Default)
+
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return [bool]$Value }
+    $parsed = $false
+    if ([bool]::TryParse(([string]$Value), [ref]$parsed)) { return $parsed }
+    return $Default
+}
+
+function New-D4ADatabaseConnectionString {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$DbConfig,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $dataSource = $DbConfig.Server.Trim()
+    if ($DbConfig.Port -and $dataSource -notmatch ',' -and $dataSource -notmatch '\\') {
+        $dataSource = '{0},{1}' -f $dataSource, $DbConfig.Port
+    }
+    $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $builder['Data Source'] = $dataSource
+    $builder['Initial Catalog'] = $DbConfig.Database
+    $builder['User ID'] = $DbConfig.User
+    $builder['Password'] = $Password
+    $builder['Connect Timeout'] = $TimeoutSeconds
+    $builder['Encrypt'] = ConvertTo-D4ADatabaseBoolean -Value $DbConfig.Encrypt -Default $false
+    $builder['TrustServerCertificate'] = ConvertTo-D4ADatabaseBoolean -Value $DbConfig.TrustServerCertificate -Default $true
+    return $builder.ConnectionString
+}
+
+function Get-D4ADatabaseSafeFailureDetail {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+
+    $message = $Exception.Message
+    $number = $null
+    if ($Exception -is [System.Data.SqlClient.SqlException]) {
+        $sqlError = @($Exception.Errors | Select-Object -First 1)
+        if ($sqlError.Count -gt 0) { $number = [int]$sqlError[0].Number }
+    }
+    switch ($number) {
+        18456 { return 'Login failed or the configured SQL login is unavailable.' }
+        4060 { return 'Login succeeded, but the configured database could not be opened.' }
+        53 { return 'Database host is unreachable or the SQL Server instance was not found.' }
+        2 { return 'Database host is unreachable or the SQL Server instance was not found.' }
+        10060 { return 'Database did not respond before the connection timed out.' }
+        10061 { return 'Database host reached, but the SQL Server port refused the connection.' }
+        -2 { return 'Database did not respond before the connection timed out.' }
+    }
+    if ($message -match '(?i)login failed') { return 'Login failed or the configured SQL login is unavailable.' }
+    if ($message -match '(?i)network-related|server was not found|could not open a connection') { return 'Database host is unreachable or the SQL Server instance was not found.' }
+    if ($message -match '(?i)timeout') { return 'Database did not respond before the connection timed out.' }
+    if ($message -match '(?i)certificate chain.*not trusted|authority that is not trusted|SSL Provider') { return 'SQL TLS/certificate trust failed.' }
+    return 'Database connection test failed. Review the database and monitor logs for the exception details.'
+}
+
+function Test-D4ADatabaseConnectivity {
+    $configPaths = @(Get-D4ADatabaseConfigPaths)
+    if ($configPaths.Count -eq 0) {
+        Add-MonitorResult -Severity Warning -Category Database -Check 'Database connectivity' -Message (
+            'No dbconfig.js file was discovered from the configured D4A installation or active Data Collector services; database connectivity was not tested.'
+        ) -Key 'database-connectivity-discovery' -NotificationEligible:$false
+        return
+    }
+
+    $passwordCache = @{}
+    foreach ($configPath in $configPaths) {
+        try {
+            $databaseConfigs = @(Get-D4ADatabaseConfigurationsFromFile -Path $configPath)
+        }
+        catch {
+            Add-MonitorResult -Severity Alert -Category Database -Check 'Database configuration' -Message (
+                'Unable to read a discovered dbconfig.js file for database monitoring: {0}' -f $_.Exception.Message
+            ) -Key ('database-configuration-{0}' -f ([IO.Path]::GetFileNameWithoutExtension($configPath)))
+            continue
+        }
+        if ($databaseConfigs.Count -eq 0) {
+            Add-MonitorResult -Severity Alert -Category Database -Check 'Database configuration' -Message (
+                'A discovered dbconfig.js file does not contain a complete dbConfig object with server, database, user, and password values.'
+            ) -Key ('database-configuration-{0}' -f ([IO.Path]::GetFileNameWithoutExtension($configPath)))
+            continue
+        }
+
+        foreach ($dbConfig in $databaseConfigs) {
+            $password = $null
+            $connection = $null
+            $command = $null
+            $databaseKey = 'database-connectivity-{0}-{1}' -f $dbConfig.Database, $dbConfig.Name
+            try {
+                if (Test-D4AEncryptedPassword -Value $dbConfig.Password) {
+                    if ($passwordCache.ContainsKey($dbConfig.Password)) {
+                        $password = [string]$passwordCache[$dbConfig.Password]
+                    }
+                    else {
+                        $password = Unprotect-D4APassword -EncryptedPassword $dbConfig.Password
+                        if ([string]::IsNullOrWhiteSpace($password)) { throw 'D4A database password decryption returned an empty value.' }
+                        $passwordCache[$dbConfig.Password] = $password
+                    }
+                }
+                else {
+                    $password = [string]$dbConfig.Password
+                }
+
+                Add-Type -AssemblyName System.Data -ErrorAction Stop
+                $connection = [System.Data.SqlClient.SqlConnection]::new((New-D4ADatabaseConnectionString -DbConfig $dbConfig -Password $password -TimeoutSeconds $DatabaseConnectionTimeoutSeconds))
+                $connection.Open()
+                $command = $connection.CreateCommand()
+                $command.CommandTimeout = $DatabaseConnectionTimeoutSeconds
+                $command.CommandText = 'SELECT 1;'
+                if ([int]$command.ExecuteScalar() -ne 1) { throw 'The database test query returned an unexpected result.' }
+                Add-MonitorResult -Severity OK -Category Database -Check 'Database connectivity' -Message (
+                    'Database={0}; configured dbconfig={1}; SELECT 1 completed successfully.' -f $dbConfig.Database, $dbConfig.Name
+                ) -Key $databaseKey
+            }
+            catch {
+                Add-MonitorResult -Severity Alert -Category Database -Check 'Database connectivity' -Message (
+                    'Database={0}; configured dbconfig={1}; {2}' -f $dbConfig.Database, $dbConfig.Name, (Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception)
+                ) -Key $databaseKey
+            }
+            finally {
+                if ($command) { $command.Dispose() }
+                if ($connection) {
+                    if ($connection.State -ne [System.Data.ConnectionState]::Closed) { $connection.Close() }
+                    $connection.Dispose()
+                }
+                $password = $null
+            }
+        }
+    }
+    $passwordCache.Clear()
 }
 
 function Test-ApiListener {
@@ -4962,6 +5399,7 @@ function Invoke-D4AMonitor {
 
     Invoke-SafeMonitorCheck -Category Server -Check 'D4A Windows services' -Action { Test-D4AWindowsServices }
     Invoke-SafeMonitorCheck -Category Server -Check 'SQL Server services' -Action { Test-SqlServerWindowsServices }
+    Invoke-SafeMonitorCheck -Category Database -Check 'Database connectivity' -Action { Test-D4ADatabaseConnectivity }
     Invoke-SafeMonitorCheck -Category Server -Check 'Mosquitto/MQTT service' -Action { Test-MosquittoWindowsService }
     Invoke-SafeMonitorCheck -Category Server -Check 'Web infrastructure services' -Action { Test-WebInfrastructureWindowsServices }
         Invoke-SafeMonitorCheck -Category Server -Check 'API listener' -Action { Test-ApiListener }

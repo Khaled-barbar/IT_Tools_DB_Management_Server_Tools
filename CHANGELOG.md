@@ -6,6 +6,14 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.6.0 - 2026-09-10
+
+### Monitoring 7.6.0 - 2026-09-10
+
+- Added read-only database connectivity monitoring. For every complete `dbConfig*` object found in `dbconfig.js` files discovered from active D4A Data Collector services, the monitor decrypts the configured password only in memory and runs `SELECT 1` against the configured database.
+- Added the configurable `DatabaseConnectionTimeoutSeconds` setting, defaulting to 10 seconds. New installations receive the setting and existing monitoring configurations add it automatically during their next run.
+- Database results identify only the configured database and dbConfig object; SQL hostnames, usernames, passwords, connection strings, encryption keys, and IV values are never written to monitoring logs or notifications.
+
 ## 7.5.1 - 2026-09-09
 
 ### Monitoring 7.5.1 - 2026-09-09
