@@ -58,7 +58,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.6.0'
+$Script:ToolVersion = [version]'7.6.1'
 $Script:ToolReleaseDate = '2026-09-10'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3475,6 +3475,28 @@ function Get-SiteMonitoringCommandText {
     return ($parts -join ' ')
 }
 
+function Write-SiteMonitoringOutputLine {
+    param([AllowNull()][object]$Line)
+
+    $text = [string]$Line
+    $color = if ($Line -is [System.Management.Automation.ErrorRecord] -or $text -match '(?i)(?:^|\s)\[(?:ALERT|ERROR|FATAL|LOG ERROR)\](?:\s|$)') {
+        [ConsoleColor]::Red
+    }
+    elseif ($text -match '(?i)(?:^|\s)\[WARNING\](?:\s|$)') {
+        [ConsoleColor]::Yellow
+    }
+    elseif ($text -match '(?i)(?:^|\s)\[OK\](?:\s|$)') {
+        [ConsoleColor]::Green
+    }
+    elseif ($text -match '(?i)(?:^|\s)\[INFO\](?:\s|$)') {
+        [ConsoleColor]::Blue
+    }
+    else {
+        [ConsoleColor]::Gray
+    }
+    Write-Host $text -ForegroundColor $color
+}
+
 function Invoke-SiteMonitoringCommand {
     param(
         [Parameter(Mandatory = $true)][object]$Target,
@@ -3503,8 +3525,12 @@ function Invoke-SiteMonitoringCommand {
     try {
         Write-StreamingLog -Percent 20 -Step 'Monitor command' -Description 'Running the selected monitoring command.'
         $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Target.ScriptPath, '-ConfigPath', $Target.ConfigPath) + $ArgumentList
-        $output = @(& powershell.exe @arguments 2>&1)
-        foreach ($line in $output) { Write-Host $line }
+        $output = [System.Collections.Generic.List[string]]::new()
+        & powershell.exe @arguments 2>&1 | ForEach-Object {
+            $line = $_
+            $output.Add([string]$line) | Out-Null
+            Write-SiteMonitoringOutputLine -Line $line
+        }
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 1) {
             # The monitor reserves exit code 1 for completed runs containing warnings.

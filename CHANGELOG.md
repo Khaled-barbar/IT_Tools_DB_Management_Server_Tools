@@ -6,6 +6,14 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.6.3 - 2026-09-10
+
+- Synchronized the machine-readable `D4A-Monitor-Version` header with the embedded monitor version and release manifest so IT Tools and automatic monitoring updates consistently detect the current release.
+
+## 7.6.1 - 2026-09-10
+
+- Manual monitoring commands launched from IT Tools now stream results as they are produced and preserve severity colors: `INFO` is blue, `OK` is green, `WARNING` is yellow, and `ALERT`, `ERROR`, or `FATAL` is red.
+
 ## Monitoring 7.6.2 - 2026-09-10
 
 - Corrected database connectivity monitoring to test only the exact primary `dbConfig` object from each discovered `dbconfig.js` file, preventing duplicate checks for secondary application configurations.
