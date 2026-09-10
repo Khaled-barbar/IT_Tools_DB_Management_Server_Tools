@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.6.0
+# D4A-Monitor-Version: 7.6.1
 # D4A-Monitor-Release-Date: 2026-09-10
 
 <#
@@ -265,7 +265,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.6.0'
+$script:MonitorVersion = '7.6.1'
 $script:MonitorReleaseDate = '2026-09-10'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1978,7 +1978,17 @@ function Write-RunLog {
     }
 
     if (-not $NoConsole.IsPresent) {
-        Write-Host $line -ForegroundColor $Color
+        # Console color follows the log level consistently, while run_log files
+        # retain the exact same text for support collection and parsing.
+        $displayColor = switch ($Level.ToUpperInvariant()) {
+            'INFO' { [ConsoleColor]::Blue; break }
+            'OK' { [ConsoleColor]::Green; break }
+            'WARNING' { [ConsoleColor]::Yellow; break }
+            'ALERT' { [ConsoleColor]::Red; break }
+            'ERROR' { [ConsoleColor]::Red; break }
+            default { $Color; break }
+        }
+        Write-Host $line -ForegroundColor $displayColor
     }
 }
 
