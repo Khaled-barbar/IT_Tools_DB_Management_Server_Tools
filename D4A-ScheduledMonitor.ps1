@@ -265,7 +265,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.6.1'
+$script:MonitorVersion = '7.6.2'
 $script:MonitorReleaseDate = '2026-09-10'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3383,7 +3383,7 @@ function Get-D4ADatabaseConfigurationsFromFile {
 
     $content = [IO.File]::ReadAllText($Path)
     $configs = [System.Collections.Generic.List[object]]::new()
-    $declarationPattern = '(?m)^\s*(?:var|let|const)\s+(?<name>dbConfig[A-Za-z0-9_$]*)\s*='
+    $declarationPattern = '(?m)^\s*(?:var|let|const)\s+(?<name>dbConfig)\s*='
     foreach ($declaration in [regex]::Matches($content, $declarationPattern)) {
         $valueStart = $declaration.Index + $declaration.Length
         while ($valueStart -lt $content.Length -and [char]::IsWhiteSpace($content[$valueStart])) { $valueStart++ }
@@ -3406,6 +3406,7 @@ function Get-D4ADatabaseConfigurationsFromFile {
                 Server = [string]$server
                 Database = [string]$database
                 Port = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'port'
+                InstanceName = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'instanceName' } else { $null }
                 Encrypt = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'encrypt' } else { $null }
                 TrustServerCertificate = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'trustServerCertificate' } else { $null }
             }) | Out-Null
@@ -3486,20 +3487,128 @@ function ConvertTo-D4ADatabaseBoolean {
     return $Default
 }
 
+function Get-D4ALocalSqlInstanceNames {
+    $instances = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-D4ALocalSqlInstanceName {
+        param([AllowNull()][string]$Instance)
+
+        if (-not [string]::IsNullOrWhiteSpace($Instance) -and $seen.Add($Instance)) {
+            $instances.Add($Instance) | Out-Null
+        }
+    }
+
+    foreach ($registryPath in @(
+            'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+        )) {
+        try {
+            $instanceProperties = Get-ItemProperty -Path $registryPath -ErrorAction Stop
+            foreach ($property in $instanceProperties.PSObject.Properties) {
+                if ($property.Name -match '^PS' -or $property.Name -eq 'Name') { continue }
+                if ($property.Name -eq 'MSSQLSERVER') {
+                    Add-D4ALocalSqlInstanceName -Instance 'localhost'
+                }
+                else {
+                    Add-D4ALocalSqlInstanceName -Instance ('localhost\{0}' -f $property.Name)
+                }
+            }
+        }
+        catch {
+            # Windows service discovery below provides a second source.
+        }
+    }
+
+    $sqlServices = @()
+    try {
+        $sqlServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop | Where-Object {
+                [string]$_.Name -eq 'MSSQLSERVER' -or [string]$_.Name -like 'MSSQL$*'
+            })
+    }
+    catch {
+        try {
+            $sqlServices = @(Get-WmiObject -Class Win32_Service -ErrorAction Stop | Where-Object {
+                    [string]$_.Name -eq 'MSSQLSERVER' -or [string]$_.Name -like 'MSSQL$*'
+                })
+        }
+        catch {
+            # Registry discovery can still identify installed SQL instances.
+        }
+    }
+
+    foreach ($service in $sqlServices) {
+        if ([string]$service.Name -eq 'MSSQLSERVER') {
+            Add-D4ALocalSqlInstanceName -Instance 'localhost'
+        }
+        elseif ([string]$service.Name -like 'MSSQL$*') {
+            Add-D4ALocalSqlInstanceName -Instance ('localhost\{0}' -f ([string]$service.Name).Substring(6))
+        }
+    }
+
+    return @($instances.ToArray())
+}
+
+function Test-D4ADatabaseServerIsLocal {
+    param([AllowNull()][string]$Server)
+
+    $serverName = ([string]$Server).Trim() -replace '^(?i)(?:tcp|np|lpc):', ''
+    $serverName = ($serverName -split '\\', 2)[0]
+    $serverName = ($serverName -split ',', 2)[0]
+    $localNames = @('localhost', '.', '(local)', '127.0.0.1', '::1', $env:COMPUTERNAME)
+    try { $localNames += [System.Net.Dns]::GetHostName() }
+    catch { }
+    return @($localNames | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -icontains $serverName
+}
+
+function Get-D4ADatabaseDataSourceCandidates {
+    param([Parameter(Mandatory = $true)][pscustomobject]$DbConfig)
+
+    $instanceName = ([string]$DbConfig.InstanceName).Trim()
+    $localInstances = @(Get-D4ALocalSqlInstanceNames)
+    if (-not [string]::IsNullOrWhiteSpace($instanceName)) {
+        if (Test-D4ADatabaseServerIsLocal -Server $DbConfig.Server) {
+            if ($instanceName -ieq 'MSSQLSERVER') { return @('localhost') }
+            return @('localhost\{0}' -f $instanceName)
+        }
+
+        $configuredServer = ([string]$DbConfig.Server).Trim() -replace '^(?i)tcp:', ''
+        $configuredServer = ($configuredServer -split '\\', 2)[0]
+        $configuredServer = ($configuredServer -split ',', 2)[0]
+        if ([string]::IsNullOrWhiteSpace($configuredServer)) { return @() }
+        if ($instanceName -ieq 'MSSQLSERVER') { return @($configuredServer) }
+        return @('{0}\{1}' -f $configuredServer, $instanceName)
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $configuredDataSource = ([string]$DbConfig.Server).Trim()
+    if ($DbConfig.Port -and $configuredDataSource -notmatch ',' -and $configuredDataSource -notmatch '\\') {
+        $configuredDataSource = '{0},{1}' -f $configuredDataSource, $DbConfig.Port
+    }
+    foreach ($candidate in @($configuredDataSource) + $localInstances) {
+        $candidateText = [string]$candidate
+        if (-not [string]::IsNullOrWhiteSpace($candidateText) -and $seen.Add($candidateText)) {
+            $candidates.Add($candidateText) | Out-Null
+        }
+    }
+    return @($candidates.ToArray())
+}
+
 function New-D4ADatabaseConnectionString {
     param(
         [Parameter(Mandatory = $true)][pscustomobject]$DbConfig,
         [Parameter(Mandatory = $true)][string]$Password,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][string]$DataSource,
+        [AllowNull()][string]$Database
     )
 
-    $dataSource = $DbConfig.Server.Trim()
-    if ($DbConfig.Port -and $dataSource -notmatch ',' -and $dataSource -notmatch '\\') {
-        $dataSource = '{0},{1}' -f $dataSource, $DbConfig.Port
-    }
     $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
-    $builder['Data Source'] = $dataSource
-    $builder['Initial Catalog'] = $DbConfig.Database
+    $builder['Data Source'] = $DataSource
+    if (-not [string]::IsNullOrWhiteSpace($Database)) {
+        $builder['Initial Catalog'] = $Database
+    }
     $builder['User ID'] = $DbConfig.User
     $builder['Password'] = $Password
     $builder['Connect Timeout'] = $TimeoutSeconds
@@ -3562,8 +3671,6 @@ function Test-D4ADatabaseConnectivity {
 
         foreach ($dbConfig in $databaseConfigs) {
             $password = $null
-            $connection = $null
-            $command = $null
             $databaseKey = 'database-connectivity-{0}-{1}' -f $dbConfig.Database, $dbConfig.Name
             try {
                 if (Test-D4AEncryptedPassword -Value $dbConfig.Password) {
@@ -3581,27 +3688,60 @@ function Test-D4ADatabaseConnectivity {
                 }
 
                 Add-Type -AssemblyName System.Data -ErrorAction Stop
-                $connection = [System.Data.SqlClient.SqlConnection]::new((New-D4ADatabaseConnectionString -DbConfig $dbConfig -Password $password -TimeoutSeconds $DatabaseConnectionTimeoutSeconds))
-                $connection.Open()
-                $command = $connection.CreateCommand()
-                $command.CommandTimeout = $DatabaseConnectionTimeoutSeconds
-                $command.CommandText = 'SELECT 1;'
-                if ([int]$command.ExecuteScalar() -ne 1) { throw 'The database test query returned an unexpected result.' }
-                Add-MonitorResult -Severity OK -Category Database -Check 'Database connectivity' -Message (
-                    'Database={0}; configured dbconfig={1}; SELECT 1 completed successfully.' -f $dbConfig.Database, $dbConfig.Name
+                $dataSourceCandidates = @(Get-D4ADatabaseDataSourceCandidates -DbConfig $dbConfig)
+                if ($dataSourceCandidates.Count -eq 0) { throw 'No SQL Server instance could be resolved from dbConfig.' }
+
+                $selectedDataSource = $null
+                $attempts = [System.Collections.Generic.List[string]]::new()
+                foreach ($dataSourceCandidate in $dataSourceCandidates) {
+                    $dataSource = [string]$dataSourceCandidate
+                    $connection = $null
+                    $command = $null
+                    try {
+                        Write-RunLog -Level Info -Category Database -Color Blue -Message (
+                            'Database connectivity - {0}: trying SQL instance {1}.' -f $dbConfig.Database, $dataSource
+                        )
+                        $connectionString = New-D4ADatabaseConnectionString -DbConfig $dbConfig -Password $password `
+                            -TimeoutSeconds $DatabaseConnectionTimeoutSeconds -DataSource $dataSource -Database 'master'
+                        $connection = [System.Data.SqlClient.SqlConnection]::new($connectionString)
+                        $connection.Open()
+                        $connection.ChangeDatabase([string]$dbConfig.Database)
+                        $command = $connection.CreateCommand()
+                        $command.CommandTimeout = $DatabaseConnectionTimeoutSeconds
+                        $command.CommandText = 'SELECT 1;'
+                        if ([int]$command.ExecuteScalar() -ne 1) { throw 'The database test query returned an unexpected result.' }
+                        $selectedDataSource = $dataSource
+                        break
+                    }
+                    catch {
+                        $failureDetail = Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception
+                        $attempts.Add(('{0}: {1}' -f $dataSource, $failureDetail)) | Out-Null
+                        Write-RunLog -Level Warning -Category Database -Color Yellow -Message (
+                            'Database connectivity - {0}: SQL instance {1} was not selected. {2}' -f $dbConfig.Database, $dataSource, $failureDetail
+                        )
+                    }
+                    finally {
+                        if ($command) { $command.Dispose() }
+                        if ($connection) {
+                            if ($connection.State -ne [System.Data.ConnectionState]::Closed) { $connection.Close() }
+                            $connection.Dispose()
+                        }
+                    }
+                }
+
+                if ([string]::IsNullOrWhiteSpace($selectedDataSource)) {
+                    throw ('No SQL instance accepted the configured credentials and database. Attempts: {0}' -f ($attempts -join ' | '))
+                }
+                Add-MonitorResult -Severity OK -Category Database -Check ('Database connectivity - {0}' -f $dbConfig.Database) -Message (
+                    'Database={0}; configured dbconfig={1}; SQL instance={2}; SELECT 1 completed successfully.' -f $dbConfig.Database, $dbConfig.Name, $selectedDataSource
                 ) -Key $databaseKey
             }
             catch {
-                Add-MonitorResult -Severity Alert -Category Database -Check 'Database connectivity' -Message (
+                Add-MonitorResult -Severity Alert -Category Database -Check ('Database connectivity - {0}' -f $dbConfig.Database) -Message (
                     'Database={0}; configured dbconfig={1}; {2}' -f $dbConfig.Database, $dbConfig.Name, (Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception)
                 ) -Key $databaseKey
             }
             finally {
-                if ($command) { $command.Dispose() }
-                if ($connection) {
-                    if ($connection.State -ne [System.Data.ConnectionState]::Closed) { $connection.Close() }
-                    $connection.Dispose()
-                }
                 $password = $null
             }
         }
