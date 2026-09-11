@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.6.3
-# D4A-Monitor-Release-Date: 2026-09-10
+# D4A-Monitor-Version: 7.6.4
+# D4A-Monitor-Release-Date: 2026-09-11
 
 <#
 .SYNOPSIS
@@ -265,8 +265,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.6.3'
-$script:MonitorReleaseDate = '2026-09-10'
+$script:MonitorVersion = '7.6.4'
+$script:MonitorReleaseDate = '2026-09-11'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -3414,19 +3414,6 @@ function Get-D4ADatabaseConfigurationsFromFile {
     return @($configs.ToArray())
 }
 
-function Test-D4AEncryptedPassword {
-    param([AllowNull()][string]$Value)
-
-    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Trim().Length -lt 16 -or $Value.Trim() -notmatch '^[A-Za-z0-9+/]+={0,2}$') { return $false }
-    try {
-        $bytes = [Convert]::FromBase64String($Value.Trim())
-        if ($bytes.Length -eq 0) { return $false }
-        $nonPrintable = @($bytes | Where-Object { ($_ -lt 32 -and $_ -notin @(9, 10, 13)) -or $_ -gt 126 }).Count
-        return (($nonPrintable / [double]$bytes.Length) -gt 0.2)
-    }
-    catch { return $false }
-}
-
 function Get-D4AEnvironmentSecret {
     param([Parameter(Mandatory = $true)][ValidateSet('D4AKEY', 'D4AIV')][string]$Name)
 
@@ -3474,6 +3461,22 @@ function Unprotect-D4APassword {
         foreach ($buffer in @($keyBytes, $ivBytes, $encryptedBytes, $decryptedBytes)) {
             if ($buffer) { [Array]::Clear($buffer, 0, $buffer.Length) }
         }
+    }
+}
+
+function Resolve-D4ADatabasePassword {
+    param([Parameter(Mandatory = $true)][string]$StoredPassword)
+
+    try { return Unprotect-D4APassword -EncryptedPassword $StoredPassword }
+    catch {
+        $decoded = $null
+        try {
+            $decoded = [Convert]::FromBase64String($StoredPassword)
+            if ($decoded.Length -lt 16 -or ($decoded.Length % 16) -ne 0) { return $StoredPassword }
+        }
+        catch { return $StoredPassword }
+        finally { if ($decoded) { [Array]::Clear($decoded, 0, $decoded.Length) } }
+        throw
     }
 }
 
@@ -3577,7 +3580,7 @@ function Get-D4ADatabaseDataSourceCandidates {
         $configuredServer = ($configuredServer -split ',', 2)[0]
         if ([string]::IsNullOrWhiteSpace($configuredServer)) { return @() }
         if ($instanceName -ieq 'MSSQLSERVER') { return @($configuredServer) }
-        return @('{0}\{1}' -f $configuredServer, $instanceName)
+        return @('tcp:{0}\{1}' -f $configuredServer, $instanceName)
     }
 
     $candidates = [System.Collections.Generic.List[string]]::new()
@@ -3636,6 +3639,7 @@ function Get-D4ADatabaseSafeFailureDetail {
         -2 { return 'Database did not respond before the connection timed out.' }
     }
     if ($message -match '(?i)login failed') { return 'Login failed or the configured SQL login is unavailable.' }
+    if ($message -match '(?i)D4A database password decryption failed') { return 'The configured database password could not be decrypted or recognized as plaintext.' }
     if ($message -match '(?i)network-related|server was not found|could not open a connection') { return 'Database host is unreachable or the SQL Server instance was not found.' }
     if ($message -match '(?i)timeout') { return 'Database did not respond before the connection timed out.' }
     if ($message -match '(?i)certificate chain.*not trusted|authority that is not trusted|SSL Provider') { return 'SQL TLS/certificate trust failed.' }
@@ -3673,18 +3677,13 @@ function Test-D4ADatabaseConnectivity {
             $password = $null
             $databaseKey = 'database-connectivity-{0}-{1}' -f $dbConfig.Database, $dbConfig.Name
             try {
-                if (Test-D4AEncryptedPassword -Value $dbConfig.Password) {
-                    if ($passwordCache.ContainsKey($dbConfig.Password)) {
-                        $password = [string]$passwordCache[$dbConfig.Password]
-                    }
-                    else {
-                        $password = Unprotect-D4APassword -EncryptedPassword $dbConfig.Password
-                        if ([string]::IsNullOrWhiteSpace($password)) { throw 'D4A database password decryption returned an empty value.' }
-                        $passwordCache[$dbConfig.Password] = $password
-                    }
+                if ($passwordCache.ContainsKey($dbConfig.Password)) {
+                    $password = [string]$passwordCache[$dbConfig.Password]
                 }
                 else {
-                    $password = [string]$dbConfig.Password
+                    $password = Resolve-D4ADatabasePassword -StoredPassword $dbConfig.Password
+                    if ([string]::IsNullOrWhiteSpace($password)) { throw 'D4A database password resolution returned an empty value.' }
+                    $passwordCache[$dbConfig.Password] = $password
                 }
 
                 Add-Type -AssemblyName System.Data -ErrorAction Stop

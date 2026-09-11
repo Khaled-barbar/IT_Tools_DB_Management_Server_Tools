@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.6.4 - 2026-09-11
+
+- Aligned database password resolution with the standalone connectivity tester so primary `dbConfig` passwords can be either AES-encrypted or plaintext without heuristic misclassification.
+- Remote named SQL instances now use the proven `tcp:server\instance` data source format from `options.instanceName`; local and unnamed-instance behavior remains unchanged.
+
 ## 7.6.2 - 2026-09-11
 
 - Fixed the monitoring installation wizard so a valid Discord webhook URL advances to the deployment summary instead of repeating the same prompt.
