@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.6.4
+# D4A-Monitor-Version: 7.6.5
 # D4A-Monitor-Release-Date: 2026-09-11
 
 <#
@@ -265,7 +265,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.6.4'
+$script:MonitorVersion = '7.6.5'
 $script:MonitorReleaseDate = '2026-09-11'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -4385,18 +4385,37 @@ function Test-DataCollectorWatchdogHealth {
     }
 }
 
-function Test-IsWatchdogSuccessfulRestartEvidence {
-    param([string[]]$Samples)
+function Get-WatchdogEvidenceDisposition {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
 
-    $evidence = (@($Samples) -join ' ')
-    if ([string]::IsNullOrWhiteSpace($evidence)) { return $false }
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return 'Ignore' }
 
-    # A failed restart is still actionable even when another entry mentions a restart.
-    if ($evidence -match '(?i)restart\s+failed|restart\s+unsuccessful|failed\s+to\s+restart') {
-        return $false
+    # These messages contain words such as "error" but explicitly report a healthy result.
+    if ($normalized -match '(?i)healthy\s*\(no\s+matching\s+events\)|\bhealthy\b|conditions\s+back\s+to\s+normal|\bOK\s+-|Status\s*=\s*Healthy') {
+        return 'Ignore'
     }
 
-    return $evidence -match '(?i)restart\s+succeeded|restarted\s+service'
+    # A completed recovery is useful history, but the monitor's direct checks decide
+    # whether a service is currently unavailable and whether a notification is needed.
+    if ($normalized -match '(?i)restart\s+succeeded|restarted\s+(?:service|successfully)|service\s+.+\s+started\.?') {
+        return 'Warning'
+    }
+
+    # Failure to inspect optional evidence must not be presented as a service outage.
+    if ($normalized -match '(?i)unable\s+to\s+query\s+(?:Service\s+Control\s+Manager|Application).*events') {
+        return 'Warning'
+    }
+
+    if ($normalized -match '(?i)restart\s+failed|restart\s+unsuccessful|failed\s+to\s+restart|unable\s+to\s+(?:start|restart)\s+service|service\s+.+\s+(?:not\s+found|is\s+disabled|is\s+not\s+running)|status\s+is\s+["'']?(?:stopped|paused|startpending|stoppending)|detected\s+\d+\s+.*error\s+event|\bunhealthy\b|\bstale\b|\btimeout\b|timed\s+out|\bexception\b|\bcrash(?:ed)?\b|\bunavailable\b|no\s+MQTT\s+device\s+messages\s+observed|no\s+MQTT\s+last-contact\s+samples\s+observed') {
+        return 'Alert'
+    }
+
+    if ($normalized -match '(?i)restart\s+(?:deferred|skipped)|unable\s+to\s+(?:read|evaluate|persist)|\bfailed\b|\berror\b') {
+        return 'Warning'
+    }
+
+    return 'Ignore'
 }
 
 function Test-WatchdogServiceLogs {
@@ -4428,47 +4447,54 @@ function Test-WatchdogServiceLogs {
         return
     }
 
-    $incidentPattern = '(?i)\b(error|fail(?:ed|ure)?|unhealthy|not\s+running|stale|timeout|timed\s+out|exception|crash|restart(?:ed|ing|\s+succeeded|\s+failed|\s+deferred)?)\b'
     foreach ($file in $logFiles) {
         if (Test-IsDataCollectorWatchdogFile -File $file) { continue }
         $lines = @((Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop))
         $entryTime = $file.LastWriteTime
-        $samples = [System.Collections.Generic.List[string]]::new()
-        $lastEvidenceIndex = -3
-        for ($index = 0; $index -lt $lines.Count; $index++) {
-            $line = [string]$lines[$index]
-            $entryTime = Get-WatchdogLogEntryTime -Line $line -FallbackTime $entryTime
-            if ($entryTime -lt $since -or $line -notmatch $incidentPattern) { continue }
-            if ($index - $lastEvidenceIndex -lt 3) { continue }
-
-            $entryLines = [System.Collections.Generic.List[string]]::new()
-            for ($contextIndex = $index; $contextIndex -lt [Math]::Min($index + 3, $lines.Count); $contextIndex++) {
-                $contextLine = (([string]$lines[$contextIndex] -replace '[\r\n]+', ' ').Trim())
-                if (-not [string]::IsNullOrWhiteSpace($contextLine)) { $entryLines.Add($contextLine) | Out-Null }
+        $records = [System.Collections.Generic.List[object]]::new()
+        $recordLines = [System.Collections.Generic.List[string]]::new()
+        $recordTime = $entryTime
+        foreach ($rawLine in $lines) {
+            $line = (([string]$rawLine -replace '[\r\n]+', ' ').Trim())
+            if ($line -eq '---------------') { continue }
+            if ($line -match '^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]') {
+                if ($recordLines.Count -gt 0) {
+                    $records.Add([pscustomobject]@{ Time = $recordTime; Text = ($recordLines -join ' | ') }) | Out-Null
+                    $recordLines.Clear()
+                }
+                $recordTime = Get-WatchdogLogEntryTime -Line $line -FallbackTime $entryTime
             }
-            $sample = $entryLines -join ' | '
-            if ($sample.Length -gt 900) { $sample = $sample.Substring(0, 900) + '...' }
-            if (-not $samples.Contains($sample)) { $samples.Add($sample) | Out-Null }
-            $lastEvidenceIndex = $index
-            if ($samples.Count -ge 3) { break }
+            if (-not [string]::IsNullOrWhiteSpace($line)) { $recordLines.Add($line) | Out-Null }
+        }
+        if ($recordLines.Count -gt 0) {
+            $records.Add([pscustomobject]@{ Time = $recordTime; Text = ($recordLines -join ' | ') }) | Out-Null
         }
 
-        if ($samples.Count -eq 0) { continue }
-        $hasSuccessfulRestart = Test-IsWatchdogSuccessfulRestartEvidence -Samples $samples.ToArray()
-        $severity = if ($hasSuccessfulRestart) {
-            'Warning'
+        $alertSamples = [System.Collections.Generic.List[string]]::new()
+        $warningSamples = [System.Collections.Generic.List[string]]::new()
+        foreach ($record in $records) {
+            if ([datetime]$record.Time -lt $since) { continue }
+            $disposition = Get-WatchdogEvidenceDisposition -Evidence ([string]$record.Text)
+            if ($disposition -eq 'Ignore') { continue }
+            $sample = [string]$record.Text
+            if ($sample.Length -gt 900) { $sample = $sample.Substring(0, 900) + '...' }
+            if ($disposition -eq 'Alert') {
+                if (-not $alertSamples.Contains($sample)) { $alertSamples.Add($sample) | Out-Null }
+            }
+            elseif (-not $warningSamples.Contains($sample)) {
+                $warningSamples.Add($sample) | Out-Null
+            }
         }
-        elseif (($samples -join ' ') -match '(?i)restart\s+failed|\berror\b|\bfailed\b|unhealthy|not\s+running|stale|timeout|exception|crash') {
-            'Alert'
-        }
-        else {
-            'Warning'
-        }
+
+        $severity = if ($alertSamples.Count -gt 0) { 'Alert' } elseif ($warningSamples.Count -gt 0) { 'Warning' } else { $null }
+        if ($null -eq $severity) { continue }
+        $samples = if ($severity -eq 'Alert') { $alertSamples } else { $warningSamples }
+        $selectedSamples = @($samples | Select-Object -First 3)
         $serviceName = Split-Path -Leaf (Split-Path -Parent $file.FullName)
-        $evidenceLabel = if ($hasSuccessfulRestart) { 'successful restart evidence' } else { 'evidence' }
+        $evidenceLabel = if ($severity -eq 'Alert') { 'actionable failure evidence' } else { 'diagnostic or recovery evidence' }
         Add-MonitorResult -Severity $severity -Category Diagnostics -Check 'Watchdog service logs' -Message (
-            'Recent Watchdog {0}; service={1}; file={2}; sample={3}' -f $evidenceLabel, $serviceName, $file.FullName, ($samples -join ' || ')
-        ) -Key ('diagnostics-watchdog-{0}' -f $serviceName) -NotificationEligible:(-not $hasSuccessfulRestart)
+            'Recent Watchdog {0}; service={1}; file={2}; sample={3}' -f $evidenceLabel, $serviceName, $file.FullName, ($selectedSamples -join ' || ')
+        ) -Key ('diagnostics-watchdog-{0}' -f $serviceName) -NotificationEligible:($severity -eq 'Alert')
     }
 }
 

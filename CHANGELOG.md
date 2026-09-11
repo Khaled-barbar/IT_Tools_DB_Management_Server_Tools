@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.6.5 - 2026-09-11
+
+- Replaced broad Watchdog keyword matching with structured entry classification. Explicitly healthy evidence such as `Application error events: healthy (no matching events)` is ignored and can no longer generate a false Mosquitto alert.
+- Successful service recovery and Watchdog event-query failures are retained as non-notifying warnings, while confirmed unhealthy states, stopped or missing services, timeouts, crashes, detected error events, and failed restarts remain notification-eligible alerts.
+
 ## Monitoring 7.6.4 - 2026-09-11
 
 - Aligned database password resolution with the standalone connectivity tester so primary `dbConfig` passwords can be either AES-encrypted or plaintext without heuristic misclassification.
