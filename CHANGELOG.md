@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.6.2 - 2026-09-11
+
+- Fixed the monitoring installation wizard so a valid Discord webhook URL advances to the deployment summary instead of repeating the same prompt.
+- Site collection now asks whether another frontend site should be added. Pressing Enter continues to the existing per-site friendly-name and API-address questions, and `P` can remove and correct the most recently entered site.
+
 ## Monitoring 7.6.3 - 2026-09-10
 
 - Synchronized the machine-readable `D4A-Monitor-Version` header with the embedded monitor version and release manifest so IT Tools and automatic monitoring updates consistently detect the current release.

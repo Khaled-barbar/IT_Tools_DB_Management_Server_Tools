@@ -58,8 +58,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.6.1'
-$Script:ToolReleaseDate = '2026-09-10'
+$Script:ToolVersion = [version]'7.6.2'
+$Script:ToolReleaseDate = '2026-09-11'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1498,20 +1498,51 @@ function Test-SiteMonitoringHostList {
 }
 
 function Read-SiteMonitoringHosts {
+    $hostList = [System.Collections.Generic.List[string]]::new()
+    $seenHosts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
     while ($true) {
-        Write-Host "Site examples: hostname:1200 or akbou.decide4action.com" -ForegroundColor Gray
-        Write-Host "For multiple frontend sites, separate entries with a comma. The matching API health endpoint is added automatically." -ForegroundColor Gray
-        $hosts = Read-Host "Enter the site address(es), or press Enter for hostname:1200 (q to go back; P to previous)"
+        if ($hostList.Count -eq 0) {
+            Write-Host 'Site examples: hostname:1200 or akbou.decide4action.com' -ForegroundColor Gray
+            Write-Host 'You can enter one site at a time or separate multiple sites with commas.' -ForegroundColor Gray
+            $hosts = Read-Host 'Enter the first site address, or press Enter for hostname:1200 (q to go back; P to previous)'
+        }
+        else {
+            Write-Host ("Selected site(s): {0}" -f ($hostList -join ', ')) -ForegroundColor Gray
+            Write-Host 'After this list is complete, you will enter a friendly name and API address for every site.' -ForegroundColor Gray
+            $hosts = Read-Host 'Enter another site address, or press Enter to continue (q to go back; P to edit the previous site)'
+        }
+
         if (Test-IsBack $hosts) { return $null }
-        if ($hosts.Trim() -ieq 'p') { return '__D4A_PREVIOUS_STEP__' }
-        if ([string]::IsNullOrWhiteSpace($hosts)) { return 'hostname:1200' }
+        if ($hosts.Trim() -ieq 'p') {
+            if ($hostList.Count -eq 0) { return '__D4A_PREVIOUS_STEP__' }
+            $removedHost = $hostList[$hostList.Count - 1]
+            $hostList.RemoveAt($hostList.Count - 1)
+            [void]$seenHosts.Remove($removedHost)
+            Write-Host "Removed $removedHost. Enter the corrected site address." -ForegroundColor Yellow
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($hosts)) {
+            if ($hostList.Count -gt 0) { return ($hostList -join ',') }
+            $hosts = 'hostname:1200'
+        }
 
         $hosts = Normalize-UserPath $hosts
         if (Test-SiteMonitoringHostList -Hosts $hosts) {
-            return (($hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique) -join ',')
+            $addedCount = 0
+            foreach ($hostEntry in @($hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+                if ($seenHosts.Add($hostEntry)) {
+                    $hostList.Add($hostEntry) | Out-Null
+                    $addedCount++
+                }
+            }
+            if ($addedCount -eq 0) {
+                Write-Host 'That site is already selected. Enter another site or press Enter to continue.' -ForegroundColor Yellow
+            }
+            continue
         }
 
-        Write-Host "Enter valid host names separated by commas, for example hostname:1200,akbou.decide4action.com." -ForegroundColor Yellow
+        Write-Host 'Enter a valid host name, for example hostname:1200 or akbou.decide4action.com.' -ForegroundColor Yellow
     }
 }
 
@@ -3030,7 +3061,7 @@ function Show-AddSiteMonitoring {
                         $wizardStep = 5
                         continue
                     }
-                    $wizardStep = 6
+                    $wizardStep = 7
                 }
             }
         }
