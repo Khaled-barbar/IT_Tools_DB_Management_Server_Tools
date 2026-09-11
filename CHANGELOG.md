@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.6.6 - 2026-09-11
+
+- Combined duplicate Watchdog SQL Server connection failures from API, workflow, KPI, and scheduler logs into one shared database-connectivity incident.
+- The first newly observed Watchdog SQL connectivity failure batch is logged without notification. A single alert becomes eligible only after a second freshly timestamped failure batch is detected on a consecutive monitoring run; rereading the same entries does not advance the counter.
+
 ## Monitoring 7.6.5 - 2026-09-11
 
 - Replaced broad Watchdog keyword matching with structured entry classification. Explicitly healthy evidence such as `Application error events: healthy (no matching events)` is ignored and can no longer generate a false Mosquitto alert.

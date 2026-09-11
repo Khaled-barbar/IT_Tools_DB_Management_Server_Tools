@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.6.5
+# D4A-Monitor-Version: 7.6.6
 # D4A-Monitor-Release-Date: 2026-09-11
 
 <#
@@ -265,7 +265,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.6.5'
+$script:MonitorVersion = '7.6.6'
 $script:MonitorReleaseDate = '2026-09-11'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -288,6 +288,7 @@ $script:MonitorUpdateRequestId = '{0}-{1}' -f [DateTime]::UtcNow.Ticks, [guid]::
 $script:EndpointSlowLogMs = 4500
 $script:ResourceAlertPercent = 90
 $script:ResourceConsecutiveRunsRequired = 2
+$script:WatchdogSqlConnectivityConsecutiveRunsRequired = 2
 $script:DiskCriticalFreeGb = 5
 $script:DiskCriticalUsedPercent = 95
 $script:CommandLineParameterNames = @($PSBoundParameters.Keys)
@@ -1512,6 +1513,12 @@ service was successfully restarted is also daily-only; unresolved Watchdog
 failures still notify immediately. Disk space has no warning email: it alerts
 only at 5 GB free or less, or when used space reaches 95 percent.
 
+Repeated Watchdog messages caused by the same SQL Server connectivity loss are
+grouped under one database incident. The first newly observed failure batch is
+logged without a notification. A notification becomes eligible only after a
+second newly timestamped Watchdog failure batch is detected on a consecutive
+monitoring run. Rereading the same log entries does not increase the counter.
+
 NOTIFICATION AND RECOVERY POLICY
 ================================
 Relevant Windows event warnings and errors are always retained in error_log and
@@ -1562,6 +1569,10 @@ service is included in daily and test reports only. Unresolved failures and
 failed restarts still cause an immediate alert. These entries do not cause any
 service restart. Set -WatchdogLogRoot to another
 TaskSchedulerOutput folder when a nonstandard path is used.
+
+SQL Server connection errors repeated by API, workflow, KPI, and scheduler
+checks are combined into one Watchdog SQL connectivity result. The first fresh
+failure batch is log-only; the second consecutive fresh batch can notify.
 
 Manual run examples
 -------------------
@@ -1856,7 +1867,7 @@ function Initialize-MonitorLogging {
 
 function Get-MonitorRuntimeState {
     $defaultState = [pscustomobject]@{
-        StateVersion = 4
+        StateVersion = 5
         DataCollectorLastEvent = [pscustomobject]@{
             ConsecutiveFailures = 0
             LastHealthy         = $null
@@ -1866,6 +1877,11 @@ function Get-MonitorRuntimeState {
         ResourceUtilization = [pscustomobject]@{
             CpuConsecutiveHigh    = 0
             MemoryConsecutiveHigh = 0
+        }
+        WatchdogSqlConnectivity = [pscustomobject]@{
+            ConsecutiveFailures    = 0
+            LastProcessedEvidence = $null
+            LastDetectedAt         = $null
         }
         NotifiedIssues = @()
     }
@@ -1891,6 +1907,14 @@ function Get-MonitorRuntimeState {
                 $state.ResourceUtilization | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.ResourceUtilization.$propertyName
             }
         }
+        if ($null -eq $state.PSObject.Properties['WatchdogSqlConnectivity'] -or $null -eq $state.WatchdogSqlConnectivity) {
+            $state | Add-Member -MemberType NoteProperty -Name WatchdogSqlConnectivity -Value $defaultState.WatchdogSqlConnectivity
+        }
+        foreach ($propertyName in @('ConsecutiveFailures', 'LastProcessedEvidence', 'LastDetectedAt')) {
+            if ($null -eq $state.WatchdogSqlConnectivity.PSObject.Properties[$propertyName]) {
+                $state.WatchdogSqlConnectivity | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.WatchdogSqlConnectivity.$propertyName
+            }
+        }
         if ($null -eq $state.PSObject.Properties['NotifiedIssues']) {
             $state | Add-Member -MemberType NoteProperty -Name NotifiedIssues -Value @()
         }
@@ -1903,16 +1927,16 @@ function Get-MonitorRuntimeState {
             }
         }
         if ($null -eq $state.PSObject.Properties['StateVersion']) {
-            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 4
+            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 5
         }
         else {
-            $state.StateVersion = 4
+            $state.StateVersion = 5
         }
         return $state
     }
     catch {
         Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
-            'Unable to read monitor state. Data Collector retry tracking will restart: {0}' -f $_.Exception.Message
+            'Unable to read monitor state. Consecutive-run tracking will restart: {0}' -f $_.Exception.Message
         )
         return $defaultState
     }
@@ -4418,9 +4442,82 @@ function Get-WatchdogEvidenceDisposition {
     return 'Ignore'
 }
 
+function Test-IsWatchdogSqlConnectivityEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    return (
+        $normalized -match '(?i)network-related\s+or\s+instance-specific\s+error.*establishing\s+a\s+connection\s+to\s+SQL\s+Server' -or
+        $normalized -match '(?i)Named\s+Pipes\s+Provider,\s*error:\s*40\s*-\s*Could\s+not\s+open\s+a\s+connection\s+to\s+SQL\s+Server' -or
+        $normalized -match '(?i)SQL\s+Server.*server\s+was\s+not\s+found\s+or\s+was\s+not\s+accessible'
+    )
+}
+
+function Update-WatchdogSqlConnectivityState {
+    param([AllowNull()][object]$LatestEvidenceTime)
+
+    $state = Get-MonitorRuntimeState
+    $tracking = $state.WatchdogSqlConnectivity
+    if ($null -eq $LatestEvidenceTime) {
+        if ([int]$tracking.ConsecutiveFailures -ne 0 -or -not [string]::IsNullOrWhiteSpace([string]$tracking.LastProcessedEvidence)) {
+            $tracking.ConsecutiveFailures = 0
+            $tracking.LastProcessedEvidence = $null
+            $tracking.LastDetectedAt = $null
+            Save-MonitorRuntimeState -State $state
+        }
+        return 0
+    }
+
+    $resolvedEvidenceTime = [datetime]$LatestEvidenceTime
+    $evidenceId = $resolvedEvidenceTime.ToUniversalTime().ToString('o')
+    if ([string]$tracking.LastProcessedEvidence -ne $evidenceId) {
+        $tracking.ConsecutiveFailures = [int]$tracking.ConsecutiveFailures + 1
+        $tracking.LastProcessedEvidence = $evidenceId
+    }
+    $tracking.LastDetectedAt = (Get-Date).ToUniversalTime().ToString('o')
+    Save-MonitorRuntimeState -State $state
+    return [int]$tracking.ConsecutiveFailures
+}
+
+function Add-WatchdogSqlConnectivityResult {
+    param([object[]]$EvidenceRecords)
+
+    $records = @($EvidenceRecords | Sort-Object -Property Time -Descending)
+    if ($records.Count -eq 0) {
+        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
+        return
+    }
+
+    $latestEvidenceTime = [datetime]$records[0].Time
+    $consecutiveFailures = Update-WatchdogSqlConnectivityState -LatestEvidenceTime $latestEvidenceTime
+    $serviceNames = @($records | Select-Object -ExpandProperty Service -Unique | Sort-Object)
+    $sample = [string]$records[0].Text
+    if ($sample.Length -gt 900) { $sample = $sample.Substring(0, 900) + '...' }
+    $messagePrefix = 'Watchdog reported one SQL Server connectivity incident across {0} check(s); affected logs={1}; latest evidence={2}; consecutive affected runs={3}/{4}' -f
+        $records.Count,
+        ($serviceNames -join ', '),
+        $latestEvidenceTime.ToString('yyyy-MM-dd HH:mm:ss'),
+        $consecutiveFailures,
+        $script:WatchdogSqlConnectivityConsecutiveRunsRequired
+
+    if ($consecutiveFailures -ge $script:WatchdogSqlConnectivityConsecutiveRunsRequired) {
+        Add-MonitorResult -Severity Alert -Category Database -Check 'Watchdog SQL connectivity' -Message (
+            '{0}; the failure persisted and is notification-eligible; sample={1}' -f $messagePrefix, $sample
+        ) -Key 'diagnostics-watchdog-sql-connectivity'
+    }
+    else {
+        Add-MonitorResult -Severity Warning -Category Database -Check 'Watchdog SQL connectivity' -Message (
+            '{0}; treated as a possible temporary connectivity loss and logged without notification; sample={1}' -f $messagePrefix, $sample
+        ) -Key 'diagnostics-watchdog-sql-connectivity' -NotificationEligible:$false
+    }
+}
+
 function Test-WatchdogServiceLogs {
     $watchdogRoot = Resolve-WatchdogLogRoot
     if ([string]::IsNullOrWhiteSpace($watchdogRoot)) {
+        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
         Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
             'Watchdog TaskSchedulerOutput folder was not found; optional root-cause log analysis was skipped.'
         ) -Key 'diagnostics-watchdog-logs'
@@ -4441,14 +4538,17 @@ function Test-WatchdogServiceLogs {
     }
 
     if ($logFiles.Count -eq 0) {
+        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
         Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
             'No Watchdog service log was updated during the current monitoring window; root={0}' -f $watchdogRoot
         ) -Key 'diagnostics-watchdog-logs'
         return
     }
 
+    $sqlConnectivityRecords = [System.Collections.Generic.List[object]]::new()
     foreach ($file in $logFiles) {
         if (Test-IsDataCollectorWatchdogFile -File $file) { continue }
+        $serviceName = Split-Path -Leaf (Split-Path -Parent $file.FullName)
         $lines = @((Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop))
         $entryTime = $file.LastWriteTime
         $records = [System.Collections.Generic.List[object]]::new()
@@ -4474,6 +4574,14 @@ function Test-WatchdogServiceLogs {
         $warningSamples = [System.Collections.Generic.List[string]]::new()
         foreach ($record in $records) {
             if ([datetime]$record.Time -lt $since) { continue }
+            if (Test-IsWatchdogSqlConnectivityEvidence -Evidence ([string]$record.Text)) {
+                $sqlConnectivityRecords.Add([pscustomobject]@{
+                    Time    = [datetime]$record.Time
+                    Text    = [string]$record.Text
+                    Service = $serviceName
+                }) | Out-Null
+                continue
+            }
             $disposition = Get-WatchdogEvidenceDisposition -Evidence ([string]$record.Text)
             if ($disposition -eq 'Ignore') { continue }
             $sample = [string]$record.Text
@@ -4490,12 +4598,12 @@ function Test-WatchdogServiceLogs {
         if ($null -eq $severity) { continue }
         $samples = if ($severity -eq 'Alert') { $alertSamples } else { $warningSamples }
         $selectedSamples = @($samples | Select-Object -First 3)
-        $serviceName = Split-Path -Leaf (Split-Path -Parent $file.FullName)
         $evidenceLabel = if ($severity -eq 'Alert') { 'actionable failure evidence' } else { 'diagnostic or recovery evidence' }
         Add-MonitorResult -Severity $severity -Category Diagnostics -Check 'Watchdog service logs' -Message (
             'Recent Watchdog {0}; service={1}; file={2}; sample={3}' -f $evidenceLabel, $serviceName, $file.FullName, ($selectedSamples -join ' || ')
         ) -Key ('diagnostics-watchdog-{0}' -f $serviceName) -NotificationEligible:($severity -eq 'Alert')
     }
+    Add-WatchdogSqlConnectivityResult -EvidenceRecords $sqlConnectivityRecords.ToArray()
 }
 
 function Resolve-DbConfigPath {
