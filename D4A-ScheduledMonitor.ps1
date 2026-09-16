@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.6.6
-# D4A-Monitor-Release-Date: 2026-09-11
+# D4A-Monitor-Version: 7.7.0
+# D4A-Monitor-Release-Date: 2026-09-16
 
 <#
 .SYNOPSIS
@@ -22,8 +22,9 @@
     format key|temporary|2h| or key|permanent||. A temporary rule is stamped
     with its calculated end time on first use and commented out after expiry.
 
-    In normal mode, email and configured Discord notifications are sent when a
-    new issue is detected. The monitor automatically creates a 24-hour cooldown
+    In normal mode, configured Discord notifications are sent when a new issue
+    is detected. Email delivery is disabled by default and can be enabled with
+    EnableEmailNotifications in the JSON configuration. The monitor automatically creates a 24-hour cooldown
     rule after successful email delivery. Resolved issues have their automatic
     cooldown removed so a recurrence is reported. Test and daily-summary modes
     send the complete scan report even when healthy. Use -SendDiscordStatus for
@@ -126,8 +127,12 @@ param(
     # maintained by IT Tools and lets each configured site be identified clearly.
     [string]$SiteDisplayNames = '',
 
-    # Default email notification recipient. Change this value if the monitor
-    # should always use another mailbox, or override it with -NotificationTo.
+    # Email delivery is opt-in. Set this to true in the site-specific JSON
+    # configuration; -DisableEmail remains a one-run override.
+    [bool]$EnableEmailNotifications = $false,
+
+    # Default email notification recipient. It is retained while email is
+    # disabled so delivery can be enabled later without re-entering recipients.
     [string]$NotificationTo = 'techsupport@decide4action.com',
 
     # Optional Discord webhook stored in the site-specific JSON configuration.
@@ -265,8 +270,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.6.6'
-$script:MonitorReleaseDate = '2026-09-11'
+$script:MonitorVersion = '7.7.0'
+$script:MonitorReleaseDate = '2026-09-16'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -650,6 +655,7 @@ function Set-MonitorInstalledReleaseMetadata {
 
     $configuration = Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath
     foreach ($property in @(
+            [pscustomobject]@{ Name = 'EnableEmailNotifications'; Value = $false },
             [pscustomobject]@{ Name = 'DiscordWebhookUrl'; Value = 'your Discord webhook URL' },
             [pscustomobject]@{ Name = 'DiscordWebhookUrlNote'; Value = 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.' },
             [pscustomobject]@{ Name = 'InstalledMonitorVersion'; Value = $Version.ToString() },
@@ -659,8 +665,8 @@ function Set-MonitorInstalledReleaseMetadata {
         if ($null -eq $configuration.PSObject.Properties[$property.Name]) {
             $configuration | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value
         }
-        elseif ($property.Name -in @('DiscordWebhookUrl', 'DiscordWebhookUrlNote')) {
-            # Preserve a configured webhook; only add missing defaults.
+        elseif ($property.Name -in @('EnableEmailNotifications', 'DiscordWebhookUrl', 'DiscordWebhookUrlNote')) {
+            # Preserve configured notification settings; only add missing defaults.
             continue
         }
         else {
@@ -956,15 +962,27 @@ function Get-DiscordDeliveryConfigurationStatus {
     return 'Configured'
 }
 
+function Get-EmailDeliveryConfigurationStatus {
+    if ($DisableEmail.IsPresent) { return 'Disabled for this run' }
+    if ($EnableEmailNotifications) { return 'Enabled' }
+    return 'Disabled by configuration'
+}
+
 function Ensure-MonitorConfigurationDefaults {
     param([Parameter(Mandatory = $true)][object]$Configuration)
 
     $changed = $false
     $apiAddressAdded = $false
     $localApiAddressAdded = $false
+    $emailNotificationSettingAdded = $false
     if ($null -eq $Configuration.PSObject.Properties['DatabaseConnectionTimeoutSeconds']) {
         $Configuration | Add-Member -MemberType NoteProperty -Name 'DatabaseConnectionTimeoutSeconds' -Value 10
         $changed = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['EnableEmailNotifications']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'EnableEmailNotifications' -Value $false
+        $changed = $true
+        $emailNotificationSettingAdded = $true
     }
     if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrl']) {
         # JSON does not support comments. The visible placeholder keeps the
@@ -992,8 +1010,8 @@ function Ensure-MonitorConfigurationDefaults {
     if ($changed -and -not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
         $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
         try {
-            if ($apiAddressAdded -or $localApiAddressAdded) {
-                $migrationBackupPath = '{0}.pre-endpoint-settings-{1}.json' -f
+            if ($apiAddressAdded -or $localApiAddressAdded -or $emailNotificationSettingAdded) {
+                $migrationBackupPath = '{0}.pre-configuration-migration-{1}.json' -f
                     ([IO.Path]::Combine((Split-Path -Parent $script:ResolvedConfigPath), [IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath))),
                     (Get-Date -Format 'yyyyMMddHHmmss')
                 Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination $migrationBackupPath -ErrorAction Stop
@@ -1039,6 +1057,7 @@ function Import-MonitorConfiguration {
         LocalApiAddress            = 'String'
         SiteDisplayNames           = 'StringList'
         MonitoringName             = 'String'
+        EnableEmailNotifications   = 'Bool'
         NotificationTo             = 'StringList'
         DiscordWebhookUrl          = 'String'
         LogDirectory               = 'Path'
@@ -1140,9 +1159,9 @@ function Test-MonitorConfigurationValues {
     if ([string]::IsNullOrWhiteSpace($MonitoringName)) {
         throw 'MonitoringName cannot be empty.'
     }
-    if (-not $DisableEmail.IsPresent) {
+    if ($EnableEmailNotifications -and -not $DisableEmail.IsPresent) {
         if ([string]::IsNullOrWhiteSpace($NotificationTo)) {
-            throw 'NotificationTo cannot be empty when email notifications are enabled.'
+            throw 'NotificationTo cannot be empty when EnableEmailNotifications is true.'
         }
 
         foreach ($address in @($NotificationTo -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
@@ -1330,6 +1349,7 @@ function Show-MonitorConfiguration {
         ApiSites             = ($apiSites -join ', ')
         LocalApiAddress      = $LocalApiAddress
         NotificationAddresses = $NotificationTo
+        EmailNotifications     = (Get-EmailDeliveryConfigurationStatus)
         DiscordNotifications = (Get-DiscordDeliveryConfigurationStatus)
         ScheduledFrequency   = $frequency
         DailySummary         = $dailySummary
@@ -1692,9 +1712,13 @@ function Get-MonitorLogsReadmeDiscordNotifications {
 
 DISCORD NOTIFICATIONS
 =====================
-Email remains enabled by default. To also send monitoring notifications to a
-Discord channel, add DiscordWebhookUrl to the local
-D4A-ScheduledMonitor.config.json file:
+Email notifications are disabled by default. To enable them, edit the local
+D4A-ScheduledMonitor.config.json file and set:
+
+  "EnableEmailNotifications": true
+
+NotificationTo continues to define the email recipients. To send monitoring
+notifications to a Discord channel, configure DiscordWebhookUrl in the same file:
 
   "DiscordWebhookUrl": "https://discord.com/api/webhooks/<id>/<token>"
 
@@ -1707,8 +1731,8 @@ type, affected component, server, timestamp, check details, rule key, and the
 daily error-log location. Up to five affected checks are displayed directly;
 additional checks remain available in the monitoring logs.
 
-Use -DisableDiscord for a one-off email-only execution. Use -DisableEmail only
-when DiscordWebhookUrl is configured, or use -DisableEmail -DisableDiscord to
+Use -DisableDiscord for a one-off run without Discord. Use -DisableEmail as a
+one-run override when email is enabled, or use -DisableEmail -DisableDiscord to
 run the health checks and logs without any outbound notification delivery.
 '@
 }
@@ -5631,10 +5655,11 @@ function Invoke-D4AMonitor {
                 Label       = $resolvedSiteNames[$index]
             }) | Out-Null
         }
-        Write-RunLog -Category Configuration -Message ('MonitoringName={0}; Sites={1}; APIs={2}; email recipient={3}; Discord={4}; test notification={5}; daily summary={6}; Discord status={7}' -f
+        Write-RunLog -Category Configuration -Message ('MonitoringName={0}; Sites={1}; APIs={2}; email={3}; email recipient={4}; Discord={5}; test notification={6}; daily summary={7}; Discord status={8}' -f
             $resolvedMonitoringName,
             (($monitorEndpoints | ForEach-Object { $_.FrontendUri.AbsoluteUri }) -join ', '),
             (($monitorEndpoints | ForEach-Object { $_.ApiUri.AbsoluteUri }) -join ', '),
+            (Get-EmailDeliveryConfigurationStatus),
             $NotificationTo,
             (Get-DiscordDeliveryConfigurationStatus),
             $SendTestResultsEmail.IsPresent,
@@ -5726,10 +5751,12 @@ function Invoke-D4AMonitor {
             )
         }
 
-        $emailType = if ($SendTestResultsEmail.IsPresent) {
+        $emailReportRequested = $EnableEmailNotifications -and -not $DisableEmail.IsPresent -and
+            ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)
+        $emailType = if ($emailReportRequested -and $SendTestResultsEmail.IsPresent) {
             'Test'
         }
-        elseif ($SendDailySummaryEmail.IsPresent) {
+        elseif ($emailReportRequested -and $SendDailySummaryEmail.IsPresent) {
             'Daily'
         }
         elseif ($unignoredNotifiableIssues.Count -gt 0) {
@@ -5739,14 +5766,19 @@ function Invoke-D4AMonitor {
             'Recovery'
         }
         $discordNotificationType = if ($SendDiscordStatus.IsPresent) { 'Status' } else { $emailType }
+        if (($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent) -and -not $emailReportRequested) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'The requested email report was skipped because email delivery is {0}. Set EnableEmailNotifications to true in the JSON configuration to enable it.' -f
+                    (Get-EmailDeliveryConfigurationStatus).ToLowerInvariant()
+            )
+        }
         $notificationRequested = (
-            $SendTestResultsEmail.IsPresent -or
-            $SendDailySummaryEmail.IsPresent -or
+            $emailReportRequested -or
             $SendDiscordStatus.IsPresent -or
             $unignoredNotifiableIssues.Count -gt 0 -or
             $recoveredNotifiedIssues.Count -gt 0
         )
-        $shouldSendEmail = -not $DisableEmail.IsPresent -and -not $SendDiscordStatus.IsPresent -and $notificationRequested
+        $shouldSendEmail = $EnableEmailNotifications -and -not $DisableEmail.IsPresent -and -not $SendDiscordStatus.IsPresent -and $notificationRequested
         $shouldSendDiscord = -not $DisableDiscord.IsPresent -and
             -not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl) -and
             $notificationRequested
@@ -5835,14 +5867,14 @@ function Invoke-D4AMonitor {
                 }
             }
         }
-        elseif ($DisableEmail.IsPresent -and $DisableDiscord.IsPresent) {
+        elseif ((-not $EnableEmailNotifications -or $DisableEmail.IsPresent) -and $DisableDiscord.IsPresent) {
             Write-RunLog -Category Notification -Color DarkGray -Message 'Email and Discord delivery are disabled for this run; health checks and logs completed without outbound notifications.'
         }
-        elseif ($DisableEmail.IsPresent -and -not $DisableDiscord.IsPresent -and -not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+        elseif ((-not $EnableEmailNotifications -or $DisableEmail.IsPresent) -and -not $DisableDiscord.IsPresent -and -not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
             Write-RunLog -Category Discord -Color DarkGray -Message 'No notification was required; email delivery is disabled and Discord remains available.'
         }
-        elseif ($DisableEmail.IsPresent) {
-            Write-RunLog -Category Email -Color DarkGray -Message 'Email delivery is disabled for this run.'
+        elseif (-not $EnableEmailNotifications -or $DisableEmail.IsPresent) {
+            Write-RunLog -Category Email -Color DarkGray -Message ('Email delivery is {0}.' -f (Get-EmailDeliveryConfigurationStatus).ToLowerInvariant())
         }
         elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredIssues.Count -eq 0) {
             Write-RunLog -Category Email -Color DarkGray -Message (
@@ -5901,8 +5933,8 @@ try {
     elseif ($ValidateConfiguration.IsPresent) {
         Write-Host ('Monitoring configuration is valid. Version={0}; release date={1}; configuration={2}' -f
             $script:MonitorVersion, $script:MonitorReleaseDate, $script:ResolvedConfigPath) -ForegroundColor Green
-        Write-Host ('MonitoringName={0}; SiteAddress={1}; NotificationTo={2}; Discord={3}; LogRetentionDays={4}' -f
-            $MonitoringName, $SiteAddress, $NotificationTo, (Get-DiscordDeliveryConfigurationStatus), $LogRetentionDays) -ForegroundColor Gray
+        Write-Host ('MonitoringName={0}; SiteAddress={1}; Email={2}; NotificationTo={3}; Discord={4}; LogRetentionDays={5}' -f
+            $MonitoringName, $SiteAddress, (Get-EmailDeliveryConfigurationStatus), $NotificationTo, (Get-DiscordDeliveryConfigurationStatus), $LogRetentionDays) -ForegroundColor Gray
         $finalExitCode = 0
     }
     else {

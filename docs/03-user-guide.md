@@ -425,7 +425,7 @@ Procedure:
 1. Enter one or more frontend sites separated by commas. Press Enter for `hostname:1200`.
 2. Enter one friendly name for each site, then confirm or override the API health endpoint for each frontend site.
 3. Confirm or select the Configuration deployment folder.
-4. Enter one or more notification addresses separated by commas. An optional Discord webhook can be added afterward to the local monitoring JSON configuration; keep this credential out of shared files and screenshots.
+4. Enter one or more notification addresses separated by commas. They are saved for optional use, but email delivery is disabled by default. An optional Discord webhook can be added afterward to the local monitoring JSON configuration; keep this credential out of shared files and screenshots.
 5. Review the complete deployment summary and type `DEPLOY`.
 6. If Node.js/npm are absent, type `INSTALL` to install or repair the official Node.js LTS package. Node.js, npm, and nodemailer are validated before new monitor files are created.
 7. Choose a recurring frequency; 5 minutes is the recommended default unless the site requires another interval.
@@ -439,7 +439,7 @@ Expected result:
 - nodemailer installed;
 - configuration stored in `monitor-logs\D4A-ScheduledMonitor.config.json`;
 - Scheduled Task runs silently, including when users are logged out;
-- test email confirms delivery; a configured Discord webhook receives the same test result.
+- when `EnableEmailNotifications` is `true`, the test email confirms delivery; Discord test/status delivery remains controlled by the configured webhook.
 
 If an earlier deployment stopped after creating the monitor/configuration but before Scheduled Tasks were created, the tool can identify that specific incomplete state even when nodemailer finished installing before the error appeared. It displays **Resume incomplete deployment** and requires `RESUME`; the existing JSON is preserved and backed up while runtime paths are repaired. An active or modified monitor is never treated as an incomplete deployment and must be managed through **Update Existing Monitoring Settings**.
 
@@ -455,7 +455,7 @@ The configuration update creates a settings backup. Version update first retriev
 
 The monitor also checks GitHub for its own newer verified version whenever it runs, including Scheduled Task and stand-alone executions. It bypasses cached release responses, validates the release manifest, SHA-256, version metadata, release date, PowerShell syntax, and current JSON configuration; then backs up the installed script, configuration, and related task definitions before replacing its own file. A lock prevents two Scheduled Tasks from installing concurrently. The current health check continues with the loaded version, and the new code is used on the next run. Use `-SkipAutomaticUpdate` only for a temporary troubleshooting execution.
 
-Monitoring configuration is read and written explicitly as UTF-8, so friendly names with accents, such as `Salé`, remain readable in email subjects and Discord messages. Existing corrupted forms such as `SalÃ©` are repaired when loaded. Monitoring emails display **D4A Monitoring** as their sender name while keeping the site’s configured sender address. New and updated configurations include `DiscordWebhookUrl` directly after the email recipients with the safe placeholder `your Discord webhook URL`; replace that value with the site webhook to enable Discord. JSON does not support comments, so `DiscordWebhookUrlNote` documents the setting. The configuration summary reports only `Configured`, never the URL itself. Discord recovery notices show both the alert-time value and the current recovered value. Historical state values, including legacy accented site names, are repaired before display.
+Monitoring configuration is read and written explicitly as UTF-8, so friendly names with accents, such as `Salé`, remain readable in email subjects and Discord messages. Existing corrupted forms such as `SalÃ©` are repaired when loaded. Monitoring emails display **D4A Monitoring** as their sender name while keeping the site’s configured sender address. Email is disabled by default for new and automatically migrated sites; set `"EnableEmailNotifications": true` in `monitor-logs\D4A-ScheduledMonitor.config.json` to enable it. Configured recipients are preserved while delivery is disabled. New and updated configurations include `DiscordWebhookUrl` after the email settings with the safe placeholder `your Discord webhook URL`; replace that value with the site webhook to enable Discord. JSON does not support comments, so `DiscordWebhookUrlNote` documents the setting. The configuration summary reports only `Configured`, never the URL itself. Discord recovery notices show both the alert-time value and the current recovered value. Historical state values, including legacy accented site names, are repaired before display.
 
 Each `SiteAddress` entry has a matching `ApiAddress` entry in `monitor-logs\D4A-ScheduledMonitor.config.json`. During new deployment, IT Tools asks for the API address for every frontend site; press Enter to keep the derived default, such as `https://site-api.example.com/health`, or provide a different API host or full health path. Use **Site Monitoring > Update Existing Monitoring Settings > Update sites, API addresses, monitoring name, and notification emails** to change an installed site's API address. Existing configurations without `ApiAddress` are automatically populated with their current derived endpoints after the updated monitor runs.
 
@@ -474,6 +474,7 @@ The menu exposes common management and test commands:
 | Run test and send complete notification | `-SendTestResultsEmail` |
 | Run normal check | no additional argument |
 | Send daily summary now | `-SendDailySummaryEmail` |
+| Enable email delivery | Set `"EnableEmailNotifications": true` in the monitoring JSON configuration |
 | Validate configuration only | `-ValidateConfiguration` |
 | Temporarily test site(s) | `-SiteAddress 'site1,site2' -SendTestResultsEmail` |
 | Extended CPU test | `-CpuSampleDurationSeconds 120 -SendTestResultsEmail` |
@@ -557,6 +558,7 @@ This read-only menu displays the ten newest lines from `C:\Users\edit_log.txt`. 
 
 - Run Show current monitoring configuration.
 - Run Validate monitoring configuration.
+- For email delivery, confirm that `EnableEmailNotifications` is `true`; email is intentionally disabled by default.
 - Run the test-notification mode.
 - Review both daily logs for nodemailer, SMTP, recipient, Discord, or configuration errors.
 - Confirm the Scheduled Task uses the expected script and configuration paths.

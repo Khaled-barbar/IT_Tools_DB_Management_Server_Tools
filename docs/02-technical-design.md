@@ -33,7 +33,7 @@ flowchart TD
 | Component | Responsibility |
 |---|---|
 | `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main menus, input collection, shared helpers, database workflows, intervention audit, server tools, monitor deployment, and updates |
-| `D4A-ScheduledMonitor.ps1` | Canonical unattended monitor for new deployments: verified updates, stateful alert evaluation, email and optional Discord delivery, logs, retention, and monitor management commands |
+| `D4A-ScheduledMonitor.ps1` | Canonical unattended monitor for new deployments: verified updates, stateful alert evaluation, optional email and Discord delivery, logs, retention, and monitor management commands |
 | `D4A-ScheduledMonitor-v5.ps1` | Identical legacy compatibility payload used only to update already-installed versioned monitor filenames in place |
 | `D4A-DiskSpaceAnalyzer.ps1` | Stand-alone or delegated disk scanning and visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone log timestamp-gap analysis with read sharing |
@@ -167,7 +167,7 @@ Site-specific values are stored in:
 monitor-logs\D4A-ScheduledMonitor.config.json
 ```
 
-This file contains sites, friendly names, email recipients, optional Discord webhook credentials, paths, thresholds, and schedule metadata. It is intentionally excluded from releases. Monitoring version updates preserve the installed filename and back up the script, configuration, and Scheduled Task definitions before replacing code. Webhook values are never shown in logs or configuration summaries.
+This file contains sites, friendly names, email recipients, the `EnableEmailNotifications` delivery switch, optional Discord webhook credentials, paths, thresholds, and schedule metadata. Email defaults to disabled for new and migrated configurations and is enabled per site only when that switch is `true`. The file is intentionally excluded from releases. Monitoring version updates preserve the installed filename and back up the script, configuration, and Scheduled Task definitions before replacing code. Webhook values are never shown in logs or configuration summaries.
 
 ### Check pipeline
 
