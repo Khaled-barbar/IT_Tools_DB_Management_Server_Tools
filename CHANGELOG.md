@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.7.0 - 2026-09-16
+
+- Added **Troubleshooting > Watchdog Checker**, which accepts an installed `D4AWatchdog.ps1` path and launches a standalone, read-only dry-run diagnostic with plain-language check results, predicted actions, root-cause guidance, and handling steps.
+- Added `Test-InstalledD4AWatchdog.ps1` as an on-demand companion. Its first download is verified against the release manifest and parsed before launch; an existing downloaded copy participates in future IT Tools automatic updates.
+
 ## Monitoring 7.6.6 - 2026-09-11
 
 - Combined duplicate Watchdog SQL Server connection failures from API, workflow, KPI, and scheduler logs into one shared database-connectivity incident.

@@ -79,6 +79,7 @@ This toolkit supports operational work; it does not replace change-management ap
 | `Find-LogGaps.ps1` | Stand-alone timestamp-gap analyzer for text logs |
 | `Test-DBConfigFile.ps1` | On-demand DBConfig.js diagnostic companion, automatically updated after its first verified download |
 | `Test-DBConfigFile-CHANGELOG.md` | Version history for the DBConfig.js diagnostic companion |
+| `Test-InstalledD4AWatchdog.ps1` | On-demand, read-only Watchdog dry-run companion with plain-language diagnosis and handling guidance |
 | `AssemblyRules_Luleburgas.sql` | Companion data for the Luleburgas system-settings workflow |
 | `RoleAdminLuleburgaz-DanoneStandard-090426.sql` | Companion data for the Luleburgas roles workflow |
 | `CHANGELOG.md` | Human-readable history of significant releases, features, and corrections |

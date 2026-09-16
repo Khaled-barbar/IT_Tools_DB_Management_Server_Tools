@@ -32,6 +32,7 @@
 #      - Run a full SSL health check
 #   3. Troubleshooting:
 #      - Diagnose a D4A dbconfig.js file
+#      - Dry-run and explain an installed D4A Watchdog
 #   4. Site monitoring:
 #      - Deploy and schedule the D4A health and performance monitor
 #   5. Logs:
@@ -58,8 +59,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.6.2'
-$Script:ToolReleaseDate = '2026-09-11'
+$Script:ToolVersion = [version]'7.7.0'
+$Script:ToolReleaseDate = '2026-09-16'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -196,7 +197,7 @@ function Show-ITToolsDeveloperBanner {
 }
 
 function Show-ITToolsDescription {
-    Write-Host 'This script contains four groups of tools:' -ForegroundColor White
+    Write-Host 'This script contains five groups of tools:' -ForegroundColor White
     Write-Host '  1. Database tools:' -ForegroundColor Cyan
     foreach ($item in @(
         'Export language files',
@@ -228,9 +229,12 @@ function Show-ITToolsDescription {
         Write-Host "     - $item" -ForegroundColor Gray
     }
 
-    Write-Host '  3. Site Monitoring:' -ForegroundColor Cyan
+    Write-Host '  3. Troubleshooting:' -ForegroundColor Cyan
+    Write-Host '     - Diagnose a D4A dbconfig.js file' -ForegroundColor Gray
+    Write-Host '     - Dry-run and explain an installed D4A Watchdog' -ForegroundColor Gray
+    Write-Host '  4. Site Monitoring:' -ForegroundColor Cyan
     Write-Host '     - Deploy and schedule the D4A health and performance monitor' -ForegroundColor Gray
-    Write-Host '  4. Logs:' -ForegroundColor Cyan
+    Write-Host '  5. Logs:' -ForegroundColor Cyan
     Write-Host '     - Review database interventions performed by this script' -ForegroundColor Gray
     Write-Host ''
 }
@@ -244,7 +248,7 @@ function Show-ITToolsInstalledReleaseDescription {
     })
 
     if ($descriptionLines.Count -eq 0) {
-        Write-Host 'The verified release provides Database Tools, Local server and file tools, Site Monitoring, and Logs.' -ForegroundColor White
+        Write-Host 'The verified release provides Database Tools, Local server and file tools, Troubleshooting, Site Monitoring, and Logs.' -ForegroundColor White
         Write-Host ''
         return
     }
@@ -10777,6 +10781,57 @@ function Invoke-DbConfigDiagnostic {
     Pause-Screen
 }
 
+function Read-WatchdogDiagnosticPath {
+    while ($true) {
+        $inputPath = Read-Host 'Enter the full path to the installed D4AWatchdog.ps1 file (q to go back)'
+        if (Test-IsBack $inputPath) { return $null }
+
+        $candidate = Normalize-UserPath -Path $inputPath
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            Write-Host 'Enter a watchdog script path, or type q to return.' -ForegroundColor Yellow
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            Write-Host "Watchdog script not found: $candidate" -ForegroundColor Red
+            continue
+        }
+        if ([IO.Path]::GetExtension($candidate) -ine '.ps1') {
+            Write-Host 'Select the installed D4AWatchdog.ps1 PowerShell script.' -ForegroundColor Yellow
+            continue
+        }
+
+        return (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path
+    }
+}
+
+function Invoke-WatchdogChecker {
+    Clear-Host
+    Show-SectionTitle 'Watchdog Checker'
+    Write-Host 'Performs a read-only dry run of an installed D4A Watchdog and explains its checks, predicted actions, likely root causes, and handling guidance.' -ForegroundColor Cyan
+    Write-Host 'The checker parses the selected watchdog instead of running its entry point. Service changes, state writes, certificate creation, and health publication are suppressed.' -ForegroundColor Gray
+    Write-Host 'Read probes can still contact SQL, MQTT, HTTP endpoints, and Windows service or event APIs.' -ForegroundColor Yellow
+    Write-Host ''
+
+    $checkerPath = Get-RequiredScriptFolderFilePath `
+        -FileName 'Test-InstalledD4AWatchdog.ps1' `
+        -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/Test-InstalledD4AWatchdog.ps1' `
+        -FeatureName 'Watchdog Checker'
+
+    Write-StreamingLog -Percent 20 -Step 'Verify checker' -Description 'Validating the downloaded Watchdog Checker before launch.'
+    Test-PowerShellCompanionScriptSyntax -ScriptPath $checkerPath -FeatureName 'Watchdog Checker'
+
+    $watchdogPath = Read-WatchdogDiagnosticPath
+    if ([string]::IsNullOrWhiteSpace($watchdogPath)) { return }
+
+    Write-Host ''
+    Write-Host "Selected watchdog: $watchdogPath" -ForegroundColor Cyan
+    Unblock-File -LiteralPath $checkerPath -ErrorAction SilentlyContinue
+    Write-StreamingLog -Percent 50 -Step 'Launch checker' -Description 'Starting the installed Watchdog dry-run diagnostic.'
+    & $checkerPath -WatchdogPath $watchdogPath
+    Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Watchdog Checker closed.'
+    Pause-Screen
+}
+
 function Show-TroubleshootingMenu {
     while ($true) {
         Clear-Host
@@ -10784,6 +10839,7 @@ function Show-TroubleshootingMenu {
         Write-Host 'Run focused diagnostics for common D4A configuration and connectivity issues.' -ForegroundColor Cyan
         Write-Host ''
         Write-Host '1) DBConfig.js Diagnostic'
+        Write-Host '2) Watchdog Checker'
         Write-Host 'q) Back to main menu'
         Write-Host '------------------------------------------------------------------------'
         $choice = Read-Host 'Choose an option'
@@ -10791,6 +10847,7 @@ function Show-TroubleshootingMenu {
         if (Test-IsBack $choice) { return }
         switch ($choice) {
             '1' { Invoke-LoggedToolAction -Context 'Troubleshooting - DBConfig.js Diagnostic' -Action { Invoke-DbConfigDiagnostic } }
+            '2' { Invoke-LoggedToolAction -Context 'Troubleshooting - Watchdog Checker' -Action { Invoke-WatchdogChecker } }
             default {
                 Write-Host 'That is not a valid choice. Try again.' -ForegroundColor Yellow
                 Start-Sleep -Seconds 1

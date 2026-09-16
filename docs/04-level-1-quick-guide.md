@@ -23,7 +23,7 @@ Use IT Tools to collect evidence, run approved checks, and complete approved tas
 |---|---|---|
 | **1. Database Tools** | Translation files, approved Danone features, searches, and performance checks | Do not import, migrate, copy, delete, roll back, or change database data unless the task is approved. |
 | **2. Local server and file tools** | File searches, Data Collector log tracing, system health, port checks, SSL checks, disk report | Use this menu to collect evidence before escalation. |
-| **3. Troubleshooting** | `DBConfig.js Diagnostic` | Select the detected `dbconfig.js` file and run the default scan. Do not share passwords or configuration secrets. |
+| **3. Troubleshooting** | `DBConfig.js Diagnostic`, `Watchdog Checker` | Select the correct target, run the diagnostic, and record its summary. Do not share passwords or configuration secrets. |
 | **4. Site Monitoring** | Review monitor configuration, run monitor commands, deploy or update monitoring | Only add sites or change monitoring settings when the request is approved. |
 | **5. Logs** | Last actions done by this script | Use this to confirm completed database or monitoring actions. |
 
@@ -74,6 +74,14 @@ Use these actions in this order: check availability first, collect evidence next
 2. Select the correct detected `dbconfig.js` file.
 3. Press Enter to run the default scan.
 4. Record the summary and any errors or warnings. Do not copy credentials from the file.
+
+### Check an installed D4A Watchdog
+
+1. Open **Troubleshooting** > **Watchdog Checker**.
+2. Enter the full path to the installed `D4AWatchdog.ps1` file.
+3. Review the plain-language result, predicted action, root-cause guidance, and handling steps.
+4. Record the diagnostic version and relevant result in the ticket. Do not share credentials or configuration secrets.
+5. The checker is a dry run: do not treat a predicted restart as proof that a real restart occurred.
 
 ### Export or import language files
 

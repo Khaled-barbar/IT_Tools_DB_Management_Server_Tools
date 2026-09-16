@@ -64,7 +64,7 @@ As more recurring work was added, disconnected scripts became a maintenance prob
 
 - Database Tools for translations, imports, migrations, D4A configuration, diagnostics, and recovery.
 - Local server and file tools for health checks, full SSL/TLS diagnostics, searches, disk analysis, permissions, ports, and Data Collector logs.
-- Troubleshooting for focused, verified configuration diagnostics such as `dbconfig.js` analysis.
+- Troubleshooting for focused, verified diagnostics such as `dbconfig.js` analysis and read-only dry runs of installed D4A Watchdogs.
 - Site Monitoring for deployment, configuration, scheduled execution, updates, testing, alert controls, and diagnostics.
 - Logs for reviewing the latest operator-attributed database interventions and monitoring changes performed by the toolkit.
 

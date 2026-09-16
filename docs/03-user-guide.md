@@ -400,6 +400,12 @@ The file is opened with read/write sharing so a currently active Data Collector 
 
 Use **Troubleshooting > DBConfig.js Diagnostic** to inspect a D4A `dbconfig.js` file. The feature downloads `Test-DBConfigFile.ps1` only when it is first selected, verifies its SHA-256 against the release manifest, validates PowerShell syntax, and launches its guided diagnostic. The companion detects active Decide4Action or D4A Data Collector service paths, normalizes the installation root, and finds `Services\API\dbconfig.js`. When multiple D4A installations are found, it lists the full paths and prompts for a number; type `M` to enter a different path manually. It then offers default or custom checks for JavaScript syntax, exported database declarations, certificate paths, SMTP reachability/authentication, and database connectivity. Its detailed report remains visible in the same PowerShell window after the scan finishes. Type `q` or press Enter at its path prompt to return. Once downloaded, the companion is automatically updated whenever a later IT Tools release includes a newer verified version.
 
+### Watchdog Checker
+
+Use **Troubleshooting > Watchdog Checker** to perform a read-only dry run of an installed `D4AWatchdog.ps1` file. Enter the full watchdog path, or type `q` to return. IT Tools downloads `Test-InstalledD4AWatchdog.ps1` only when first selected, verifies its manifest SHA-256 and PowerShell syntax, and passes the selected path to the companion.
+
+The checker parses the installed watchdog and evaluates supported source policies without running its entry point. It suppresses service changes, state and log writes, certificate creation, and health publication. Real read probes may still contact SQL, MQTT, HTTP endpoints, and Windows service or event APIs. The report explains each supported check, predicted restart or start action, likely root cause, and practical handling guidance while redacting known credentials. Once downloaded, the companion is automatically refreshed by later IT Tools releases that contain a newer verified copy.
+
 ## Site Monitoring
 
 ### Add New Site Monitoring
