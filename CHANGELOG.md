@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.7.2 - 2026-09-16
+
+- Watchdog Checker now discovers `D4AWatchdog.ps1` and `TaskScheduler.ps1` from Decide4Action Data Collector installation paths and presents numbered file choices while retaining manual full-path entry.
+- After a diagnostic, `R` repeats the same watchdog, `M` refreshes the detected list and changes the selection, and `Q` returns to the Troubleshooting menu.
+
 ## 7.7.1 - 2026-09-16
 
 - New monitoring deployments now write `EnableEmailNotifications` as `false`, while preserving configured recipient addresses for optional later use.

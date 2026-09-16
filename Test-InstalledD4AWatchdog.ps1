@@ -8,10 +8,11 @@ param(
     [string]$StateFilePath,
     [ValidateSet('Auto','Plain','Encrypted')][string]$PasswordMode='Auto',
     [switch]$ShowTechnicalDetails,
-    [switch]$LibraryOnly
+    [switch]$LibraryOnly,
+    [switch]$SingleRun
 )
 $ErrorActionPreference='Stop'
-$script:UDVersion='2026.09.16.4'
+$script:UDVersion='2026.09.16.5'
 
 function ConvertTo-UDHash($Value) {
     if ($null -eq $Value) { return $null }
@@ -738,6 +739,77 @@ function Show-UDReadableMeasurements {
     }
 }
 
+function Get-UDServiceExecutablePath([string]$PathName) {
+    if([string]::IsNullOrWhiteSpace($PathName)){return $null}
+    $expanded=[Environment]::ExpandEnvironmentVariables($PathName.Trim())
+    $match=[regex]::Match($expanded,'^\s*"(?<path>[^"]+\.exe)"|^\s*(?<path>.+?\.exe)(?:\s|$)','IgnoreCase')
+    if(-not $match.Success){return $null}
+    try{return [IO.Path]::GetFullPath($match.Groups['path'].Value)}catch{return $null}
+}
+function Get-UDDetectedWatchdogFiles {
+    $services=@()
+    try{$services=@(Get-CimInstance -ClassName Win32_Service -OperationTimeoutSec 15 -ErrorAction Stop)}
+    catch{
+        try{$services=@(Get-WmiObject -Class Win32_Service -ErrorAction Stop)}catch{return @()}
+    }
+
+    $paths=New-Object 'System.Collections.Generic.List[string]'
+    $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach($service in $services){
+        $identity=('{0} {1}' -f [string]$service.Name,[string]$service.DisplayName).Trim()
+        if($identity -notmatch '(?i)(?:Decide4Action|D4A).*Data\s*Collector|Data\s*Collector.*(?:Decide4Action|D4A)'){continue}
+        $executablePath=Get-UDServiceExecutablePath ([string]$service.PathName)
+        if(-not $executablePath){continue}
+        $executableFolder=Split-Path -Parent $executablePath
+        $applicationRoot=Split-Path -Parent $executableFolder
+        if([string]::IsNullOrWhiteSpace($applicationRoot)){continue}
+        $configurationFolder=Join-Path $applicationRoot 'Configuration'
+        foreach($fileName in @('D4AWatchdog.ps1','TaskScheduler.ps1')){
+            $candidate=Join-Path $configurationFolder $fileName
+            if(Test-Path -LiteralPath $candidate -PathType Leaf){
+                $resolved=(Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path
+                if($seen.Add($resolved)){$paths.Add($resolved)}
+            }
+        }
+    }
+    return @($paths.ToArray() | Sort-Object)
+}
+function Resolve-UDWatchdogPath([string]$Path) {
+    $candidate=if($null -eq $Path){''}else{$Path.Trim().Trim('"').Trim("'")}
+    if([string]::IsNullOrWhiteSpace($candidate)){throw 'Enter a watchdog file number or its full path.'}
+    $candidate=[Environment]::ExpandEnvironmentVariables($candidate)
+    if(-not (Test-Path -LiteralPath $candidate -PathType Leaf)){throw "Watchdog script not found: $candidate"}
+    if([IO.Path]::GetExtension($candidate) -ine '.ps1'){throw 'The selected watchdog must be a PowerShell .ps1 file.'}
+    return (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path
+}
+function Read-UDWatchdogPath {
+    $detected=@(Get-UDDetectedWatchdogFiles)
+    Microsoft.PowerShell.Utility\Write-Host "`nDetected D4A watchdog files" -ForegroundColor Cyan
+    if($detected.Count){
+        for($index=0;$index -lt $detected.Count;$index++){
+            Microsoft.PowerShell.Utility\Write-Host ('[{0}] {1}' -f ($index+1),$detected[$index])
+        }
+    }else{
+        Microsoft.PowerShell.Utility\Write-Host 'No watchdog file was detected from Decide4Action Data Collector services.' -ForegroundColor Yellow
+    }
+
+    while($true){
+        $answer=Read-Host 'Enter a file number or the full watchdog path (q to return)'
+        if($answer.Trim() -match '^(?i:q|quit|back|b)$'){return $null}
+        $candidate=$answer
+        $number=0
+        if([int]::TryParse($answer.Trim(),[ref]$number)){
+            if($number -lt 1 -or $number -gt $detected.Count){
+                Microsoft.PowerShell.Utility\Write-Host 'That number is not in the detected watchdog list.' -ForegroundColor Yellow
+                continue
+            }
+            $candidate=$detected[$number-1]
+        }
+        try{return Resolve-UDWatchdogPath $candidate}
+        catch{Microsoft.PowerShell.Utility\Write-Host $_.Exception.Message -ForegroundColor Red}
+    }
+}
+
 # APPROVED_FUNCTION_DIGESTS is populated when the standalone file is built.
 $script:UDApproved=@{
     '03B60020DED743801B66EA50E7393454249ACEDA6A32DF44FE09017487E91F51' = 'Invoke-DiagnosticCheck'
@@ -819,9 +891,43 @@ $script:UDApproved=@{
 # APPROVED_FUNCTION_DIGESTS_END
 
 if($LibraryOnly){return}
+if(-not $SingleRun){
+    $selectedPath=$null
+    if(-not [string]::IsNullOrWhiteSpace($WatchdogPath)){
+        try{$selectedPath=Resolve-UDWatchdogPath $WatchdogPath}
+        catch{Microsoft.PowerShell.Utility\Write-Host $_.Exception.Message -ForegroundColor Red}
+    }
+    if(-not $selectedPath){$selectedPath=Read-UDWatchdogPath}
+    if(-not $selectedPath){return}
+
+    while($true){
+        Microsoft.PowerShell.Utility\Write-Host "`nSelected watchdog: $selectedPath" -ForegroundColor Cyan
+        $runParameters=@{WatchdogPath=$selectedPath;PasswordMode=$PasswordMode;SingleRun=$true}
+        if(-not [string]::IsNullOrWhiteSpace($ConfigPath)){$runParameters.ConfigPath=$ConfigPath}
+        if(-not [string]::IsNullOrWhiteSpace($StateFilePath)){$runParameters.StateFilePath=$StateFilePath}
+        if($ShowTechnicalDetails.IsPresent){$runParameters.ShowTechnicalDetails=$true}
+        try{& $PSCommandPath @runParameters}
+        catch{Microsoft.PowerShell.Utility\Write-Host "`nThe watchdog diagnostic did not complete: $($_.Exception.Message)" -ForegroundColor Red}
+
+        while($true){
+            Microsoft.PowerShell.Utility\Write-Host ''
+            Microsoft.PowerShell.Utility\Write-Host '[R] Run the same watchdog file again' -ForegroundColor Cyan
+            Microsoft.PowerShell.Utility\Write-Host '[M] Modify the watchdog selection' -ForegroundColor Cyan
+            Microsoft.PowerShell.Utility\Write-Host '[Q] Back to the previous menu' -ForegroundColor Cyan
+            $next=(Read-Host 'Choose an option').Trim().ToLowerInvariant()
+            if($next -eq 'r'){break}
+            if($next -eq 'm'){
+                $changedPath=Read-UDWatchdogPath
+                if($changedPath){$selectedPath=$changedPath;break}
+                return
+            }
+            if($next -match '^(q|quit|back|b)$'){return}
+            Microsoft.PowerShell.Utility\Write-Host 'Choose R, M, or Q.' -ForegroundColor Yellow
+        }
+    }
+}
 Reset-UDCapture
 $script:UDSecrets=@();$script:UDSummary=New-Object 'System.Collections.Generic.List[object]'
-if(-not $WatchdogPath){$WatchdogPath=Read-Host 'Enter the full path to D4AWatchdog.ps1'}
 $WatchdogPath=$WatchdogPath.Trim().Trim('"').Trim("'")
 if(-not (Test-Path -LiteralPath $WatchdogPath -PathType Leaf)){throw "Watchdog not found: $WatchdogPath"}
 $WatchdogPath=(Resolve-Path -LiteralPath $WatchdogPath).Path

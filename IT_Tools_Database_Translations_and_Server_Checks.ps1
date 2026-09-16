@@ -59,7 +59,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.7.1'
+$Script:ToolVersion = [version]'7.7.2'
 $Script:ToolReleaseDate = '2026-09-16'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -10783,34 +10783,12 @@ function Invoke-DbConfigDiagnostic {
     Pause-Screen
 }
 
-function Read-WatchdogDiagnosticPath {
-    while ($true) {
-        $inputPath = Read-Host 'Enter the full path to the installed D4AWatchdog.ps1 file (q to go back)'
-        if (Test-IsBack $inputPath) { return $null }
-
-        $candidate = Normalize-UserPath -Path $inputPath
-        if ([string]::IsNullOrWhiteSpace($candidate)) {
-            Write-Host 'Enter a watchdog script path, or type q to return.' -ForegroundColor Yellow
-            continue
-        }
-        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-            Write-Host "Watchdog script not found: $candidate" -ForegroundColor Red
-            continue
-        }
-        if ([IO.Path]::GetExtension($candidate) -ine '.ps1') {
-            Write-Host 'Select the installed D4AWatchdog.ps1 PowerShell script.' -ForegroundColor Yellow
-            continue
-        }
-
-        return (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path
-    }
-}
-
 function Invoke-WatchdogChecker {
     Clear-Host
     Show-SectionTitle 'Watchdog Checker'
     Write-Host 'Performs a read-only dry run of an installed D4A Watchdog and explains its checks, predicted actions, likely root causes, and handling guidance.' -ForegroundColor Cyan
     Write-Host 'The checker parses the selected watchdog instead of running its entry point. Service changes, state writes, certificate creation, and health publication are suppressed.' -ForegroundColor Gray
+    Write-Host 'The checker detects watchdog files from Decide4Action Data Collector service paths and also accepts a full path.' -ForegroundColor Gray
     Write-Host 'Read probes can still contact SQL, MQTT, HTTP endpoints, and Windows service or event APIs.' -ForegroundColor Yellow
     Write-Host ''
 
@@ -10822,14 +10800,9 @@ function Invoke-WatchdogChecker {
     Write-StreamingLog -Percent 20 -Step 'Verify checker' -Description 'Validating the downloaded Watchdog Checker before launch.'
     Test-PowerShellCompanionScriptSyntax -ScriptPath $checkerPath -FeatureName 'Watchdog Checker'
 
-    $watchdogPath = Read-WatchdogDiagnosticPath
-    if ([string]::IsNullOrWhiteSpace($watchdogPath)) { return }
-
-    Write-Host ''
-    Write-Host "Selected watchdog: $watchdogPath" -ForegroundColor Cyan
     Unblock-File -LiteralPath $checkerPath -ErrorAction SilentlyContinue
-    Write-StreamingLog -Percent 50 -Step 'Launch checker' -Description 'Starting the installed Watchdog dry-run diagnostic.'
-    & $checkerPath -WatchdogPath $watchdogPath
+    Write-StreamingLog -Percent 50 -Step 'Launch checker' -Description 'Starting the interactive installed Watchdog dry-run diagnostic.'
+    & $checkerPath
     Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Watchdog Checker closed.'
     Pause-Screen
 }

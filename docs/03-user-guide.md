@@ -402,9 +402,9 @@ Use **Troubleshooting > DBConfig.js Diagnostic** to inspect a D4A `dbconfig.js` 
 
 ### Watchdog Checker
 
-Use **Troubleshooting > Watchdog Checker** to perform a read-only dry run of an installed `D4AWatchdog.ps1` file. Enter the full watchdog path, or type `q` to return. IT Tools downloads `Test-InstalledD4AWatchdog.ps1` only when first selected, verifies its manifest SHA-256 and PowerShell syntax, and passes the selected path to the companion.
+Use **Troubleshooting > Watchdog Checker** to perform a read-only dry run of an installed watchdog. The checker detects Decide4Action Data Collector services, derives each installation's `Configuration` folder, and lists existing `D4AWatchdog.ps1` and `TaskScheduler.ps1` files with selection numbers. Choose a number, enter another full path, or type `q` to return. IT Tools downloads `Test-InstalledD4AWatchdog.ps1` only when first selected and verifies its manifest SHA-256 and PowerShell syntax before launch.
 
-The checker parses the installed watchdog and evaluates supported source policies without running its entry point. It suppresses service changes, state and log writes, certificate creation, and health publication. Real read probes may still contact SQL, MQTT, HTTP endpoints, and Windows service or event APIs. The report explains each supported check, predicted restart or start action, likely root cause, and practical handling guidance while redacting known credentials. Once downloaded, the companion is automatically refreshed by later IT Tools releases that contain a newer verified copy.
+The checker parses the installed watchdog and evaluates supported source policies without running its entry point. It suppresses service changes, state and log writes, certificate creation, and health publication. Real read probes may still contact SQL, MQTT, HTTP endpoints, and Windows service or event APIs. The report explains each supported check, predicted restart or start action, likely root cause, and practical handling guidance while redacting known credentials. Afterward, use `R` to repeat the same file, `M` to refresh the detected list or enter another path, or `Q` to return. Once downloaded, the companion is automatically refreshed by later IT Tools releases that contain a newer verified copy.
 
 ## Site Monitoring
 
