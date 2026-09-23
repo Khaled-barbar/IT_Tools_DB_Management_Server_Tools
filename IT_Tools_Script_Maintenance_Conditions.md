@@ -83,5 +83,5 @@ These conditions must be respected whenever `IT_Tools_Database_Translations_and_
 - Monitoring self-updates must bypass HTTP caches, prevent simultaneous Scheduled Tasks from installing the same update, validate the current JSON configuration with the downloaded release, update installed-version metadata, and restore both script and configuration backups if installation fails.
 - Keep Windows-event warnings and errors as log-only evidence; service availability checks are the authority for immediate service alerts.
 - Do not send disk-space warning emails. Send a critical disk alert only at 5 GB free or less, or 95 percent used or more.
-- Persist only successfully emailed notification-eligible issues for recovery tracking. Send one recovery email only after the same check explicitly returns `OK`; never infer recovery merely because a check or result is missing.
+- Persist only successfully delivered notification-eligible issues for recovery tracking: by email when email is sent, otherwise by Discord (never by a Discord status report). Send one recovery notification only after the same check explicitly returns `OK`; never infer recovery merely because a check or result is missing.
 - For normal alert emails, use a component-and-level subject for one issue and `Multiple Alerts detected` when more than one distinct notifiable issue is present.
