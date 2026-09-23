@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.7.0
-# D4A-Monitor-Release-Date: 2026-09-16
+# D4A-Monitor-Version: 7.8.0
+# D4A-Monitor-Release-Date: 2026-09-23
 
 <#
 .SYNOPSIS
@@ -25,7 +25,7 @@
     In normal mode, configured Discord notifications are sent when a new issue
     is detected. Email delivery is disabled by default and can be enabled with
     EnableEmailNotifications in the JSON configuration. The monitor automatically creates a 24-hour cooldown
-    rule after successful email delivery. Resolved issues have their automatic
+    rule after successful email or Discord delivery. Resolved issues have their automatic
     cooldown removed so a recurrence is reported. Test and daily-summary modes
     send the complete scan report even when healthy. Use -SendDiscordStatus for
     a concise Discord-only health summary.
@@ -270,8 +270,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.7.0'
-$script:MonitorReleaseDate = '2026-09-16'
+$script:MonitorVersion = '7.8.0'
+$script:MonitorReleaseDate = '2026-09-23'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -1447,8 +1447,8 @@ email address. Friendly site names are read as UTF-8 so accents are retained in
 email subjects and Discord messages.
 After a successful notification, an automatic 24-hour cooldown is added for
 that specific issue. When a later scan explicitly confirms the check is healthy,
-the monitor sends a recovery email and removes the automatic cooldown. Test and
-daily-summary runs send an email even when the server is healthy.
+the monitor sends a recovery through the enabled channels and removes the
+automatic cooldown. Test and daily-summary runs report even when the server is healthy.
 
 External configuration
 ----------------------
@@ -1509,7 +1509,7 @@ Collector Windows service is Running. The first failure is logged only, the
 second logs diagnostics, and the third consecutive failure alerts. The runtime
 state file D4A-ScheduledMonitor.state.json stores this counter and LastHealthy
 timestamp. It also stores the rule keys and component labels of successfully
-emailed issues so one recovery notification can be sent after an explicit OK.
+delivered issues so one recovery notification can be sent after an explicit OK.
 It is state data, not a component log.
 
 When the service is Running, LastHealthy older than 5 minutes is a warning and
@@ -1550,8 +1550,9 @@ Disk usage does not generate warning emails. A critical alert is sent when a
 fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
 first.
 
-After an alert email is delivered, its rule key and component are retained in
-D4A-ScheduledMonitor.state.json. A later scan sends one recovery email only when
+After an alert is delivered through email or Discord, its rule key and component
+are retained in D4A-ScheduledMonitor.state.json. A later scan sends one recovery
+notification only when
 the same check explicitly returns OK. Recovery is not inferred from a missing or
 failed check. Single-issue subjects identify the component and level; multiple
 simultaneous issues use "Multiple Alerts detected".
@@ -1681,7 +1682,7 @@ notify only after two consecutive monitor runs at 90% or higher. NSSM
 server.log rotation events 1063 and 1077, and the harmless pipe-ended output
 read event, are excluded. All relevant Windows events are log-only because
 service availability is checked separately. Disk space alerts only at 5 GB
-free or less, or 95 percent used. A successfully emailed issue produces one
+free or less, or 95 percent used. A successfully delivered issue produces one
 recovery notification after a later check explicitly confirms that it is healthy.
 '@
 }
@@ -1699,8 +1700,9 @@ Disk usage does not generate warning emails. A critical alert is sent when a
 fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
 first.
 
-After an alert email is delivered, its rule key and component are retained in
-D4A-ScheduledMonitor.state.json. A later scan sends one recovery email only when
+After an alert is delivered through email or Discord, its rule key and component
+are retained in D4A-ScheduledMonitor.state.json. A later scan sends one recovery
+notification only when
 the same check explicitly returns OK. Recovery is not inferred from a missing or
 failed check. Single-issue subjects identify the component and level; multiple
 simultaneous issues use "Multiple Alerts detected".
@@ -5796,6 +5798,7 @@ function Invoke-D4AMonitor {
             }
 
             $emailDeliverySucceeded = $false
+            $discordDeliverySucceeded = $false
             if ($shouldSendEmail) {
                 $content = New-EmailContent `
                     -MonitoredSite $siteForNotification `
@@ -5833,15 +5836,15 @@ function Invoke-D4AMonitor {
                     Write-RunLog -Level OK -Category Discord -Color Green -Message (
                         'Discord notification sent successfully. {0}' -f $discordDelivery.Details
                     )
+                    $discordDeliverySucceeded = $true
                 }
                 catch {
                     Add-MonitorResult -Severity Error -Category Discord -Check 'Notification delivery' -Message $_.Exception.Message -NotificationEligible:$false
                 }
             }
 
-            # The existing recovery and cooldown state remains email-based so the
-            # original notification policy is preserved while Discord is added.
-            if ($emailDeliverySucceeded) {
+            $notificationDeliverySucceeded = $emailDeliverySucceeded -or $discordDeliverySucceeded
+            if ($notificationDeliverySucceeded) {
                 $newlyNotifiedIssues = if ($emailType -eq 'Alert') { $unignoredNotifiableIssues } else { @() }
                 try {
                     Update-NotifiedIssueStateAfterDelivery `
@@ -5850,7 +5853,7 @@ function Invoke-D4AMonitor {
                 }
                 catch {
                     Add-MonitorResult -Severity Warning -Category Recovery -Check 'Notification state' -Message (
-                        'The email was delivered, but notification/recovery state could not be saved: {0}' -f $_.Exception.Message
+                        'A notification was delivered, but notification/recovery state could not be saved: {0}' -f $_.Exception.Message
                     ) -NotificationEligible:$false
                 }
                 if ($emailType -eq 'Alert' -and $unignoredNotifiableIssues.Count -gt 0) {
@@ -5860,7 +5863,7 @@ function Invoke-D4AMonitor {
                         }
                         catch {
                             Add-MonitorResult -Severity Warning -Category Ignore -Check 'Automatic cooldown' -Message (
-                                'The email was delivered, but the automatic cooldown for {0} could not be saved: {1}' -f $issueKey, $_.Exception.Message
+                                'A notification was delivered, but the automatic cooldown for {0} could not be saved: {1}' -f $issueKey, $_.Exception.Message
                             ) -NotificationEligible:$false
                         }
                     }
