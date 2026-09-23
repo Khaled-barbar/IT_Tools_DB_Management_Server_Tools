@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.8.0
+# D4A-Monitor-Version: 7.8.1
 # D4A-Monitor-Release-Date: 2026-09-23
 
 <#
@@ -270,7 +270,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.8.0'
+$script:MonitorVersion = '7.8.1'
 $script:MonitorReleaseDate = '2026-09-23'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -4007,12 +4007,16 @@ function Test-DiskHealth {
 
 function Resolve-NginxErrorLog {
     if (-not [string]::IsNullOrWhiteSpace($NginxErrorLog)) {
-        return [Environment]::ExpandEnvironmentVariables($NginxErrorLog)
+        $configuredLog = [Environment]::ExpandEnvironmentVariables($NginxErrorLog)
+        if ([IO.File]::Exists($configuredLog)) {
+            return [IO.Path]::GetFullPath($configuredLog)
+        }
     }
 
     $roots = @(
         $D4AInstallRoot,
         $env:D4A_HOME,
+        (Split-Path -Parent $script:ScriptDirectory),
         'D:\Apps\Decide4Action',
         'C:\Apps\Decide4Action',
         'D:\Apps\Decide4Action-v2',
@@ -4024,15 +4028,15 @@ function Resolve-NginxErrorLog {
     foreach ($root in $roots) {
         $expandedRoot = [Environment]::ExpandEnvironmentVariables([string]$root)
         foreach ($folder in @('Decide4Action-Ngnix', 'Decide4Action-Nginx')) {
-            $nginxRoot = Join-Path $expandedRoot $folder
-            if (-not (Test-Path -LiteralPath $nginxRoot -PathType Container)) {
+            $nginxRoot = [IO.Path]::Combine($expandedRoot, $folder)
+            if (-not [IO.Directory]::Exists($nginxRoot)) {
                 continue
             }
             $candidate = Get-ChildItem -LiteralPath $nginxRoot -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -like 'nginx-*' } |
                 Sort-Object -Property LastWriteTime -Descending |
-                ForEach-Object { Join-Path $_.FullName 'logs\error.log' } |
-                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+                ForEach-Object { [IO.Path]::Combine($_.FullName, 'logs', 'error.log') } |
+                Where-Object { [IO.File]::Exists($_) } |
                 Select-Object -First 1
             if (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
                 return [string]$candidate
@@ -4252,13 +4256,17 @@ function Resolve-WatchdogLogRoot {
     Add-WatchdogCandidate -Path $WatchdogLogRoot
     foreach ($root in @($D4AInstallRoot, $env:D4A_HOME, (Split-Path -Parent $script:ScriptDirectory), 'D:\Apps\Decide4Action', 'C:\Apps\Decide4Action')) {
         if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
-            Add-WatchdogCandidate -Path (Join-Path ([Environment]::ExpandEnvironmentVariables([string]$root)) 'Log\TaskSchedulerOutput')
+            Add-WatchdogCandidate -Path ([IO.Path]::Combine(
+                    [Environment]::ExpandEnvironmentVariables([string]$root),
+                    'Log',
+                    'TaskSchedulerOutput'
+                ))
         }
     }
 
     foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Container) {
-            return (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+        if ([IO.Directory]::Exists($candidate)) {
+            return [IO.Path]::GetFullPath($candidate)
         }
     }
     return $null

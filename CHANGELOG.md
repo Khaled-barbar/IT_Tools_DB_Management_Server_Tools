@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.8.1 - 2026-09-23
+
+- Nginx and Watchdog log discovery now skips paths on unavailable drives instead of aborting the monitoring run with `Cannot find drive`.
+- Both checks now fall back to the application root containing the installed monitor, so stale `D:` configuration or environment paths do not block a valid installation on `C:`.
+
 ## Monitoring 7.8.0 - 2026-09-23
 
 - Successful Discord delivery now creates the same automatic 24-hour per-issue cooldown as successful email delivery, preventing the same alert from being posted every monitoring cycle.
