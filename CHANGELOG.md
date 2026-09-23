@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.8.0 - 2026-09-23
+
+- Discord-only sites (email disabled, the default since Monitoring 7.7.0) now record a delivered Discord alert in the notified-issue state and apply the automatic 24-hour cooldown. Before this change, these sites reposted the same alert to Discord on every run and never sent a recovery notice, because that state was only saved after an email was delivered. Sites that send email keep the email-based behavior.
+- A recovery confirmed in the same run as a new alert is now included in the Discord alert as a `Recovery | <component>` field. Before this change, it was cleared from the state without being shown in Discord.
+
 ## 7.7.2 - 2026-09-16
 
 - Watchdog Checker now discovers `D4AWatchdog.ps1` and `TaskScheduler.ps1` from Decide4Action Data Collector installation paths and presents numbered file choices while retaining manual full-path entry.

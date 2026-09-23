@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.7.0
-# D4A-Monitor-Release-Date: 2026-09-16
+# D4A-Monitor-Version: 7.8.0
+# D4A-Monitor-Release-Date: 2026-09-23
 
 <#
 .SYNOPSIS
@@ -25,7 +25,7 @@
     In normal mode, configured Discord notifications are sent when a new issue
     is detected. Email delivery is disabled by default and can be enabled with
     EnableEmailNotifications in the JSON configuration. The monitor automatically creates a 24-hour cooldown
-    rule after successful email delivery. Resolved issues have their automatic
+    rule after successful delivery (email when enabled, otherwise Discord). Resolved issues have their automatic
     cooldown removed so a recurrence is reported. Test and daily-summary modes
     send the complete scan report even when healthy. Use -SendDiscordStatus for
     a concise Discord-only health summary.
@@ -270,8 +270,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.7.0'
-$script:MonitorReleaseDate = '2026-09-16'
+$script:MonitorVersion = '7.8.0'
+$script:MonitorReleaseDate = '2026-09-23'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -1681,8 +1681,9 @@ notify only after two consecutive monitor runs at 90% or higher. NSSM
 server.log rotation events 1063 and 1077, and the harmless pipe-ended output
 read event, are excluded. All relevant Windows events are log-only because
 service availability is checked separately. Disk space alerts only at 5 GB
-free or less, or 95 percent used. A successfully emailed issue produces one
-recovery notification after a later check explicitly confirms that it is healthy.
+free or less, or 95 percent used. A successfully notified issue (by email when
+email is enabled, otherwise by Discord) produces one recovery notification after
+a later check explicitly confirms that it is healthy.
 '@
 }
 
@@ -5450,6 +5451,28 @@ function New-DiscordNotificationPayload {
                     inline = $false
                 }) | Out-Null
         }
+        if ($NotificationType -eq 'Alert' -and $recoveryResults.Count -gt 0) {
+            # A recovery confirmed in the same run as a new alert is reported in this
+            # message, because delivering the alert also clears its notified-issue
+            # state. Recovery fields are added only while the embed stays well inside
+            # Discord's 6000-character limit.
+            $embedLength = $title.Length + 1000 + 450
+            foreach ($existingField in $fields) { $embedLength += ([string]$existingField.name).Length + ([string]$existingField.value).Length }
+            $reportedRecoveries = 0
+            foreach ($recovery in @($recoveryResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })) {
+                $component = Get-MonitorSubjectComponentLabel -Result $recovery
+                $recoveryName = Limit-DiscordText -Text (':green_circle: Recovery | {0}' -f $component) -MaximumLength 100
+                $recoveryValue = Limit-DiscordText -Text ("**Check:** {0}`n**Current value:** {1}`n**Rule:** ``{2}``" -f $recovery.Check, $recovery.CurrentValue, $recovery.Key) -MaximumLength 400 -PreserveLineBreaks
+                if ($reportedRecoveries -ge 5 -or ($embedLength + $recoveryName.Length + $recoveryValue.Length) -gt 5600) { break }
+                $fields.Add([ordered]@{
+                        name = $recoveryName
+                        value = $recoveryValue
+                        inline = $false
+                    }) | Out-Null
+                $embedLength += $recoveryName.Length + $recoveryValue.Length
+                $reportedRecoveries++
+            }
+        }
     }
 
     if ($NotificationType -ne 'Status') {
@@ -5819,6 +5842,7 @@ function Invoke-D4AMonitor {
                 }
             }
 
+            $discordDeliverySucceeded = $false
             if ($shouldSendDiscord) {
                 try {
                     $discordPayload = New-DiscordNotificationPayload `
@@ -5833,15 +5857,26 @@ function Invoke-D4AMonitor {
                     Write-RunLog -Level OK -Category Discord -Color Green -Message (
                         'Discord notification sent successfully. {0}' -f $discordDelivery.Details
                     )
+                    $discordDeliverySucceeded = $true
                 }
                 catch {
                     Add-MonitorResult -Severity Error -Category Discord -Check 'Notification delivery' -Message $_.Exception.Message -NotificationEligible:$false
                 }
             }
 
-            # The existing recovery and cooldown state remains email-based so the
-            # original notification policy is preserved while Discord is added.
-            if ($emailDeliverySucceeded) {
+            # Recovery and cooldown state follows the channel that carried the
+            # notification. When email is sent it stays email-based, preserving the
+            # original policy. On Discord-only sites (email is disabled by default)
+            # a delivered Discord alert or recovery updates the same state, so an
+            # alert is not repeated on every run and its recovery is reported once
+            # the same check explicitly returns OK. Status reports never change it.
+            $notificationStateDelivered = if ($shouldSendEmail) {
+                $emailDeliverySucceeded
+            }
+            else {
+                $discordDeliverySucceeded -and $discordNotificationType -in @('Alert', 'Recovery')
+            }
+            if ($notificationStateDelivered) {
                 $newlyNotifiedIssues = if ($emailType -eq 'Alert') { $unignoredNotifiableIssues } else { @() }
                 try {
                     Update-NotifiedIssueStateAfterDelivery `
@@ -5850,7 +5885,7 @@ function Invoke-D4AMonitor {
                 }
                 catch {
                     Add-MonitorResult -Severity Warning -Category Recovery -Check 'Notification state' -Message (
-                        'The email was delivered, but notification/recovery state could not be saved: {0}' -f $_.Exception.Message
+                        'The notification was delivered, but notification/recovery state could not be saved: {0}' -f $_.Exception.Message
                     ) -NotificationEligible:$false
                 }
                 if ($emailType -eq 'Alert' -and $unignoredNotifiableIssues.Count -gt 0) {
@@ -5860,7 +5895,7 @@ function Invoke-D4AMonitor {
                         }
                         catch {
                             Add-MonitorResult -Severity Warning -Category Ignore -Check 'Automatic cooldown' -Message (
-                                'The email was delivered, but the automatic cooldown for {0} could not be saved: {1}' -f $issueKey, $_.Exception.Message
+                                'The notification was delivered, but the automatic cooldown for {0} could not be saved: {1}' -f $issueKey, $_.Exception.Message
                             ) -NotificationEligible:$false
                         }
                     }

@@ -179,11 +179,11 @@ flowchart TD
     Evaluate --> Healthy["Healthy or recovered"]
     Evaluate --> Degraded["Warning or diagnostic evidence"]
     Evaluate --> Failure["Persistent or immediate failure"]
-    Healthy --> Recovery["Match explicit OK against previously emailed issue"]
-    Recovery --> RunLog["Send one recovery email and Discord notification, then clear resolved state/cooldown"]
+    Healthy --> Recovery["Match explicit OK against previously notified issue"]
+    Recovery --> RunLog["Send one recovery email and/or Discord notification, then clear resolved state/cooldown"]
     Degraded --> ErrorLog["Write diagnostics without unnecessary notification"]
     Failure --> Ignore["Evaluate active ignore/cooldown rule"]
-    Ignore -->|Not covered| Email["Send email and optional Discord notification; create automatic cooldown after email delivery"]
+    Ignore -->|Not covered| Email["Send email and optional Discord notification; create automatic cooldown after delivery (email when enabled, otherwise Discord)"]
     Ignore -->|Covered| Logs["Record suppression in logs"]
 ```
 
@@ -201,7 +201,7 @@ Monitoring logic was refined using observed production alerts:
 - relevant Windows events are retained as log-only evidence because service state is checked independently;
 - disk capacity has no warning email and becomes critical at 5 GB free or less, or 95 percent used or more;
 - Watchdog logs provide root-cause evidence but the monitor never restarts services;
-- automatic issue cooldowns prevent repeated notification, and successfully emailed issues remain in state until the same check explicitly reports `OK` and a recovery email is delivered.
+- automatic issue cooldowns prevent repeated notification, and successfully notified issues remain in state until the same check explicitly reports `OK` and a recovery notification is delivered. When email is enabled the state follows email delivery; on Discord-only sites it follows Discord delivery, and a recovery confirmed in the same run as a new alert is included in that Discord alert.
 
 ### Monitoring files and lifecycle
 
