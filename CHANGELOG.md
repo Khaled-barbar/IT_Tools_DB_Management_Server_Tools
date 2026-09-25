@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.9.1 - 2026-09-25
+
+- A previously delivered Watchdog SQL availability alert now receives one recovery notification as soon as every configured direct database probe successfully completes `SELECT 1`.
+- Recent shutdown evidence still inside the Watchdog log lookback window no longer delays recovery after live SQL connectivity has been confirmed.
+
 ## Monitoring 7.9.0 - 2026-09-25
 
 - Added JSON-configured one-time, daily, and weekly maintenance windows. Monitoring checks and all notifications are skipped for a configurable one-to-three-minute period after the scheduled start.

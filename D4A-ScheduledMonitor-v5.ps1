@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.9.0
+# D4A-Monitor-Version: 7.9.1
 # D4A-Monitor-Release-Date: 2026-09-25
 
 <#
@@ -287,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.9.0'
+$script:MonitorVersion = '7.9.1'
 $script:MonitorReleaseDate = '2026-09-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -4907,6 +4907,20 @@ function Add-WatchdogSqlConnectivityResult {
     param([object[]]$EvidenceRecords)
 
     $records = @($EvidenceRecords | Sort-Object -Property Time -Descending)
+    $databaseProbeResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Database' -and
+            [string]$_.Check -like 'Database connectivity - *'
+        })
+    $failedDatabaseProbeResults = @($databaseProbeResults | Where-Object { [string]$_.Severity -ne 'OK' })
+    if ($databaseProbeResults.Count -gt 0 -and $failedDatabaseProbeResults.Count -eq 0) {
+        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
+        Add-MonitorResult -Severity OK -Category Database -Check 'Watchdog SQL connectivity' -Message (
+            'SQL connectivity is restored; all {0} configured database probe(s) completed SELECT 1 successfully. Any recent Watchdog shutdown or session kill-state evidence is resolved.' -f
+                $databaseProbeResults.Count
+        ) -Key 'diagnostics-watchdog-sql-connectivity'
+        return
+    }
+
     if ($records.Count -eq 0) {
         [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
         return
@@ -4939,7 +4953,7 @@ function Add-WatchdogSqlConnectivityResult {
 function Test-WatchdogServiceLogs {
     $watchdogRoot = Resolve-WatchdogLogRoot
     if ([string]::IsNullOrWhiteSpace($watchdogRoot)) {
-        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
+        Add-WatchdogSqlConnectivityResult -EvidenceRecords @()
         Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
             'Watchdog TaskSchedulerOutput folder was not found; optional root-cause log analysis was skipped.'
         ) -Key 'diagnostics-watchdog-logs'
@@ -4960,7 +4974,7 @@ function Test-WatchdogServiceLogs {
     }
 
     if ($logFiles.Count -eq 0) {
-        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
+        Add-WatchdogSqlConnectivityResult -EvidenceRecords @()
         Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
             'No Watchdog service log was updated during the current monitoring window; root={0}' -f $watchdogRoot
         ) -Key 'diagnostics-watchdog-logs'
