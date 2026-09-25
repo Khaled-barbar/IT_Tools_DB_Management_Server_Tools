@@ -59,8 +59,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.7.2'
-$Script:ToolReleaseDate = '2026-09-16'
+$Script:ToolVersion = [version]'7.8.0'
+$Script:ToolReleaseDate = '2026-09-25'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -3637,6 +3637,85 @@ function Read-MonitoringCooldownDuration {
     }
 }
 
+function Get-MonitoringRecoveryTargetOptions {
+    $options = [System.Collections.Generic.List[object]]::new()
+    $seenValues = @{}
+
+    try {
+        $services = @(Get-Service -ErrorAction Stop | Where-Object {
+                $_.Name -match '(?i)decide4action|d4a|mosquitto|mqtt|node.?red|nginx|reverseproxy|w3svc|iis' -or
+                $_.DisplayName -match '(?i)decide4action|d4a|mosquitto|mqtt|node.?red|nginx|reverse.?proxy|world wide web|internet information services|iis'
+            } | Sort-Object -Property DisplayName, Name)
+        foreach ($service in $services) {
+            $value = [string]$service.Name
+            if ($seenValues.ContainsKey($value.ToLowerInvariant())) { continue }
+            $seenValues[$value.ToLowerInvariant()] = $true
+            $options.Add([pscustomobject]@{
+                    Label = ('Windows service: {0} ({1})' -f $service.DisplayName, $service.Name)
+                    Value = $value
+                }) | Out-Null
+        }
+    }
+    catch {
+        Write-Host ('Windows services could not be listed automatically: {0}' -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    foreach ($component in @(
+            [pscustomobject]@{ Label = 'Frontend website availability'; Value = 'Frontend availability' }
+            [pscustomobject]@{ Label = 'API health'; Value = 'API health' }
+            [pscustomobject]@{ Label = 'Database connectivity'; Value = 'Database connectivity' }
+            [pscustomobject]@{ Label = 'SQL Server services'; Value = 'SQL Server services' }
+            [pscustomobject]@{ Label = 'API listener'; Value = 'API listener' }
+            [pscustomobject]@{ Label = 'Memory (RAM)'; Value = 'Memory' }
+            [pscustomobject]@{ Label = 'CPU'; Value = 'CPU' }
+            [pscustomobject]@{ Label = 'Disk space'; Value = 'Disk space' }
+            [pscustomobject]@{ Label = 'Nginx errors'; Value = 'Nginx errors' }
+            [pscustomobject]@{ Label = 'Watchdog service logs'; Value = 'Watchdog service logs' }
+            [pscustomobject]@{ Label = 'Data Collector SQL health'; Value = 'Data Collector SQL health' }
+        )) {
+        if ($seenValues.ContainsKey($component.Value.ToLowerInvariant())) { continue }
+        $seenValues[$component.Value.ToLowerInvariant()] = $true
+        $options.Add($component) | Out-Null
+    }
+
+    return $options.ToArray()
+}
+
+function Read-MonitoringRecoveryTarget {
+    $options = @(Get-MonitoringRecoveryTargetOptions)
+    Write-Host ''
+    Write-Host 'Services, resources, and application components:' -ForegroundColor Cyan
+    for ($index = 0; $index -lt $options.Count; $index++) {
+        Write-Host ('[{0}] {1}' -f ($index + 1), $options[$index].Label)
+    }
+    Write-Host '[M] Enter a service or component name manually'
+
+    while ($true) {
+        $selection = Read-Host 'Select a target (M for manual entry; q to go back)'
+        if (Test-IsBack $selection) { return $null }
+
+        if ($selection -match '^(?i)m$') {
+            while ($true) {
+                $manualTarget = Read-Host 'Service name, display name, rule key, check, or component text (q to go back)'
+                if (Test-IsBack $manualTarget) { return $null }
+                $manualTarget = $manualTarget.Trim()
+                if (-not [string]::IsNullOrWhiteSpace($manualTarget) -and
+                    $manualTarget.Length -le 160 -and
+                    $manualTarget -notmatch '[\x00-\x1F]') {
+                    return $manualTarget
+                }
+                Write-Host 'Enter a non-empty name of 160 characters or fewer.' -ForegroundColor Yellow
+            }
+        }
+
+        $number = 0
+        if ([int]::TryParse($selection, [ref]$number) -and $number -ge 1 -and $number -le $options.Count) {
+            return [string]$options[$number - 1].Value
+        }
+        Write-Host 'Select one of the displayed numbers, M for manual entry, or q to go back.' -ForegroundColor Yellow
+    }
+}
+
 function Show-ExecuteMonitoringCommandsMenu {
     while ($true) {
         Clear-Host
@@ -3657,6 +3736,7 @@ function Show-ExecuteMonitoringCommandsMenu {
         Write-Host '10) Set automatic alert cooldown'
         Write-Host '11) Clear automatic alert cooldown'
         Write-Host '12) Run monitoring and send concise Discord status'
+        Write-Host '13) Check a component and force a recovery notification if healthy'
         Write-Host 'q) Back to Site Monitoring'
         Write-Host '------------------------------------------------------------------------'
         $choice = Read-Host 'Choose an option'
@@ -3766,6 +3846,23 @@ function Show-ExecuteMonitoringCommandsMenu {
                 if ($null -eq $target) { continue }
                 Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Discord status' -Action {
                     Invoke-SiteMonitoringCommand -Target $target -Title 'Run Monitoring and Send Concise Discord Status' -Description 'Runs all health checks and sends a Discord-only summary of endpoint availability, D4A service status, and CPU, memory, and disk usage, even when healthy.' -ArgumentList @('-SendDiscordStatus')
+                }
+            }
+            '13' {
+                $target = Select-SiteMonitoringCommandTarget
+                if ($null -eq $target) { continue }
+                $installedMonitorVersion = $null
+                if (-not [version]::TryParse([string]$target.Version, [ref]$installedMonitorVersion) -or
+                    $installedMonitorVersion -lt [version]'7.8.2') {
+                    Write-Host 'This command requires Monitoring 7.8.2 or later.' -ForegroundColor Yellow
+                    Write-Host 'Run Update Existing Monitoring Settings > Update monitoring script version, then try again.' -ForegroundColor Gray
+                    Pause-Screen
+                    continue
+                }
+                $recoveryTarget = Read-MonitoringRecoveryTarget
+                if ($null -eq $recoveryTarget) { continue }
+                Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Forced recovery check' -Action {
+                    Invoke-SiteMonitoringCommand -Target $target -Title 'Check Component and Send Recovery' -Description ('Runs live monitoring checks for "{0}" and forces a recovery notification only when every matching result is healthy.' -f $recoveryTarget) -ArgumentList @('-ForceRecoveryTarget', $recoveryTarget)
                 }
             }
             default {

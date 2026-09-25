@@ -6,6 +6,16 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.8.0 - 2026-09-25
+
+- Added **Execute Monitoring Commands > Check a component and force a recovery notification if healthy** with numbered discovered services and standard application/resource targets.
+- Operators can select `M` to enter a Windows service name, display name, monitoring check, component text, or rule key without typing a PowerShell command.
+
+### Monitoring 7.8.2 - 2026-09-25
+
+- Added `-ForceRecoveryTarget`, which performs live monitoring checks and sends a recovery through enabled channels only when every matching result is `OK`.
+- Manually named Windows services not represented by a normal monitor result are checked directly and must be running. Unrelated active alerts are logged but are not delivered during the focused forced-recovery command.
+
 ## Monitoring 7.8.1 - 2026-09-23
 
 - Nginx and Watchdog log discovery now skips paths on unavailable drives instead of aborting the monitoring run with `Cannot find drive`.

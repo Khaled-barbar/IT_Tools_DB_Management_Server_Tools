@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.8.1
-# D4A-Monitor-Release-Date: 2026-09-23
+# D4A-Monitor-Version: 7.8.2
+# D4A-Monitor-Release-Date: 2026-09-25
 
 <#
 .SYNOPSIS
@@ -29,6 +29,8 @@
     cooldown removed so a recurrence is reported. Test and daily-summary modes
     send the complete scan report even when healthy. Use -SendDiscordStatus for
     a concise Discord-only health summary.
+    Use -ForceRecoveryTarget to verify one selected service, resource, or
+    application component and send a recovery only when its live result is OK.
     Use -DisableEmail -DisableDiscord to run all checks and write logs without
     delivering an email or Discord webhook notification.
 
@@ -70,6 +72,10 @@
 .EXAMPLE
     # Send a concise Discord status with endpoint, service, and resource results.
 .\D4A-ScheduledMonitor.ps1 -SendDiscordStatus
+
+.EXAMPLE
+    # Verify one component and force a recovery notification only when healthy.
+.\D4A-ScheduledMonitor.ps1 -ForceRecoveryTarget 'Memory'
 
 .EXAMPLE
     # Add a site to the persistent JSON configuration, then view the result.
@@ -146,6 +152,9 @@ param(
 
     # Sends a concise Discord-only health summary, including healthy runs.
     [switch]$SendDiscordStatus,
+
+    # Sends a recovery only when the live result matching this target is healthy.
+    [string]$ForceRecoveryTarget,
 
     # Use both switches for a full no-notification run; the checks and logs
     # still run, but neither outbound delivery channel is used.
@@ -270,8 +279,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.8.1'
-$script:MonitorReleaseDate = '2026-09-23'
+$script:MonitorVersion = '7.8.2'
+$script:MonitorReleaseDate = '2026-09-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -2537,6 +2546,98 @@ function Get-RecoveredNotifiedIssues {
         )
     }
     return $recovered.ToArray()
+}
+
+function Get-ForcedRecoveryResults {
+    param([Parameter(Mandatory = $true)][string]$Target)
+
+    $searchText = $Target.Trim()
+    if ([string]::IsNullOrWhiteSpace($searchText)) {
+        throw 'A recovery target is required.'
+    }
+
+    $allResults = @($script:Results | Where-Object {
+            $_.Category -notin @('Configuration', 'Email', 'Discord', 'Ignore', 'Recovery')
+        })
+    $matchingResults = @($allResults | Where-Object {
+            [string]$_.Key -ieq $searchText -or
+            [string]$_.Check -ieq $searchText -or
+            [string]$_.Category -ieq $searchText
+        })
+    if ($matchingResults.Count -eq 0) {
+        $matchingResults = @($allResults | Where-Object {
+                foreach ($value in @([string]$_.Key, [string]$_.Check, [string]$_.Category, [string]$_.Message)) {
+                    if (-not [string]::IsNullOrWhiteSpace($value) -and
+                        $value.IndexOf($searchText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        return $true
+                    }
+                }
+                return $false
+            })
+    }
+
+    if ($matchingResults.Count -eq 0) {
+        $service = @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
+                [string]$_.Name -ieq $searchText -or [string]$_.DisplayName -ieq $searchText
+            } | Select-Object -First 1)
+        if ($service.Count -eq 0) {
+            throw ('No monitoring result or Windows service matched "{0}".' -f $searchText)
+        }
+        if ([string]$service[0].Status -ne 'Running') {
+            throw ('Windows service {0} [{1}] is not healthy; current status={2}.' -f
+                $service[0].DisplayName, $service[0].Name, $service[0].Status)
+        }
+        $matchingResults = @([pscustomobject]@{
+                Severity = 'OK'
+                Category = 'Server'
+                Check    = 'Windows service'
+                Message  = '{0} [{1}]; Status=Running' -f $service[0].DisplayName, $service[0].Name
+                Key      = ConvertTo-IgnoreRuleKey -Value ('server-windows-service-{0}' -f $service[0].Name)
+            })
+    }
+
+    $unhealthyResults = @($matchingResults | Where-Object { [string]$_.Severity -ne 'OK' })
+    if ($unhealthyResults.Count -gt 0) {
+        $summary = @($unhealthyResults | Select-Object -First 4 | ForEach-Object {
+                '{0}: {1}' -f $_.Check, $_.Message
+            }) -join ' | '
+        throw ('Recovery notification was not sent because "{0}" is not healthy: {1}' -f $searchText, $summary)
+    }
+
+    $state = Get-MonitorRuntimeState
+    $previousByKey = @{}
+    foreach ($notifiedIssue in @($state.NotifiedIssues)) {
+        if ($null -eq $notifiedIssue -or [string]::IsNullOrWhiteSpace([string]$notifiedIssue.Key)) { continue }
+        $previousByKey[(ConvertTo-IgnoreRuleKey -Value ([string]$notifiedIssue.Key))] = $notifiedIssue
+    }
+
+    $recoveries = [System.Collections.Generic.List[object]]::new()
+    foreach ($result in @($matchingResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })) {
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$result.Key)
+        $previousValue = if ($previousByKey.ContainsKey($key) -and
+            -not [string]::IsNullOrWhiteSpace([string]$previousByKey[$key].LastMessage)) {
+            Repair-MonitorTextEncoding -Value ([string]$previousByKey[$key].LastMessage)
+        }
+        else {
+            'Manual recovery verification requested; no previous alert value was stored.'
+        }
+        $recoveries.Add([pscustomobject]@{
+                Time                 = Get-Date
+                Severity             = 'OK'
+                Category             = Repair-MonitorTextEncoding -Value ([string]$result.Category)
+                Check                = Repair-MonitorTextEncoding -Value ([string]$result.Check)
+                Message              = ('Forced recovery verification succeeded for target "{0}".' -f $searchText)
+                PreviousValue        = $previousValue
+                CurrentValue         = Repair-MonitorTextEncoding -Value ([string]$result.Message)
+                Key                  = $key
+                IgnoreActive         = $false
+                IgnoreMode           = $null
+                IgnoreUntil          = $null
+                NotificationEligible = $true
+                IsRecovery           = $true
+            }) | Out-Null
+    }
+    return $recoveries.ToArray()
 }
 
 function Update-NotifiedIssueStateAfterDelivery {
@@ -5610,6 +5711,21 @@ function Invoke-D4AMonitor {
         )
         return
     }
+    if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget) -and
+        ($SendDiscordStatus.IsPresent -or $SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            'Use -ForceRecoveryTarget by itself; it cannot be combined with status, test, or daily reports.'
+        )
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget) -and
+        (($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) -and
+            ($DisableEmail.IsPresent -or -not $EnableEmailNotifications))) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            '-ForceRecoveryTarget requires at least one enabled notification channel.'
+        )
+        return
+    }
     if ($SendDiscordStatus.IsPresent -and
         ($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl))) {
         Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
@@ -5739,12 +5855,35 @@ function Invoke-D4AMonitor {
             ) -Key 'ignore-rules'
         }
 
+        $forcedRecoveryResults = @()
+        if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+            try {
+                $forcedRecoveryResults = @(Get-ForcedRecoveryResults -Target $ForceRecoveryTarget)
+                Write-RunLog -Level OK -Category Recovery -Color Green -Message (
+                    'Forced recovery target is healthy: {0}; matching result(s)={1}.' -f $ForceRecoveryTarget, $forcedRecoveryResults.Count
+                )
+            }
+            catch {
+                Add-MonitorResult -Severity Warning -Category Recovery -Check 'Forced recovery verification' -Message $_.Exception.Message -NotificationEligible:$false
+            }
+        }
+
         $issuesBeforeEmail = @($script:Results | Where-Object { $_.Severity -ne 'OK' })
         $ignoredIssues = @($issuesBeforeEmail | Where-Object { $_.IgnoreActive })
         $unignoredIssues = @($issuesBeforeEmail | Where-Object { -not $_.IgnoreActive })
         $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
         $dailyOnlyResults = @($unignoredIssues | Where-Object { -not $_.NotificationEligible })
-        $recoveredNotifiedIssues = @(Get-RecoveredNotifiedIssues)
+        $recoveredNotifiedIssues = if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+            @($forcedRecoveryResults)
+        }
+        else {
+            @(Get-RecoveredNotifiedIssues)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+            # A forced recovery check is focused on the selected target and must
+            # not send unrelated alerts found during the same diagnostic run.
+            $unignoredNotifiableIssues = @()
+        }
         Remove-ResolvedAutomaticIssueCooldowns -ActiveIssueKeys @($issuesBeforeEmail | Select-Object -ExpandProperty Key -Unique)
         if ($activeIgnoreRules.Count -gt 0) {
             Write-RunLog -Category Ignore -Color Cyan -Message ('Active ignore rules loaded: {0}; file={1}' -f $activeIgnoreRules.Count, $script:IgnoreRulesPath)
@@ -5768,6 +5907,9 @@ function Invoke-D4AMonitor {
         }
         elseif ($emailReportRequested -and $SendDailySummaryEmail.IsPresent) {
             'Daily'
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+            'Recovery'
         }
         elseif ($unignoredNotifiableIssues.Count -gt 0) {
             'Alert'
