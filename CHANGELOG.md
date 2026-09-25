@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.8.4 - 2026-09-25
+
+- Fixed the forced-recovery command when exactly one healthy result matches the selected target. The result now remains an array, preventing strict-mode failure when notification logic reads its count.
+- Zero, one, and multiple forced-recovery results now follow the same array-safe notification path.
+
 ## 7.8.1 - 2026-09-25
 
 - Added **Database internal free space** to the guided component list used by the forced-recovery monitoring command.

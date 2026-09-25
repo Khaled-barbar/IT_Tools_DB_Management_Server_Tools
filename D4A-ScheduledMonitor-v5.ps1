@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.8.3
+# D4A-Monitor-Version: 7.8.4
 # D4A-Monitor-Release-Date: 2026-09-25
 
 <#
@@ -280,7 +280,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.8.3'
+$script:MonitorVersion = '7.8.4'
 $script:MonitorReleaseDate = '2026-09-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -5974,12 +5974,12 @@ function Invoke-D4AMonitor {
         $unignoredIssues = @($issuesBeforeEmail | Where-Object { -not $_.IgnoreActive })
         $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
         $dailyOnlyResults = @($unignoredIssues | Where-Object { -not $_.NotificationEligible })
-        $recoveredNotifiedIssues = if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
-            @($forcedRecoveryResults)
-        }
-        else {
-            @(Get-RecoveredNotifiedIssues)
-        }
+        $recoveredNotifiedIssues = @(if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+                $forcedRecoveryResults
+            }
+            else {
+                Get-RecoveredNotifiedIssues
+            })
         if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
             # A forced recovery check is focused on the selected target and must
             # not send unrelated alerts found during the same diagnostic run.
