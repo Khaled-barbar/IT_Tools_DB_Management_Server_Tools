@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.9.0 - 2026-09-25
+
+- Added JSON-configured one-time, daily, and weekly maintenance windows. Monitoring checks and all notifications are skipped for a configurable one-to-three-minute period after the scheduled start.
+- Existing configurations automatically receive an empty `MaintenanceWindows` array while retaining all site-specific settings.
+- Watchdog SQL `SHUTDOWN is in progress` and session kill-state failures are consolidated into the existing debounced database availability/connectivity incident instead of producing separate Scheduler alerts.
+
 ## Monitoring 7.8.5 - 2026-09-25
 
 - Treats Watchdog messages stating that `D4A_PLC` was not found and its PLC connection check was skipped as a healthy optional-component result instead of an alert.

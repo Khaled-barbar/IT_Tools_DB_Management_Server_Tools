@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.8.5
+# D4A-Monitor-Version: 7.9.0
 # D4A-Monitor-Release-Date: 2026-09-25
 
 <#
@@ -32,6 +32,9 @@
     a concise Discord-only health summary.
     Use -ForceRecoveryTarget to verify one selected service, resource, or
     application component and send a recovery only when its live result is OK.
+    MaintenanceWindows in the JSON configuration can suppress an entire scan
+    for one to three minutes after a one-time, daily, or weekly maintenance
+    start. Suppressed runs write an informational result and send nothing.
     Use -DisableEmail -DisableDiscord to run all checks and write logs without
     delivering an email or Discord webhook notification.
 
@@ -145,6 +148,10 @@ param(
     # Optional Discord webhook stored in the site-specific JSON configuration.
     # Never place a webhook URL in the distributed script or Git repository.
     [string]$DiscordWebhookUrl = '',
+
+    # Optional one-time, daily, or weekly maintenance definitions loaded from
+    # the JSON configuration. Active windows skip all checks and notifications.
+    [object[]]$MaintenanceWindows = @(),
 
     [Alias('SendEmailResults')]
     [switch]$SendTestResultsEmail,
@@ -280,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.8.4'
+$script:MonitorVersion = '7.9.0'
 $script:MonitorReleaseDate = '2026-09-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -669,6 +676,8 @@ function Set-MonitorInstalledReleaseMetadata {
             [pscustomobject]@{ Name = 'EnableEmailNotifications'; Value = $false },
             [pscustomobject]@{ Name = 'DiscordWebhookUrl'; Value = 'your Discord webhook URL' },
             [pscustomobject]@{ Name = 'DiscordWebhookUrlNote'; Value = 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.' },
+            [pscustomobject]@{ Name = 'MaintenanceWindows'; Value = @() },
+            [pscustomobject]@{ Name = 'MaintenanceWindowsNote'; Value = 'Optional: add Name, Schedule (Once, Daily, or Weekly), Start, and DurationMinutes (1-3). Weekly entries also require DaysOfWeek. Times use the server local time.' },
             [pscustomobject]@{ Name = 'InstalledMonitorVersion'; Value = $Version.ToString() },
             [pscustomobject]@{ Name = 'InstalledMonitorReleaseDate'; Value = $ReleaseDate },
             [pscustomobject]@{ Name = 'LastMonitorUpdate'; Value = (Get-Date).ToString('o') }
@@ -676,7 +685,7 @@ function Set-MonitorInstalledReleaseMetadata {
         if ($null -eq $configuration.PSObject.Properties[$property.Name]) {
             $configuration | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value
         }
-        elseif ($property.Name -in @('EnableEmailNotifications', 'DiscordWebhookUrl', 'DiscordWebhookUrlNote')) {
+        elseif ($property.Name -in @('EnableEmailNotifications', 'DiscordWebhookUrl', 'DiscordWebhookUrlNote', 'MaintenanceWindows', 'MaintenanceWindowsNote')) {
             # Preserve configured notification settings; only add missing defaults.
             continue
         }
@@ -910,11 +919,14 @@ function Read-MonitorConfigurationFile {
 function Convert-MonitorConfigurationValue {
     param(
         [Parameter(Mandatory = $true)][object]$Value,
-        [Parameter(Mandatory = $true)][ValidateSet('String', 'StringList', 'Int', 'Bool', 'Path')][string]$Type,
+        [Parameter(Mandatory = $true)][ValidateSet('String', 'StringList', 'ObjectList', 'Int', 'Bool', 'Path')][string]$Type,
         [Parameter(Mandatory = $true)][string]$Name
     )
 
     switch ($Type) {
+        'ObjectList' {
+            return ,@($Value)
+        }
         'StringList' {
             $items = @($Value | ForEach-Object { (Repair-MonitorTextEncoding -Value ([string]$_)).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             if ($items.Count -eq 0) { throw "Configuration property '$Name' cannot be empty." }
@@ -986,6 +998,7 @@ function Ensure-MonitorConfigurationDefaults {
     $apiAddressAdded = $false
     $localApiAddressAdded = $false
     $emailNotificationSettingAdded = $false
+    $maintenanceWindowsAdded = $false
     if ($null -eq $Configuration.PSObject.Properties['DatabaseConnectionTimeoutSeconds']) {
         $Configuration | Add-Member -MemberType NoteProperty -Name 'DatabaseConnectionTimeoutSeconds' -Value 10
         $changed = $true
@@ -1005,6 +1018,16 @@ function Ensure-MonitorConfigurationDefaults {
         $Configuration | Add-Member -MemberType NoteProperty -Name 'DiscordWebhookUrlNote' -Value 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.'
         $changed = $true
     }
+    if ($null -eq $Configuration.PSObject.Properties['MaintenanceWindows']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'MaintenanceWindows' -Value @()
+        $changed = $true
+        $maintenanceWindowsAdded = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['MaintenanceWindowsNote']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'MaintenanceWindowsNote' -Value 'Optional: add Name, Schedule (Once, Daily, or Weekly), Start, and DurationMinutes (1-3). Weekly entries also require DaysOfWeek. Times use the server local time.'
+        $changed = $true
+        $maintenanceWindowsAdded = $true
+    }
     if ($null -eq $Configuration.PSObject.Properties['ApiAddress']) {
         $frontendAddresses = @($Configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
         $apiAddresses = @(Get-DefaultMonitorApiAddresses -FrontendAddresses $frontendAddresses)
@@ -1021,7 +1044,7 @@ function Ensure-MonitorConfigurationDefaults {
     if ($changed -and -not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
         $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
         try {
-            if ($apiAddressAdded -or $localApiAddressAdded -or $emailNotificationSettingAdded) {
+            if ($apiAddressAdded -or $localApiAddressAdded -or $emailNotificationSettingAdded -or $maintenanceWindowsAdded) {
                 $migrationBackupPath = '{0}.pre-configuration-migration-{1}.json' -f
                     ([IO.Path]::Combine((Split-Path -Parent $script:ResolvedConfigPath), [IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath))),
                     (Get-Date -Format 'yyyyMMddHHmmss')
@@ -1071,6 +1094,7 @@ function Import-MonitorConfiguration {
         EnableEmailNotifications   = 'Bool'
         NotificationTo             = 'StringList'
         DiscordWebhookUrl          = 'String'
+        MaintenanceWindows         = 'ObjectList'
         LogDirectory               = 'Path'
         WatchdogLogRoot            = 'Path'
         LogRetentionDays           = 'Int'
@@ -1125,6 +1149,146 @@ function Import-MonitorConfiguration {
     }
 
     $script:ConfigurationLoaded = $true
+}
+
+function ConvertTo-MonitorMaintenanceTimeOfDay {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$WindowName
+    )
+
+    $parsed = [timespan]::Zero
+    foreach ($format in @('hh\:mm', 'hh\:mm\:ss')) {
+        if ([timespan]::TryParseExact($Value.Trim(), $format, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+            return $parsed
+        }
+    }
+    throw "Maintenance window '$WindowName' Start must use HH:mm or HH:mm:ss for Daily and Weekly schedules."
+}
+
+function Get-ValidatedMonitorMaintenanceWindows {
+    $validated = [System.Collections.Generic.List[object]]::new()
+    $index = 0
+    foreach ($window in @($MaintenanceWindows)) {
+        $index++
+        if ($null -eq $window -or $window -is [string]) {
+            throw "MaintenanceWindows entry $index must be a JSON object."
+        }
+
+        $name = if ($null -ne $window.PSObject.Properties['Name'] -and
+            -not [string]::IsNullOrWhiteSpace([string]$window.Name)) {
+            (Repair-MonitorTextEncoding -Value ([string]$window.Name)).Trim()
+        }
+        else {
+            "Maintenance window $index"
+        }
+        $enabled = $true
+        if ($null -ne $window.PSObject.Properties['Enabled']) {
+            if ($window.Enabled -is [bool]) {
+                $enabled = [bool]$window.Enabled
+            }
+            else {
+                $parsedEnabled = $false
+                if (-not [bool]::TryParse([string]$window.Enabled, [ref]$parsedEnabled)) {
+                    throw "Maintenance window '$name' Enabled must be true or false."
+                }
+                $enabled = $parsedEnabled
+            }
+        }
+
+        $schedule = if ($null -ne $window.PSObject.Properties['Schedule']) { ([string]$window.Schedule).Trim() } else { '' }
+        if ($schedule -notin @('Once', 'Daily', 'Weekly')) {
+            throw "Maintenance window '$name' Schedule must be Once, Daily, or Weekly."
+        }
+        $startText = if ($null -ne $window.PSObject.Properties['Start']) { ([string]$window.Start).Trim() } else { '' }
+        if ([string]::IsNullOrWhiteSpace($startText)) {
+            throw "Maintenance window '$name' requires Start."
+        }
+
+        $durationMinutes = 3
+        if ($null -ne $window.PSObject.Properties['DurationMinutes']) {
+            if (-not [int]::TryParse([string]$window.DurationMinutes, [ref]$durationMinutes) -or
+                $durationMinutes -lt 1 -or $durationMinutes -gt 3) {
+                throw "Maintenance window '$name' DurationMinutes must be between 1 and 3."
+            }
+        }
+
+        $startDateTime = $null
+        $startTimeOfDay = $null
+        $daysOfWeek = @()
+        if ($schedule -eq 'Once') {
+            $parsedStart = [datetime]::MinValue
+            if (-not [datetime]::TryParse(
+                    $startText,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::AllowWhiteSpaces,
+                    [ref]$parsedStart)) {
+                throw "Maintenance window '$name' Start must be an ISO local date/time, for example 2026-09-26T00:00:00."
+            }
+            $startDateTime = if ($parsedStart.Kind -eq [DateTimeKind]::Utc) { $parsedStart.ToLocalTime() } else { $parsedStart }
+        }
+        else {
+            $startTimeOfDay = ConvertTo-MonitorMaintenanceTimeOfDay -Value $startText -WindowName $name
+            if ($schedule -eq 'Weekly') {
+                $configuredDays = @(if ($null -ne $window.PSObject.Properties['DaysOfWeek']) { $window.DaysOfWeek })
+                if ($configuredDays.Count -eq 0) {
+                    throw "Weekly maintenance window '$name' requires DaysOfWeek."
+                }
+                foreach ($day in $configuredDays) {
+                    try {
+                        $parsedDay = [DayOfWeek][Enum]::Parse([DayOfWeek], ([string]$day).Trim(), $true)
+                    }
+                    catch {
+                        throw "Maintenance window '$name' contains an invalid day '$day'."
+                    }
+                    $daysOfWeek += $parsedDay
+                }
+                $daysOfWeek = @($daysOfWeek | Select-Object -Unique)
+            }
+        }
+
+        $validated.Add([pscustomobject]@{
+                Name            = $name
+                Enabled         = $enabled
+                Schedule        = $schedule
+                StartDateTime   = $startDateTime
+                StartTimeOfDay  = $startTimeOfDay
+                DaysOfWeek      = $daysOfWeek
+                DurationMinutes = $durationMinutes
+            }) | Out-Null
+    }
+    return $validated.ToArray()
+}
+
+function Get-ActiveMonitorMaintenanceWindow {
+    param([datetime]$Now = (Get-Date))
+
+    foreach ($window in @(Get-ValidatedMonitorMaintenanceWindows)) {
+        if (-not $window.Enabled) { continue }
+        $candidateStarts = [System.Collections.Generic.List[datetime]]::new()
+        if ($window.Schedule -eq 'Once') {
+            $candidateStarts.Add([datetime]$window.StartDateTime) | Out-Null
+        }
+        else {
+            foreach ($date in @($Now.Date, $Now.Date.AddDays(-1))) {
+                if ($window.Schedule -eq 'Weekly' -and $window.DaysOfWeek -notcontains $date.DayOfWeek) { continue }
+                $candidateStarts.Add($date.Add([timespan]$window.StartTimeOfDay)) | Out-Null
+            }
+        }
+
+        foreach ($start in $candidateStarts) {
+            $end = $start.AddMinutes([int]$window.DurationMinutes)
+            if ($Now -ge $start -and $Now -lt $end) {
+                return [pscustomobject]@{
+                    Name     = $window.Name
+                    Schedule = $window.Schedule
+                    Start    = $start
+                    End      = $end
+                }
+            }
+        }
+    }
+    return $null
 }
 
 function Test-MonitorConfigurationValues {
@@ -1189,6 +1353,7 @@ function Test-MonitorConfigurationValues {
     if (-not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
         Test-DiscordWebhookUrl -WebhookUrl $DiscordWebhookUrl
     }
+    [void](Get-ValidatedMonitorMaintenanceWindows)
     if ($DisableEmail.IsPresent -and -not $DisableDiscord.IsPresent -and [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
         throw 'DisableEmail requires a configured DiscordWebhookUrl unless DisableDiscord is also specified for a no-notification run.'
     }
@@ -1362,6 +1527,7 @@ function Show-MonitorConfiguration {
         NotificationAddresses = $NotificationTo
         EmailNotifications     = (Get-EmailDeliveryConfigurationStatus)
         DiscordNotifications = (Get-DiscordDeliveryConfigurationStatus)
+        MaintenanceWindows   = if (@($MaintenanceWindows).Count -eq 0) { 'None' } else { @($MaintenanceWindows | ForEach-Object { $_.Name }) -join ', ' }
         ScheduledFrequency   = $frequency
         DailySummary         = $dailySummary
         LogDirectory         = $LogDirectory
@@ -4705,7 +4871,9 @@ function Test-IsWatchdogSqlConnectivityEvidence {
     return (
         $normalized -match '(?i)network-related\s+or\s+instance-specific\s+error.*establishing\s+a\s+connection\s+to\s+SQL\s+Server' -or
         $normalized -match '(?i)Named\s+Pipes\s+Provider,\s*error:\s*40\s*-\s*Could\s+not\s+open\s+a\s+connection\s+to\s+SQL\s+Server' -or
-        $normalized -match '(?i)SQL\s+Server.*server\s+was\s+not\s+found\s+or\s+was\s+not\s+accessible'
+        $normalized -match '(?i)SQL\s+Server.*server\s+was\s+not\s+found\s+or\s+was\s+not\s+accessible' -or
+        $normalized -match '(?i)\bSHUTDOWN\s+is\s+in\s+progress\b' -or
+        $normalized -match '(?i)\bsession\s+is\s+in\s+the\s+kill\s+state\b'
     )
 }
 
@@ -4749,7 +4917,7 @@ function Add-WatchdogSqlConnectivityResult {
     $serviceNames = @($records | Select-Object -ExpandProperty Service -Unique | Sort-Object)
     $sample = [string]$records[0].Text
     if ($sample.Length -gt 900) { $sample = $sample.Substring(0, 900) + '...' }
-    $messagePrefix = 'Watchdog reported one SQL Server connectivity incident across {0} check(s); affected logs={1}; latest evidence={2}; consecutive affected runs={3}/{4}' -f
+    $messagePrefix = 'Watchdog reported one SQL Server availability/connectivity incident across {0} check(s); affected logs={1}; latest evidence={2}; consecutive affected runs={3}/{4}' -f
         $records.Count,
         ($serviceNames -join ', '),
         $latestEvidenceTime.ToString('yyyy-MM-dd HH:mm:ss'),
@@ -5833,6 +6001,18 @@ function Invoke-D4AMonitor {
     ) -Color DarkGray
     Write-RunLog -Category Monitor -Message ('Monitoring logs={0}' -f $script:MonitorLogDirectory) -Color DarkGray
     Write-RunLog -Category Monitor -Message ('Monitor summary log={0}' -f $script:RunLogPath) -Color DarkGray
+
+    $activeMaintenance = Get-ActiveMonitorMaintenanceWindow
+    if ($null -ne $activeMaintenance) {
+        $maintenanceMessage = 'Scheduled maintenance is active: {0}; schedule={1}; start={2}; monitoring checks and notifications are skipped until {3}.' -f
+            $activeMaintenance.Name,
+            $activeMaintenance.Schedule,
+            $activeMaintenance.Start.ToString('yyyy-MM-dd HH:mm:ss'),
+            $activeMaintenance.End.ToString('yyyy-MM-dd HH:mm:ss')
+        Write-RunLog -Level INFO -Category Maintenance -Color Cyan -Message $maintenanceMessage
+        Add-MonitorResult -Severity OK -Category Maintenance -Check 'Scheduled maintenance' -Message $maintenanceMessage -Key 'maintenance-window-active'
+        return
+    }
 
     if ($SendDiscordStatus.IsPresent -and
         ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)) {
