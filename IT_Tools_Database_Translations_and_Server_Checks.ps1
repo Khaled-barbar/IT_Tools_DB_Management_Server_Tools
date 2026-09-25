@@ -59,7 +59,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.8.0'
+$Script:ToolVersion = [version]'7.8.1'
 $Script:ToolReleaseDate = '2026-09-25'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3664,6 +3664,7 @@ function Get-MonitoringRecoveryTargetOptions {
             [pscustomobject]@{ Label = 'Frontend website availability'; Value = 'Frontend availability' }
             [pscustomobject]@{ Label = 'API health'; Value = 'API health' }
             [pscustomobject]@{ Label = 'Database connectivity'; Value = 'Database connectivity' }
+            [pscustomobject]@{ Label = 'Database internal free space'; Value = 'Database internal free space' }
             [pscustomobject]@{ Label = 'SQL Server services'; Value = 'SQL Server services' }
             [pscustomobject]@{ Label = 'API listener'; Value = 'API listener' }
             [pscustomobject]@{ Label = 'Memory (RAM)'; Value = 'Memory' }
@@ -3853,8 +3854,8 @@ function Show-ExecuteMonitoringCommandsMenu {
                 if ($null -eq $target) { continue }
                 $installedMonitorVersion = $null
                 if (-not [version]::TryParse([string]$target.Version, [ref]$installedMonitorVersion) -or
-                    $installedMonitorVersion -lt [version]'7.8.2') {
-                    Write-Host 'This command requires Monitoring 7.8.2 or later.' -ForegroundColor Yellow
+                    $installedMonitorVersion -lt [version]'7.8.3') {
+                    Write-Host 'This command requires Monitoring 7.8.3 or later.' -ForegroundColor Yellow
                     Write-Host 'Run Update Existing Monitoring Settings > Update monitoring script version, then try again.' -ForegroundColor Gray
                     Pause-Screen
                     continue

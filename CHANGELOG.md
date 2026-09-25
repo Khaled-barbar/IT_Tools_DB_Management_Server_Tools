@@ -6,6 +6,16 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.8.1 - 2026-09-25
+
+- Added **Database internal free space** to the guided component list used by the forced-recovery monitoring command.
+
+### Monitoring 7.8.3 - 2026-09-25
+
+- The existing dbconfig-based database probe now queries `sys.database_files` through the same verified SQL connection and reports total size plus unallocated internal space for each non-log `ROWS` file.
+- A database data file with less than 500 MB unallocated produces a notification-eligible per-file alert. Values at exactly 500 MB remain healthy, `_log` and SQL `LOG` files are excluded, and query failures are logged without being misreported as low-space alerts.
+- Stable per-database/file rule keys allow the normal 24-hour cooldown and recovery notification workflow to apply when capacity is increased.
+
 ## 7.8.0 - 2026-09-25
 
 - Added **Execute Monitoring Commands > Check a component and force a recovery notification if healthy** with numbered discovered services and standard application/resource targets.

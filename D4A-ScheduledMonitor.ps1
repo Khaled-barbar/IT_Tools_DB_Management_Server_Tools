@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.8.2
+# D4A-Monitor-Version: 7.8.3
 # D4A-Monitor-Release-Date: 2026-09-25
 
 <#
@@ -8,8 +8,9 @@
     optional Discord notifications.
 
 .DESCRIPTION
-    Runs application, service, database connectivity, SQL Server service,
-    resource, TLS, Nginx, and Windows event checks.
+    Runs application, service, database connectivity, database internal
+    data-file capacity, SQL Server service, resource, TLS, Nginx, and Windows
+    event checks.
     Results are written to daily run_log and error_log files under monitor-logs.
     Monitoring logs are retained for five days by default.
 
@@ -178,7 +179,7 @@ param(
     [string]$DbConfigPath,
 
     # Maximum connection and query duration for each discovered dbconfig.js
-    # database health probe. The probe performs only SELECT 1.
+    # database health probe and internal data-file capacity query.
     [ValidateRange(1, 120)]
     [int]$DatabaseConnectionTimeoutSeconds = 10,
 
@@ -279,7 +280,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.8.2'
+$script:MonitorVersion = '7.8.3'
 $script:MonitorReleaseDate = '2026-09-25'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -305,6 +306,7 @@ $script:ResourceConsecutiveRunsRequired = 2
 $script:WatchdogSqlConnectivityConsecutiveRunsRequired = 2
 $script:DiskCriticalFreeGb = 5
 $script:DiskCriticalUsedPercent = 95
+$script:DatabaseUnallocatedSpaceAlertMb = 500
 $script:CommandLineParameterNames = @($PSBoundParameters.Keys)
 $script:ResolvedConfigPath = $null
 $script:ConfigurationLoaded = $false
@@ -1377,6 +1379,7 @@ function Show-MonitorConfiguration {
         DiskCriticalUsedPercent             = $script:DiskCriticalUsedPercent
         ApiHealthFailureAttempts            = $ApiHealthFailureAttempts
         DatabaseConnectionTimeoutSeconds    = $DatabaseConnectionTimeoutSeconds
+        DatabaseUnallocatedSpaceAlertMb     = $script:DatabaseUnallocatedSpaceAlertMb
         NginxErrorsPerMinuteThreshold       = $NginxErrorsPerMinuteThreshold
         NginxConsecutiveMinutes             = $NginxConsecutiveMinutes
         DataCollectorFailureAlertThreshold  = $DataCollectorConsecutiveFailureThreshold
@@ -1474,7 +1477,9 @@ ApiHealthFailureAttempts (default 3), ApiHealthRetryIntervalSeconds (default
 through the configuration file.
 Database connectivity discovers dbconfig.js from active Data Collector service
 paths, decrypts its configured password only in memory, and runs SELECT 1 for
-each complete dbConfig object. DatabaseConnectionTimeoutSeconds defaults to 10.
+each complete dbConfig object. The same connection checks non-log ROWS files in
+sys.database_files and alerts below 500 MB of unallocated internal space.
+DatabaseConnectionTimeoutSeconds defaults to 10.
 
 Automatic updates
 -----------------
@@ -3797,6 +3802,82 @@ function Get-D4ADatabaseSafeFailureDetail {
     return 'Database connection test failed. Review the database and monitor logs for the exception details.'
 }
 
+function Get-D4ADatabaseFileSpace {
+    param(
+        [Parameter(Mandatory = $true)][object]$Connection,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $command = $null
+    $reader = $null
+    $files = [System.Collections.Generic.List[object]]::new()
+    try {
+        $command = $Connection.CreateCommand()
+        $command.CommandTimeout = $TimeoutSeconds
+        $command.CommandText = @'
+SELECT
+    name AS FileName,
+    type_desc AS FileType,
+    CAST(size AS decimal(19, 2)) / 128.0 AS TotalSizeMB,
+    (CAST(size AS decimal(19, 2)) / 128.0) -
+        (CAST(FILEPROPERTY(name, 'SpaceUsed') AS decimal(19, 2)) / 128.0) AS UnallocatedFreeSpaceMB
+FROM sys.database_files
+WHERE type_desc = 'ROWS'
+  AND name NOT LIKE '%[_]log';
+'@
+        $reader = $command.ExecuteReader()
+        while ($reader.Read()) {
+            $freeSpaceOrdinal = $reader.GetOrdinal('UnallocatedFreeSpaceMB')
+            if ($reader.IsDBNull($freeSpaceOrdinal)) { continue }
+            $files.Add([pscustomobject]@{
+                    FileName               = [string]$reader['FileName']
+                    FileType               = [string]$reader['FileType']
+                    TotalSizeMB            = [double]$reader['TotalSizeMB']
+                    UnallocatedFreeSpaceMB = [double]$reader['UnallocatedFreeSpaceMB']
+                }) | Out-Null
+        }
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($command) { $command.Dispose() }
+    }
+    return $files.ToArray()
+}
+
+function Add-D4ADatabaseFileSpaceResults {
+    param(
+        [Parameter(Mandatory = $true)][string]$DatabaseName,
+        [Parameter(Mandatory = $true)][object[]]$Files
+    )
+
+    $dataFiles = @($Files | Where-Object {
+            [string]$_.FileType -ieq 'ROWS' -and [string]$_.FileName -notmatch '(?i)_log$'
+        })
+    if ($dataFiles.Count -eq 0) {
+        Add-MonitorResult -Severity Warning -Category Database -Check ('Database internal free space - {0}' -f $DatabaseName) -Message (
+            'Database={0}; no non-log ROWS file was returned by sys.database_files; internal free-space evaluation was skipped.' -f $DatabaseName
+        ) -Key ('database-unallocated-space-{0}-discovery' -f $DatabaseName) -NotificationEligible:$false
+        return
+    }
+
+    foreach ($file in $dataFiles) {
+        $totalSizeMb = [Math]::Round([double]$file.TotalSizeMB, 2)
+        $rawFreeSpaceMb = [double]$file.UnallocatedFreeSpaceMB
+        $freeSpaceMb = [Math]::Round($rawFreeSpaceMb, 2)
+        $check = 'Database internal free space - {0} / {1}' -f $DatabaseName, $file.FileName
+        $key = 'database-unallocated-space-{0}-{1}' -f $DatabaseName, $file.FileName
+        $message = 'Database={0}; data file={1}; type={2}; total size={3} MB; unallocated internal free space={4} MB; alert threshold={5} MB.' -f
+            $DatabaseName, $file.FileName, $file.FileType, $totalSizeMb, $freeSpaceMb, $script:DatabaseUnallocatedSpaceAlertMb
+
+        if ($rawFreeSpaceMb -lt $script:DatabaseUnallocatedSpaceAlertMb) {
+            Add-MonitorResult -Severity Alert -Category Database -Check $check -Message $message -Key $key
+        }
+        else {
+            Add-MonitorResult -Severity OK -Category Database -Check $check -Message $message -Key $key
+        }
+    }
+}
+
 function Test-D4ADatabaseConnectivity {
     $configPaths = @(Get-D4ADatabaseConfigPaths)
     if ($configPaths.Count -eq 0) {
@@ -3842,6 +3923,8 @@ function Test-D4ADatabaseConnectivity {
                 if ($dataSourceCandidates.Count -eq 0) { throw 'No SQL Server instance could be resolved from dbConfig.' }
 
                 $selectedDataSource = $null
+                $databaseFileSpace = @()
+                $databaseFileSpaceFailure = ''
                 $attempts = [System.Collections.Generic.List[string]]::new()
                 foreach ($dataSourceCandidate in $dataSourceCandidates) {
                     $dataSource = [string]$dataSourceCandidate
@@ -3860,6 +3943,15 @@ function Test-D4ADatabaseConnectivity {
                         $command.CommandTimeout = $DatabaseConnectionTimeoutSeconds
                         $command.CommandText = 'SELECT 1;'
                         if ([int]$command.ExecuteScalar() -ne 1) { throw 'The database test query returned an unexpected result.' }
+                        try {
+                            $databaseFileSpace = @(Get-D4ADatabaseFileSpace -Connection $connection -TimeoutSeconds $DatabaseConnectionTimeoutSeconds)
+                        }
+                        catch {
+                            $databaseFileSpaceFailure = Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception
+                            Write-ErrorLog -Level Warning -Category Database -Message (
+                                'Database internal free-space query failed for {0}: {1}' -f $dbConfig.Database, $databaseFileSpaceFailure
+                            )
+                        }
                         $selectedDataSource = $dataSource
                         break
                     }
@@ -3885,6 +3977,15 @@ function Test-D4ADatabaseConnectivity {
                 Add-MonitorResult -Severity OK -Category Database -Check ('Database connectivity - {0}' -f $dbConfig.Database) -Message (
                     'Database={0}; configured dbconfig={1}; SQL instance={2}; SELECT 1 completed successfully.' -f $dbConfig.Database, $dbConfig.Name, $selectedDataSource
                 ) -Key $databaseKey
+                if (-not [string]::IsNullOrWhiteSpace($databaseFileSpaceFailure)) {
+                    Add-MonitorResult -Severity Warning -Category Database -Check ('Database internal free space - {0}' -f $dbConfig.Database) -Message (
+                        'Database={0}; SQL instance={1}; internal free-space query could not be completed: {2}' -f
+                            $dbConfig.Database, $selectedDataSource, $databaseFileSpaceFailure
+                    ) -Key ('database-unallocated-space-{0}-query' -f $dbConfig.Database) -NotificationEligible:$false
+                }
+                else {
+                    Add-D4ADatabaseFileSpaceResults -DatabaseName ([string]$dbConfig.Database) -Files $databaseFileSpace
+                }
             }
             catch {
                 Add-MonitorResult -Severity Alert -Category Database -Check ('Database connectivity - {0}' -f $dbConfig.Database) -Message (

@@ -200,6 +200,7 @@ Monitoring logic was refined using observed production alerts:
 - known harmless NSSM output-rotation and ended-pipe events are excluded;
 - relevant Windows events are retained as log-only evidence because service state is checked independently;
 - disk capacity has no warning email and becomes critical at 5 GB free or less, or 95 percent used or more;
+- each connected application database checks non-log `ROWS` files in `sys.database_files`; unallocated internal space below 500 MB creates a per-file alert and an explicit healthy result supports recovery after capacity is increased;
 - Watchdog logs provide root-cause evidence but the monitor never restarts services;
 - automatic 24-hour issue cooldowns prevent repeated notification, and successfully delivered issues remain in state until the same check explicitly reports `OK` and a recovery notification succeeds through at least one enabled channel.
 

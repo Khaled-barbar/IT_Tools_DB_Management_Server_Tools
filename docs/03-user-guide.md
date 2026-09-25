@@ -514,6 +514,7 @@ Normal endpoint behavior:
 - Nginx errors: alert only above 20 errors/minute for two consecutive minutes;
 - relevant Windows event warning/error while services remain available: `error_log` and daily/test reports only;
 - disk space: no warning notification; critical alert at 5 GB free or less, or 95 percent used or more;
+- database internal free space: alert when a non-log data file has less than 500 MB unallocated; files ending in `_log` and SQL `LOG` files are excluded;
 - successfully delivered issue: suppress the same rule key automatically for 24 hours, whether delivery succeeded through email or Discord;
 - previously notified issue later returns `OK`: send one recovery notification through each enabled channel; clear its recovery state after at least one channel succeeds;
 - one immediate issue: subject identifies component and level, such as `API Alert` or `Disk Space Critical`; multiple issues use `Multiple Alerts detected`.
