@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.8.4
+# D4A-Monitor-Version: 7.8.5
 # D4A-Monitor-Release-Date: 2026-09-25
 
 <#
@@ -4645,11 +4645,29 @@ function Test-DataCollectorWatchdogHealth {
     }
 }
 
+function Test-IsOptionalPlcNotConfiguredEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    return (
+        $normalized -match '(?i)\bservice\s+[''"]?D4A[_\s-]?PLC[''"]?\s+(?:was\s+)?not\s+found\b' -or
+        $normalized -match '(?i)\bskipping\s+PLC\s+connection\s+check\b'
+    )
+}
+
 function Get-WatchdogEvidenceDisposition {
     param([Parameter(Mandatory = $true)][string]$Evidence)
 
     $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
     if ([string]::IsNullOrWhiteSpace($normalized)) { return 'Ignore' }
+
+    # PLC is optional. Watchdog records its absence as a skipped check rather
+    # than a service failure, so this evidence must never generate an alert.
+    if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence $normalized) {
+        return 'Ignore'
+    }
 
     # These messages contain words such as "error" but explicitly report a healthy result.
     if ($normalized -match '(?i)healthy\s*\(no\s+matching\s+events\)|\bhealthy\b|conditions\s+back\s+to\s+normal|\bOK\s+-|Status\s*=\s*Healthy') {
@@ -4808,8 +4826,13 @@ function Test-WatchdogServiceLogs {
 
         $alertSamples = [System.Collections.Generic.List[string]]::new()
         $warningSamples = [System.Collections.Generic.List[string]]::new()
+        $plcNotConfigured = $false
         foreach ($record in $records) {
             if ([datetime]$record.Time -lt $since) { continue }
+            if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence ([string]$record.Text)) {
+                $plcNotConfigured = $true
+                continue
+            }
             if (Test-IsWatchdogSqlConnectivityEvidence -Evidence ([string]$record.Text)) {
                 $sqlConnectivityRecords.Add([pscustomobject]@{
                     Time    = [datetime]$record.Time
@@ -4828,6 +4851,12 @@ function Test-WatchdogServiceLogs {
             elseif (-not $warningSamples.Contains($sample)) {
                 $warningSamples.Add($sample) | Out-Null
             }
+        }
+
+        if ($plcNotConfigured) {
+            Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message (
+                'PLC is not configured on this server; the Watchdog PLC connection check was skipped.'
+            ) -Key 'diagnostics-watchdog-plc'
         }
 
         $severity = if ($alertSamples.Count -gt 0) { 'Alert' } elseif ($warningSamples.Count -gt 0) { 'Warning' } else { $null }

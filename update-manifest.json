@@ -3,16 +3,16 @@
   "version": "7.8.1",
   "releaseDate": "2026-09-25",
   "monitoring": {
-    "version": "7.8.4",
+    "version": "7.8.5",
     "releaseDate": "2026-09-25",
     "scriptPath": "D4A-ScheduledMonitor-v5.ps1",
-    "sha256": "0157875022245F730459BDE989620B869E6A3606C0F20187B41EAE8DB46B65CD"
+    "sha256": "44B530CCB01F4FE50CF3C3B0CFADEE8D99A2EC106EFD9F88B1FB1E7C8BC8AFA7"
   },
   "canonicalMonitoring": {
-    "version": "7.8.4",
+    "version": "7.8.5",
     "releaseDate": "2026-09-25",
     "scriptPath": "D4A-ScheduledMonitor.ps1",
-    "sha256": "0157875022245F730459BDE989620B869E6A3606C0F20187B41EAE8DB46B65CD"
+    "sha256": "44B530CCB01F4FE50CF3C3B0CFADEE8D99A2EC106EFD9F88B1FB1E7C8BC8AFA7"
   },
   "files": [
     {
@@ -25,15 +25,15 @@
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
-      "sha256": "0157875022245F730459BDE989620B869E6A3606C0F20187B41EAE8DB46B65CD"
+      "sha256": "44B530CCB01F4FE50CF3C3B0CFADEE8D99A2EC106EFD9F88B1FB1E7C8BC8AFA7"
     },
     {
       "path": "D4A-ScheduledMonitor.ps1",
-      "sha256": "0157875022245F730459BDE989620B869E6A3606C0F20187B41EAE8DB46B65CD"
+      "sha256": "44B530CCB01F4FE50CF3C3B0CFADEE8D99A2EC106EFD9F88B1FB1E7C8BC8AFA7"
     },
     {
       "path": "monitor-version.txt",
-      "sha256": "D66594248B16FD1723BA236A35E437BC785976CECB8237C4CDCA031036A44014"
+      "sha256": "C4553F5678320A70861EAE5CE9A89EAF06EA5DE3AA324B9A7BCC97FF16F04810"
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
