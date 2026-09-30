@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.9.4 - 2026-09-30
+
+- Added a separated final SMTP result block with overall, connection/authentication, and optional delivery status, plus a sanitized failure reason and recommended action.
+- Replaced the SMTP diagnostic's generic pause with `R` to rediscover configurations and restart or `q` to return to Troubleshooting.
+
 ## 7.9.3 - 2026-09-30
 
 - Added **SMTP Delivery Diagnostic** to Troubleshooting as a verified, independently updateable companion script.

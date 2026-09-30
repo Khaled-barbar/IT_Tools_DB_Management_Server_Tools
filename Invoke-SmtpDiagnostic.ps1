@@ -40,6 +40,10 @@ $script:NodeAvailable = $false
 $script:TrialCount = 0
 $script:Config = $null
 $script:Native = $null
+$script:FinalConnectionStatus = 'FAILED'
+$script:FinalDeliveryStatus = 'NOT AVAILABLE'
+$script:FinalReason = 'The diagnostic did not complete.'
+$script:FinalRecommendation = 'Review the detailed diagnostic output.'
 $tempRoot = $null
 $nodeSource = @'
 'use strict';
@@ -687,6 +691,39 @@ function Get-NextStep([string]$Stage) {
         default { return 'Check SMTP service logs, banner/EHLO replies, network inspection and the service-account environment. Increase -TimeoutSeconds if the server is slow.' }
     }
 }
+function Show-FinalSmtpTestSummary {
+    $overallResult = if ($script:FinalConnectionStatus -ne 'SUCCESS' -or $script:FinalDeliveryStatus -match '^FAILED') {
+        'FAILED'
+    }
+    elseif ($script:FinalDeliveryStatus -match '^NOT COMPLETED') {
+        'INCOMPLETE'
+    }
+    elseif ($script:FinalDeliveryStatus -match '^NOT AVAILABLE') {
+        'PARTIAL'
+    }
+    else {
+        'SUCCESS'
+    }
+    $overallColor = switch ($overallResult) {
+        'SUCCESS' { 'Green' }
+        'FAILED' { 'Red' }
+        default { 'Yellow' }
+    }
+
+    Write-Host ''
+    Write-Host ('=' * 72) -ForegroundColor DarkGray
+    Write-Host 'FINAL SMTP TEST SUMMARY' -ForegroundColor Cyan
+    Write-Host ('=' * 72) -ForegroundColor DarkGray
+    Write-Host 'Overall result: ' -NoNewline
+    Write-Host $overallResult -ForegroundColor $overallColor
+    Write-Host ('Connection/authentication: ' + $script:FinalConnectionStatus) -ForegroundColor $(if ($script:FinalConnectionStatus -eq 'SUCCESS') { 'Green' } else { 'Red' })
+    Write-Host ('Message delivery: ' + $script:FinalDeliveryStatus) -ForegroundColor $(if ($script:FinalDeliveryStatus -match '^SUCCESS') { 'Green' } elseif ($script:FinalDeliveryStatus -match '^FAILED') { 'Red' } else { 'Yellow' })
+    Write-Host ('Reason: ' + (Protect-Text $script:FinalReason))
+    if (-not [string]::IsNullOrWhiteSpace($script:FinalRecommendation)) {
+        Write-Host ('Recommended action: ' + (Protect-Text $script:FinalRecommendation)) -ForegroundColor Yellow
+    }
+    Write-Host ('=' * 72) -ForegroundColor DarkGray
+}
 
 try {
     Write-Host 'D4A SMTP diagnostics - connection/authentication only; sending is optional.' -ForegroundColor Cyan
@@ -907,6 +944,24 @@ try {
         Write-Host 'Successful confirmed configuration found: NO'
         Write-Host $recommendation
     }
+    if ($winner -and $confirmed) {
+        $script:FinalConnectionStatus = 'SUCCESS'
+        $script:FinalDeliveryStatus = if ($script:NodeAvailable) { 'NOT REQUESTED' } else { 'NOT AVAILABLE (Node/Nodemailer unavailable)' }
+        $script:FinalReason = if ($script:Native.ok) {
+            Protect-Text (Get-Value $script:Native 'reason' 'Connection and authentication succeeded.')
+        }
+        else {
+            'The native settings failed, but a secure alternative configuration was confirmed successfully.'
+        }
+    }
+    else {
+        $script:FinalConnectionStatus = 'FAILED'
+        $script:FinalDeliveryStatus = 'NOT AVAILABLE (connection/authentication failed)'
+        $failureStage = Protect-Text (Get-Value $script:Native 'stage' 'Unknown')
+        $failureDetail = Protect-Text (Get-Value $script:Native 'detail' (Get-Value $script:Native 'reason' 'No failure reason was returned.'))
+        $script:FinalReason = '{0}: {1}' -f $failureStage, $failureDetail
+    }
+    $script:FinalRecommendation = $recommendation
     Write-Host 'Validation results:'
     foreach ($entry in $script:Results) { Write-Host ('  {0}: {1} ({2})' -f $entry.name,$(if ($entry.ok) {'PASS'} else {$entry.stage}),$entry.engine) }
     if (-not $pythonValidation) { Write-Host '  Python validation: SKIPPED (see reason above).' }
@@ -923,13 +978,28 @@ try {
     # Sending is a separate opt-in and uses only a confirmed secure winner.
     if (-not $NoSendPrompt -and -not $NonInteractive -and $winner -and $confirmed -and $script:NodeAvailable -and -not $script:AuthBlocked) {
         if ((Ask 'Would you like to send an actual test email? [Y/N]' 'N') -eq 'Y') {
+            $script:FinalDeliveryStatus = 'NOT COMPLETED'
             $recipient = Ask 'Test recipient address'
             $sender = $script:Config.from
             if (-not $sender) { $sender = Ask 'Sender/from address' }
             if ($recipient -and $sender -and $recipient -notmatch '[\r\n]' -and $sender -notmatch '[\r\n]') {
                 $result = Invoke-Pipe $script:Worker @{action='test';kind=$(if($winner.name -eq $script:Native.name){'native'}else{'generic'});patch=(Convert-Fields $winner.patch);environment=$winner.environment;send=$true;to=$recipient;from=$sender}
-                $null = Record 'Operator-requested message' 'Nodemailer' $result
-            } else { Say SKIP 'Message test requires valid sender and recipient addresses.' }
+                $messageResult = Record 'Operator-requested message' 'Nodemailer' $result
+                if ($messageResult.ok) {
+                    $script:FinalDeliveryStatus = 'SUCCESS (accepted by SMTP server)'
+                    $script:FinalReason = Protect-Text (Get-Value $messageResult 'reason' 'The SMTP server accepted the test message.')
+                }
+                else {
+                    $script:FinalDeliveryStatus = 'FAILED'
+                    $messageStage = Protect-Text (Get-Value $messageResult 'stage' 'Unknown')
+                    $messageDetail = Protect-Text (Get-Value $messageResult 'detail' (Get-Value $messageResult 'reason' 'No failure reason was returned.'))
+                    $script:FinalReason = 'Message delivery {0}: {1}' -f $messageStage, $messageDetail
+                    $script:FinalRecommendation = Get-NextStep $messageStage
+                }
+            } else {
+                $script:FinalDeliveryStatus = 'NOT COMPLETED (invalid sender or recipient)'
+                Say SKIP 'Message test requires valid sender and recipient addresses.'
+            }
         }
     }
     if ($ReportPath) {
@@ -942,9 +1012,19 @@ try {
 } catch {
     # Avoid accidental credential leakage from PowerShell exception rendering.
     Say FAIL 'The diagnostic could not complete. Check the paths, runtime dependencies and input values.'
-    if ($_.Exception.Message -match '^(Provide |A valid |Port must |Invalid TLS |The supplied |The module/|Cannot load)') { Say INFO $_.Exception.Message }
-    else { Say INFO ('Failure location: script line {0}; {1}. Raw exception content suppressed.' -f $_.InvocationInfo.ScriptLineNumber,$_.Exception.GetType().Name) }
+    if ($_.Exception.Message -match '^(Provide |A valid |Port must |Invalid TLS |The supplied |The module/|Cannot load)') {
+        $script:FinalReason = Protect-Text $_.Exception.Message
+        Say INFO $_.Exception.Message
+    }
+    else {
+        $script:FinalReason = 'The diagnostic stopped at script line {0} with {1}; raw exception content was suppressed to protect credentials.' -f $_.InvocationInfo.ScriptLineNumber,$_.Exception.GetType().Name
+        Say INFO ('Failure location: script line {0}; {1}. Raw exception content suppressed.' -f $_.InvocationInfo.ScriptLineNumber,$_.Exception.GetType().Name)
+    }
+    $script:FinalConnectionStatus = 'FAILED'
+    $script:FinalDeliveryStatus = 'NOT AVAILABLE'
+    $script:FinalRecommendation = 'Check the selected path, runtime dependencies, and supplied values, then run the diagnostic again.'
 } finally {
+    Show-FinalSmtpTestSummary
     Stop-Worker $script:Worker
     $script:Worker=$null
     if ($script:Config) { if ($script:Config -is [Collections.IDictionary]) {$script:Config.password=''} elseif ($script:Config.PSObject.Properties['password']) {$script:Config.password=''} }

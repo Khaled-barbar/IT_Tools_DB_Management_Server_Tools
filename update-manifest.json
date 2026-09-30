@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "version": "7.9.3",
+  "version": "7.9.4",
   "releaseDate": "2026-09-30",
   "monitoring": {
     "version": "7.10.2",
@@ -37,15 +37,15 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "3D4D97A3332365D678216594F0CFF00E28426AFFB77A122D3BF29FFEBBF711B4"
+      "sha256": "A1406EF7B543F88C5568247D5C9E156DF9D265DA3E20B764FBA4E083779573E9"
     },
     {
       "path": "Invoke-SmtpDiagnostic.ps1",
-      "sha256": "9A99F88B0903469279457335B5973A2EFE423592B0C8B62D7B77AEC9F37E0A12"
+      "sha256": "15AFA06808FD2025CD15FC28A93C162D589CAD8E22A264A6A3D22F32E882EDD3"
     },
     {
       "path": "version.txt",
-      "sha256": "627CF48DFDF58078B1C320872C1F4D6C6178A9523748278B9FEF4D9DEE844E8F"
+      "sha256": "1FA50FEB875B6FE624060DD1A7FA06E8D87B88292564EA27D5B73FDA8CE68681"
     },
     {
       "path": "Test-DBConfigFile.ps1",

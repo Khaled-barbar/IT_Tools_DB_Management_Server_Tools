@@ -61,7 +61,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.9.3'
+$Script:ToolVersion = [version]'7.9.4'
 $Script:ToolReleaseDate = '2026-09-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -11305,36 +11305,45 @@ function Select-SmtpDiagnosticConfiguration {
 }
 
 function Invoke-SmtpDeliveryDiagnostic {
-    Clear-Host
-    Show-SectionTitle 'SMTP Delivery Diagnostic'
-    Write-Host 'Tests SMTP connectivity, TLS, and authentication without sending an email by default.' -ForegroundColor Cyan
-    Write-Host 'After a secure configuration is verified, you can optionally send one test message to confirm delivery.' -ForegroundColor Gray
-    Write-Host 'Passwords are masked, kept in memory, and are not written to IT Tools logs or command-line arguments.' -ForegroundColor Gray
+    while ($true) {
+        Clear-Host
+        Show-SectionTitle 'SMTP Delivery Diagnostic'
+        Write-Host 'Tests SMTP connectivity, TLS, and authentication without sending an email by default.' -ForegroundColor Cyan
+        Write-Host 'After a secure configuration is verified, you can optionally send one test message to confirm delivery.' -ForegroundColor Gray
+        Write-Host 'Passwords are masked, kept in memory, and are not written to IT Tools logs or command-line arguments.' -ForegroundColor Gray
 
-    $selection = Select-SmtpDiagnosticConfiguration
-    if ($null -eq $selection) { return }
+        $selection = Select-SmtpDiagnosticConfiguration
+        if ($null -eq $selection) { return }
 
-    $diagnosticPath = Get-RequiredScriptFolderFilePath `
-        -FileName 'Invoke-SmtpDiagnostic.ps1' `
-        -DownloadUrl 'https://raw.githubusercontent.com/Decide4action/IT_Tools_DB_Management_Server_Tools/main/Invoke-SmtpDiagnostic.ps1' `
-        -FeatureName 'SMTP Delivery Diagnostic'
+        $diagnosticPath = Get-RequiredScriptFolderFilePath `
+            -FileName 'Invoke-SmtpDiagnostic.ps1' `
+            -DownloadUrl 'https://raw.githubusercontent.com/Decide4action/IT_Tools_DB_Management_Server_Tools/main/Invoke-SmtpDiagnostic.ps1' `
+            -FeatureName 'SMTP Delivery Diagnostic'
 
-    Write-StreamingLog -Percent 20 -Step 'Verify diagnostic' -Description 'Validating the downloaded SMTP diagnostic before launch.'
-    Test-PowerShellCompanionScriptSyntax -ScriptPath $diagnosticPath -FeatureName 'SMTP Delivery Diagnostic'
-    Unblock-File -LiteralPath $diagnosticPath -ErrorAction SilentlyContinue
+        Write-StreamingLog -Percent 20 -Step 'Verify diagnostic' -Description 'Validating the downloaded SMTP diagnostic before launch.'
+        Test-PowerShellCompanionScriptSyntax -ScriptPath $diagnosticPath -FeatureName 'SMTP Delivery Diagnostic'
+        Unblock-File -LiteralPath $diagnosticPath -ErrorAction SilentlyContinue
 
-    if ($selection.Manual) {
-        Write-StreamingLog -Percent 50 -Step 'Launch diagnostic' -Description 'Starting manual SMTP configuration and delivery testing.'
-        & $diagnosticPath -Manual
+        if ($selection.Manual) {
+            Write-StreamingLog -Percent 50 -Step 'Launch diagnostic' -Description 'Starting manual SMTP configuration and delivery testing.'
+            & $diagnosticPath -Manual
+        }
+        else {
+            Write-Host "Selected dbconfig.js: $($selection.ConfigPath)" -ForegroundColor Cyan
+            Write-StreamingLog -Percent 50 -Step 'Launch diagnostic' -Description 'Testing the selected D4A SMTP configuration.'
+            & $diagnosticPath -ConfigPath $selection.ConfigPath
+        }
+
+        Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'SMTP Delivery Diagnostic closed.'
+        Write-Host ''
+        Write-Host '------------------------------------------------------------------------' -ForegroundColor DarkGray
+        while ($true) {
+            $nextAction = Read-Host 'Type R to restart the SMTP test, or q to return to Troubleshooting'
+            if (Test-IsBack $nextAction) { return }
+            if ($nextAction -ieq 'r') { break }
+            Write-Host 'Type R to restart, or q to go back.' -ForegroundColor Yellow
+        }
     }
-    else {
-        Write-Host "Selected dbconfig.js: $($selection.ConfigPath)" -ForegroundColor Cyan
-        Write-StreamingLog -Percent 50 -Step 'Launch diagnostic' -Description 'Testing the selected D4A SMTP configuration.'
-        & $diagnosticPath -ConfigPath $selection.ConfigPath
-    }
-
-    Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'SMTP Delivery Diagnostic closed.'
-    Pause-Screen
 }
 
 function Show-TroubleshootingMenu {
