@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.10.1
+# D4A-Monitor-Version: 7.10.2
 # D4A-Monitor-Release-Date: 2026-09-30
 
 <#
@@ -287,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.10.1'
+$script:MonitorVersion = '7.10.2'
 $script:MonitorReleaseDate = '2026-09-30'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -4911,6 +4911,59 @@ function Test-IsOptionalPlcNotConfiguredEvidence {
     )
 }
 
+function Get-D4AWindowsServiceComponentType {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $normalized = (($Text -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $null }
+
+    $hasD4AMarker = $normalized -match '(?i)\bDecide4Action\b|(?:^|[^a-z0-9])D4A'
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])data[\s_-]*collector(?:$|[^a-z0-9])') { return 'Data Collector' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?API(?:service)?(?:$|[^a-z0-9])') { return 'API' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?App(?:lication)?(?:service)?(?:$|[^a-z0-9])') { return 'App' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])watchdog(?:service)?(?:$|[^a-z0-9])') { return 'Watchdog' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])scheduler(?:service)?(?:$|[^a-z0-9])') { return 'Scheduler' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?MDC(?:service)?(?:$|[^a-z0-9])') { return 'MDC' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?PLC(?:service)?(?:$|[^a-z0-9])') { return 'PLC' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:mosquitto|mqtt)(?:$|[^a-z0-9])') { return 'Mosquitto/MQTT' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])nginx(?:$|[^a-z0-9])') { return 'Nginx' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])node[\s_-]*red(?:$|[^a-z0-9])') { return 'Node-RED' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])reverse[\s_-]*proxy(?:$|[^a-z0-9])') { return 'Reverse proxy' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:IIS|W3SVC)(?:$|[^a-z0-9])|world\s+wide\s+web\s+publishing\s+service|internet\s+information\s+services') { return 'IIS' }
+    return $null
+}
+
+function Resolve-WatchdogRenamedServiceEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Evidence,
+        [Parameter(Mandatory = $true)][object[]]$InstalledServices
+    )
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    $missingServiceMatch = [regex]::Match(
+        $normalized,
+        '(?i)\bservice\s+[''"](?<ServiceName>[^''"]+)[''"]\s+(?:was\s+)?not\s+found\b'
+    )
+    if (-not $missingServiceMatch.Success) { return $null }
+
+    $missingServiceName = $missingServiceMatch.Groups['ServiceName'].Value.Trim()
+    $componentType = Get-D4AWindowsServiceComponentType -Text $missingServiceName
+    if ([string]::IsNullOrWhiteSpace([string]$componentType)) { return $null }
+
+    $runningCounterparts = @($InstalledServices | Where-Object {
+            $candidateText = '{0} {1}' -f [string]$_.Name, [string]$_.DisplayName
+            (Get-D4AWindowsServiceComponentType -Text $candidateText) -eq $componentType -and
+            (Test-D4AWindowsServiceHealthy -Service $_)
+        })
+    if ($runningCounterparts.Count -eq 0) { return $null }
+
+    return [pscustomobject]@{
+        MissingServiceName = $missingServiceName
+        ComponentType      = $componentType
+        RunningServices    = @($runningCounterparts)
+    }
+}
+
 function Get-WatchdogEvidenceDisposition {
     param([Parameter(Mandatory = $true)][string]$Evidence)
 
@@ -5050,6 +5103,16 @@ function Test-WatchdogServiceLogs {
 
     Test-DataCollectorWatchdogHealth -WatchdogRoot $watchdogRoot
 
+    $installedWindowsServices = @()
+    try {
+        $installedWindowsServices = @(Get-SystemClassInstance -ClassName Win32_Service)
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+            'Unable to reconcile Watchdog service names with installed Windows services: {0}' -f $_.Exception.Message
+        )
+    }
+
     $since = (Get-Date).AddMinutes(-$LogLookbackMinutes)
     $todayFileName = '{0}.txt' -f (Get-Date -Format 'yyyyMMdd')
     $logFiles = [System.Collections.Generic.List[object]]::new()
@@ -5099,11 +5162,25 @@ function Test-WatchdogServiceLogs {
 
         $alertSamples = [System.Collections.Generic.List[string]]::new()
         $warningSamples = [System.Collections.Generic.List[string]]::new()
+        $renamedServiceResolutions = [System.Collections.Generic.List[string]]::new()
         $plcNotConfigured = $false
         foreach ($record in $records) {
             if ([datetime]$record.Time -lt $since) { continue }
             if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence ([string]$record.Text)) {
                 $plcNotConfigured = $true
+                continue
+            }
+            $renamedServiceResolution = Resolve-WatchdogRenamedServiceEvidence `
+                -Evidence ([string]$record.Text) `
+                -InstalledServices $installedWindowsServices
+            if ($null -ne $renamedServiceResolution) {
+                $runningNames = @(foreach ($runningService in @($renamedServiceResolution.RunningServices)) {
+                        '{0} [{1}]' -f (Get-D4AWindowsServiceDisplayName -Service $runningService), $runningService.Name
+                    }) -join ', '
+                $resolutionMessage = "Watchdog service '$($renamedServiceResolution.MissingServiceName)' was not found under its former name; running $($renamedServiceResolution.ComponentType) counterpart(s): $runningNames."
+                if (-not $renamedServiceResolutions.Contains($resolutionMessage)) {
+                    $renamedServiceResolutions.Add($resolutionMessage) | Out-Null
+                }
                 continue
             }
             if (Test-IsWatchdogSqlConnectivityEvidence -Evidence ([string]$record.Text)) {
@@ -5128,6 +5205,12 @@ function Test-WatchdogServiceLogs {
 
         $severity = if ($alertSamples.Count -gt 0) { 'Alert' } elseif ($warningSamples.Count -gt 0) { 'Warning' } else { $null }
         if ($null -eq $severity) {
+            if ($renamedServiceResolutions.Count -gt 0) {
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+                    'Watchdog missing-service evidence was soft-ignored after live service alias validation. {0}' -f
+                        (@($renamedServiceResolutions) -join ' ')
+                ) -Key $watchdogRuleKey
+            }
             if ($plcNotConfigured) {
                 $plcMessage = 'PLC/D4A_PLC is not configured on this server; the Watchdog PLC connection check was soft-ignored.'
                 Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message $plcMessage -Key 'diagnostics-watchdog-plc'

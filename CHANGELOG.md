@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.10.2 - 2026-09-30
+
+- Watchdog `service not found` evidence is now reconciled with live Windows services by component type. A former API, App, Data Collector, MDC, PLC, Mosquitto/MQTT, Nginx, Node-RED, reverse proxy, IIS, Watchdog, or Scheduler name is soft-ignored when a renamed `Running/OK` counterpart exists.
+- Alias resolution emits an explicit healthy result on the original Watchdog rule key, allowing previously delivered false missing-service alerts to send recovery notifications.
+
 ## Monitoring 7.10.1 - 2026-09-30
 
 - Disabled duplicate MDC, PLC, Mosquitto/MQTT, and Nginx services are soft-ignored when another renamed service in the same family is running. Existing per-service result keys are retained so an ongoing duplicate-service alert can recover.
