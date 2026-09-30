@@ -60,7 +60,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.9.1'
+$Script:ToolVersion = [version]'7.9.2'
 $Script:ToolReleaseDate = '2026-09-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -9367,6 +9367,53 @@ grant execute on object::sys.xp_readerrorlog to $quotedSqlUser;
     }
 }
 
+function Show-SqlSessionDetails {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SessionId
+    )
+
+    Clear-Host
+    Show-SectionTitle "SQL Session Details for Session $SessionId"
+
+    $metadata = [ordered]@{}
+    foreach ($property in $Session.PSObject.Properties) {
+        if ($property.Name -notin @('Current_Statement', 'SQL_Text')) {
+            $metadata[$property.Name] = $property.Value
+        }
+    }
+    Show-ConsoleResults -Data @([pscustomobject]$metadata)
+
+    Write-Host ""
+    Write-Host "Current SQL statement:" -ForegroundColor Cyan
+    if ([string]::IsNullOrWhiteSpace([string]$Session.Current_Statement)) {
+        Write-Host "No statement is currently executing. This session may be sleeping." -ForegroundColor Gray
+    }
+    else {
+        Write-Host ([string]$Session.Current_Statement) -ForegroundColor White
+    }
+
+    Write-Host ""
+    $sqlTextLabel = if ([string]::IsNullOrWhiteSpace([string]$Session.Request_Status)) {
+        'Most recently executed SQL command text:'
+    }
+    else {
+        'Full SQL command text currently being run:'
+    }
+    Write-Host $sqlTextLabel -ForegroundColor Cyan
+    if ([string]::IsNullOrWhiteSpace([string]$Session.SQL_Text)) {
+        Write-Host "SQL command text is not available for this session." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host ([string]$Session.SQL_Text) -ForegroundColor White
+    }
+
+    Pause-Screen
+}
+
 function Show-PendingSqlQueries {
     while ($true) {
         Clear-Host
@@ -9430,6 +9477,7 @@ outer apply sys.dm_exec_sql_text(coalesce(r.sql_handle, c.most_recent_sql_handle
 where s.is_user_process = 1
   and s.session_id <> @@spid
 order by
+    case when r.session_id is null then 1 else 0 end,
     case when s.open_transaction_count > 0 then 0 else 1 end,
     case when exists (
         select 1
@@ -9447,7 +9495,30 @@ order by
                 Pause-Screen
                 return
             }
-            Show-ConsoleResults -Data $results
+            $pendingQueries = @($results | Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_.Request_Status)
+            })
+            $sleepingSessions = @($results | Where-Object {
+                [string]::IsNullOrWhiteSpace([string]$_.Request_Status)
+            })
+
+            Write-Host ""
+            Show-SectionTitle "Pending SQL Queries ($($pendingQueries.Count))"
+            if ($pendingQueries.Count -eq 0) {
+                Write-Host "No pending SQL queries were found." -ForegroundColor Green
+            }
+            else {
+                Show-ConsoleResults -Data $pendingQueries
+            }
+
+            Write-Host ""
+            Show-SectionTitle "Sleeping User Sessions ($($sleepingSessions.Count))"
+            if ($sleepingSessions.Count -eq 0) {
+                Write-Host "No sleeping user sessions were found." -ForegroundColor Green
+            }
+            else {
+                Show-ConsoleResults -Data $sleepingSessions
+            }
         }
         catch {
             Show-LoggedError -Prefix "The pending-query check did not complete" -Context "Database Performance - pending SQL queries" -ErrorRecord $_
@@ -9527,7 +9598,7 @@ where s.is_user_process = 1
                     continue
                 }
 
-                Show-DatabasePerformanceOutput -Data $details -FileNamePrefix "SQL_Session_$sessionId" -Title "SQL Session Details for Session $sessionId"
+                Show-SqlSessionDetails -Session $details[0] -SessionId $sessionId
             }
             catch {
                 Show-LoggedError -Prefix "The full SQL command could not be loaded" -Context "Database Performance - pending SQL query details" -ErrorRecord $_

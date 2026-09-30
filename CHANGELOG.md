@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.9.2 - 2026-09-30
+
+- Split the SQL session diagnostic into **Pending SQL Queries** first and **Sleeping User Sessions** second for faster review.
+- Selecting a Session ID now prints the current statement and the full current or most recently executed SQL command in dedicated, readable output blocks.
+
 ## 7.9.1 - 2026-09-30
 
 - Expanded **Pending SQL queries** to include sleeping user sessions by starting from `sys.dm_exec_sessions` and using the connection's most recent SQL handle when no request is active.
