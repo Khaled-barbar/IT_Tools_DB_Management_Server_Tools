@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.10.0 - 2026-09-30
+
+- Soft-ignores Watchdog evidence when either the optional `PLC` or `D4A_PLC` service is not installed, and emits an explicit healthy result that can recover previously delivered missing-service alerts.
+- Database internal free-space alerts now require both less than 500 MB unallocated space and disabled file autogrowth. Low space with enabled autogrowth is healthy; restoring free space or enabling autogrowth sends recovery for an ongoing alert.
+- Database file results now include the physical filename and `AutoGrowthStatus`; an unknown autogrowth state is diagnostic-only and cannot falsely clear an active alert.
+
 ## Monitoring 7.9.1 - 2026-09-25
 
 - A previously delivered Watchdog SQL availability alert now receives one recovery notification as soon as every configured direct database probe successfully completes `SELECT 1`.

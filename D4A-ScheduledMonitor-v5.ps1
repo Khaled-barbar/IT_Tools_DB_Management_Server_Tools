@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.9.1
-# D4A-Monitor-Release-Date: 2026-09-25
+# D4A-Monitor-Version: 7.10.0
+# D4A-Monitor-Release-Date: 2026-09-30
 
 <#
 .SYNOPSIS
@@ -287,8 +287,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.9.1'
-$script:MonitorReleaseDate = '2026-09-25'
+$script:MonitorVersion = '7.10.0'
+$script:MonitorReleaseDate = '2026-09-30'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -1644,7 +1644,8 @@ through the configuration file.
 Database connectivity discovers dbconfig.js from active Data Collector service
 paths, decrypts its configured password only in memory, and runs SELECT 1 for
 each complete dbConfig object. The same connection checks non-log ROWS files in
-sys.database_files and alerts below 500 MB of unallocated internal space.
+sys.database_files and alerts only when unallocated internal space is below
+500 MB and file autogrowth is disabled.
 DatabaseConnectionTimeoutSeconds defaults to 10.
 
 Automatic updates
@@ -3343,22 +3344,36 @@ function Get-SystemClassInstance {
 
 function Test-D4AWindowsServices {
     $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $plcServices = @($services | Where-Object {
+            [string]$_.Name -match '(?i)^(?:D4A[_\s-]?)?PLC$' -or
+            [string]$_.DisplayName -match '(?i)^(?:D4A[_\s-]?)?PLC$'
+        })
     $matching = @(
         foreach ($service in $services) {
             $name = [string]$service.Name
             $displayName = [string]$service.DisplayName
             # D4A services consistently use the D4A or Decide4Action prefix.
-            # This includes compact names such as D4AMDCService and D4A_PLC.
+            # Exact PLC aliases are optional but monitored when installed.
             $serviceScopePattern = '(?i)^\s*(?:D4A|Decide4Action)'
             $matchesScope =
                 $name -match $serviceScopePattern -or
-                $displayName -match $serviceScopePattern
+                $displayName -match $serviceScopePattern -or
+                $name -match '(?i)^(?:D4A[_\s-]?)?PLC$' -or
+                $displayName -match '(?i)^(?:D4A[_\s-]?)?PLC$'
 
             if ($matchesScope) {
                 $service
             }
         }
     )
+
+    if ($plcServices.Count -eq 0) {
+        $plcMessage = 'Optional PLC/D4A_PLC Windows service is not installed; service monitoring was soft-ignored.'
+        # Both aliases are emitted so an alert delivered before the service was
+        # removed can transition to recovery without knowing its former name.
+        Add-MonitorResult -Severity OK -Category Server -Check 'Optional PLC service' -Message $plcMessage -Key 'server-windows-service-plc'
+        Add-MonitorResult -Severity OK -Category Server -Check 'Optional PLC service' -Message $plcMessage -Key 'server-windows-service-d4a-plc'
+    }
 
     if ($matching.Count -eq 0) {
         Add-MonitorResult -Severity Warning -Category Server -Check 'D4A Windows services' -Message (
@@ -3984,9 +3999,11 @@ function Get-D4ADatabaseFileSpace {
 SELECT
     name AS FileName,
     type_desc AS FileType,
+    physical_name AS PhysicalName,
     CAST(size AS decimal(19, 2)) / 128.0 AS TotalSizeMB,
     (CAST(size AS decimal(19, 2)) / 128.0) -
-        (CAST(FILEPROPERTY(name, 'SpaceUsed') AS decimal(19, 2)) / 128.0) AS UnallocatedFreeSpaceMB
+        (CAST(FILEPROPERTY(name, 'SpaceUsed') AS decimal(19, 2)) / 128.0) AS UnallocatedFreeSpaceMB,
+    CASE WHEN growth = 0 THEN 'DISABLED' ELSE 'ENABLED' END AS AutoGrowthStatus
 FROM sys.database_files
 WHERE type_desc = 'ROWS'
   AND name NOT LIKE '%[_]log';
@@ -3998,8 +4015,10 @@ WHERE type_desc = 'ROWS'
             $files.Add([pscustomobject]@{
                     FileName               = [string]$reader['FileName']
                     FileType               = [string]$reader['FileType']
+                    PhysicalName           = [string]$reader['PhysicalName']
                     TotalSizeMB            = [double]$reader['TotalSizeMB']
                     UnallocatedFreeSpaceMB = [double]$reader['UnallocatedFreeSpaceMB']
+                    AutoGrowthStatus       = [string]$reader['AutoGrowthStatus']
                 }) | Out-Null
         }
     }
@@ -4030,13 +4049,21 @@ function Add-D4ADatabaseFileSpaceResults {
         $totalSizeMb = [Math]::Round([double]$file.TotalSizeMB, 2)
         $rawFreeSpaceMb = [double]$file.UnallocatedFreeSpaceMB
         $freeSpaceMb = [Math]::Round($rawFreeSpaceMb, 2)
+        $physicalName = ([string]$file.PhysicalName).Trim()
+        $autoGrowthStatus = ([string]$file.AutoGrowthStatus).Trim().ToUpperInvariant()
+        if ($autoGrowthStatus -notin @('ENABLED', 'DISABLED')) { $autoGrowthStatus = 'UNKNOWN' }
         $check = 'Database internal free space - {0} / {1}' -f $DatabaseName, $file.FileName
         $key = 'database-unallocated-space-{0}-{1}' -f $DatabaseName, $file.FileName
-        $message = 'Database={0}; data file={1}; type={2}; total size={3} MB; unallocated internal free space={4} MB; alert threshold={5} MB.' -f
-            $DatabaseName, $file.FileName, $file.FileType, $totalSizeMb, $freeSpaceMb, $script:DatabaseUnallocatedSpaceAlertMb
+        $message = 'Database={0}; data file={1}; physical file={2}; type={3}; total size={4} MB; unallocated internal free space={5} MB; alert threshold={6} MB; AutoGrowthStatus={7}.' -f
+            $DatabaseName, $file.FileName, $physicalName, $file.FileType, $totalSizeMb, $freeSpaceMb, $script:DatabaseUnallocatedSpaceAlertMb, $autoGrowthStatus
 
-        if ($rawFreeSpaceMb -lt $script:DatabaseUnallocatedSpaceAlertMb) {
+        if ($rawFreeSpaceMb -lt $script:DatabaseUnallocatedSpaceAlertMb -and $autoGrowthStatus -eq 'DISABLED') {
             Add-MonitorResult -Severity Alert -Category Database -Check $check -Message $message -Key $key
+        }
+        elseif ($autoGrowthStatus -eq 'UNKNOWN') {
+            Add-MonitorResult -Severity Warning -Category Database -Check $check -Message (
+                '{0} AutoGrowthStatus could not be determined; no capacity alert or recovery was generated.' -f $message
+            ) -Key $key -NotificationEligible:$false
         }
         else {
             Add-MonitorResult -Severity OK -Category Database -Check $check -Message $message -Key $key
@@ -4818,7 +4845,7 @@ function Test-IsOptionalPlcNotConfiguredEvidence {
     if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
 
     return (
-        $normalized -match '(?i)\bservice\s+[''"]?D4A[_\s-]?PLC[''"]?\s+(?:was\s+)?not\s+found\b' -or
+        $normalized -match '(?i)\bservice\s+[''"]?(?:D4A[_\s-]?)?PLC[''"]?\s+(?:was\s+)?not\s+found\b' -or
         $normalized -match '(?i)\bskipping\s+PLC\s+connection\s+check\b'
     )
 }
@@ -4985,6 +5012,9 @@ function Test-WatchdogServiceLogs {
     foreach ($file in $logFiles) {
         if (Test-IsDataCollectorWatchdogFile -File $file) { continue }
         $serviceName = Split-Path -Leaf (Split-Path -Parent $file.FullName)
+        $isPlcServiceLog = $serviceName -match '(?i)^(?:D4A[_\s-]?)?PLC$'
+        $watchdogRuleKey = if ($isPlcServiceLog) { 'diagnostics-watchdog-plc' } else { 'diagnostics-watchdog-{0}' -f $serviceName }
+        $legacyWatchdogRuleKey = 'diagnostics-watchdog-{0}' -f $serviceName
         $lines = @((Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop))
         $entryTime = $file.LastWriteTime
         $records = [System.Collections.Generic.List[object]]::new()
@@ -5035,20 +5065,24 @@ function Test-WatchdogServiceLogs {
             }
         }
 
-        if ($plcNotConfigured) {
-            Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message (
-                'PLC is not configured on this server; the Watchdog PLC connection check was skipped.'
-            ) -Key 'diagnostics-watchdog-plc'
-        }
-
         $severity = if ($alertSamples.Count -gt 0) { 'Alert' } elseif ($warningSamples.Count -gt 0) { 'Warning' } else { $null }
-        if ($null -eq $severity) { continue }
+        if ($null -eq $severity) {
+            if ($plcNotConfigured) {
+                $plcMessage = 'PLC/D4A_PLC is not configured on this server; the Watchdog PLC connection check was soft-ignored.'
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message $plcMessage -Key 'diagnostics-watchdog-plc'
+                if ($isPlcServiceLog -and $legacyWatchdogRuleKey -ine 'diagnostics-watchdog-plc') {
+                    # Bridge alerts produced by releases that used the folder name in the rule key.
+                    Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message $plcMessage -Key $legacyWatchdogRuleKey
+                }
+            }
+            continue
+        }
         $samples = if ($severity -eq 'Alert') { $alertSamples } else { $warningSamples }
         $selectedSamples = @($samples | Select-Object -First 3)
         $evidenceLabel = if ($severity -eq 'Alert') { 'actionable failure evidence' } else { 'diagnostic or recovery evidence' }
         Add-MonitorResult -Severity $severity -Category Diagnostics -Check 'Watchdog service logs' -Message (
             'Recent Watchdog {0}; service={1}; file={2}; sample={3}' -f $evidenceLabel, $serviceName, $file.FullName, ($selectedSamples -join ' || ')
-        ) -Key ('diagnostics-watchdog-{0}' -f $serviceName) -NotificationEligible:($severity -eq 'Alert')
+        ) -Key $watchdogRuleKey -NotificationEligible:($severity -eq 'Alert')
     }
     Add-WatchdogSqlConnectivityResult -EvidenceRecords $sqlConnectivityRecords.ToArray()
 }
