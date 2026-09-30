@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.9.0 - 2026-09-30
+
+- Added a Windows Authentication option immediately after the manual SQL credential option in Database Tools. It uses the current Windows account, supports detected or manually entered SQL Server instances, and presents a numbered database selection.
+- Propagated Windows Authentication through shared `Invoke-Sqlcmd`, SQL-file execution, database search, performance, import/export, and transactional ADO.NET connection paths without storing a database password.
+
 ## Monitoring 7.10.2 - 2026-09-30
 
 - Watchdog `service not found` evidence is now reconciled with live Windows services by component type. A former API, App, Data Collector, MDC, PLC, Mosquitto/MQTT, Nginx, Node-RED, reverse proxy, IIS, Watchdog, or Scheduler name is soft-ignored when a renamed `Running/OK` counterpart exists.

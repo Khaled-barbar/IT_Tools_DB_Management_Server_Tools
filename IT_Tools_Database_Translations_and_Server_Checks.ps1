@@ -54,13 +54,14 @@ $Global:SelectedInstance = ""
 $Global:SelectedDb       = ""
 $Global:User             = ""
 $Global:PlainPass        = ""
+$Global:UseWindowsAuthentication = $false
 
 $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.8.1'
-$Script:ToolReleaseDate = '2026-09-25'
+$Script:ToolVersion = [version]'7.9.0'
+$Script:ToolReleaseDate = '2026-09-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1106,6 +1107,7 @@ function Clear-DatabaseConnection {
     $Global:SelectedDb       = ""
     $Global:User             = ""
     $Global:PlainPass        = ""
+    $Global:UseWindowsAuthentication = $false
 }
 
 function Get-ConnectionTextValue {
@@ -1201,10 +1203,11 @@ function Get-DatabaseConnectionSettings {
     $password = Get-ConnectionTextValue -Value $Global:PlainPass -Purpose "database password" -PreferredProperties @('Password')
 
     return [pscustomobject]@{
-        Instance = $instance
-        Database = $database
-        User     = $user
-        Password = $password
+        Instance              = $instance
+        Database              = $database
+        User                  = $user
+        Password              = $password
+        WindowsAuthentication = [bool]$Global:UseWindowsAuthentication
     }
 }
 
@@ -1345,8 +1348,9 @@ function New-InvokeSqlcmdConnectionString {
     param(
         [Parameter(Mandatory = $true)][string]$ServerInstance,
         [string]$Database,
-        [Parameter(Mandatory = $true)][string]$Username,
-        [Parameter(Mandatory = $true)][string]$Password
+        [string]$Username,
+        [AllowEmptyString()][string]$Password,
+        [switch]$UseWindowsAuthentication
     )
 
     $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
@@ -1354,8 +1358,16 @@ function New-InvokeSqlcmdConnectionString {
     if (-not [string]::IsNullOrWhiteSpace($Database)) {
         $builder["Initial Catalog"] = $Database
     }
-    $builder["User ID"] = $Username
-    $builder["Password"] = $Password
+    if ($UseWindowsAuthentication) {
+        $builder["Integrated Security"] = $true
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($Username)) {
+            throw 'A SQL Server user name is required for SQL authentication.'
+        }
+        $builder["User ID"] = $Username
+        $builder["Password"] = $Password
+    }
     $builder["Encrypt"] = $false
     $builder["TrustServerCertificate"] = $true
 
@@ -1366,8 +1378,9 @@ function Invoke-D4ASqlcmd {
     param(
         [Parameter(Mandatory = $true)][string]$ServerInstance,
         [string]$Database,
-        [Parameter(Mandatory = $true)][string]$Username,
-        [Parameter(Mandatory = $true)][string]$Password,
+        [string]$Username,
+        [AllowEmptyString()][string]$Password,
+        [switch]$UseWindowsAuthentication,
         [string]$Query,
         [string]$InputFile,
         [int]$QueryTimeout = 0
@@ -1375,10 +1388,16 @@ function Invoke-D4ASqlcmd {
 
     $sqlParams = @{
         ServerInstance = $ServerInstance
-        Username       = $Username
-        Password       = $Password
         QueryTimeout   = $QueryTimeout
         ErrorAction    = 'Stop'
+    }
+
+    if (-not $UseWindowsAuthentication) {
+        if ([string]::IsNullOrWhiteSpace($Username)) {
+            throw 'A SQL Server user name is required for SQL authentication.'
+        }
+        $sqlParams['Username'] = $Username
+        $sqlParams['Password'] = $Password
     }
 
     if (-not [string]::IsNullOrWhiteSpace($Database)) {
@@ -1408,7 +1427,12 @@ function Invoke-D4ASqlcmd {
         if ((Test-IsSqlCertificateTrustError -ErrorRecord $_) -and
             $null -ne $command -and
             $command.Parameters.ContainsKey('ConnectionString')) {
-            $connectionString = New-InvokeSqlcmdConnectionString -ServerInstance $ServerInstance -Database $Database -Username $Username -Password $Password
+            $connectionString = New-InvokeSqlcmdConnectionString `
+                -ServerInstance $ServerInstance `
+                -Database $Database `
+                -Username $Username `
+                -Password $Password `
+                -UseWindowsAuthentication:$UseWindowsAuthentication
             $fallbackParams = @{
                 ConnectionString = $connectionString
                 QueryTimeout     = $QueryTimeout
@@ -4268,11 +4292,14 @@ function Connect-DatabaseAutomatically {
     $connections = @(Get-D4ADataCollectorDatabaseConnections)
     if ($connections.Count -eq 0) {
         Write-Host "No active Decide4Action Data Collector installation with a usable Services\\API\\dbconfig.js file was found." -ForegroundColor Yellow
+        Write-Host "[M] Connect manually with a SQL Server user name and password" -ForegroundColor Gray
+        Write-Host "[W] Connect with the current Windows account" -ForegroundColor Gray
         while ($true) {
-            $choice = Read-Host "Type M for manual connection or q to go back"
+            $choice = Read-Host "Choose a connection mode (M or W; q to go back)"
             if (Test-IsBack $choice) { return 'cancel' }
             if ($choice -ieq 'm') { return 'manual' }
-            Write-Host "Type M for manual connection or q to go back." -ForegroundColor Yellow
+            if ($choice -ieq 'w') { return 'windows' }
+            Write-Host "Type M for SQL credentials, W for Windows Authentication, or q to go back." -ForegroundColor Yellow
         }
     }
 
@@ -4281,12 +4308,14 @@ function Connect-DatabaseAutomatically {
         $connection = $connections[$index]
         Write-Host "[$($index + 1)] $($connection.Database)"
     }
-    Write-Host "[M] Use the manual SQL Server connection mode" -ForegroundColor Gray
+    Write-Host "[M] Connect manually with a SQL Server user name and password" -ForegroundColor Gray
+    Write-Host "[W] Connect with the current Windows account" -ForegroundColor Gray
 
     while ($true) {
-        $selection = Read-Host "Choose an application database (M for manual; q to go back)"
+        $selection = Read-Host "Choose an application database (M for manual, W for Windows Authentication; q to go back)"
         if (Test-IsBack $selection) { return 'cancel' }
         if ($selection -ieq 'm') { return 'manual' }
+        if ($selection -ieq 'w') { return 'windows' }
 
         $selectedIndex = 0
         if (-not ([int]::TryParse($selection, [ref]$selectedIndex)) -or
@@ -4306,6 +4335,7 @@ function Connect-DatabaseAutomatically {
             $Global:SelectedDb = $selectedConnection.Database
             $Global:User = $selectedConnection.User
             $Global:PlainPass = $sqlPassword
+            $Global:UseWindowsAuthentication = $false
             $sqlPassword = $null
 
             Write-Host "Connected to $($Global:SelectedInstance), database $($Global:SelectedDb)." -ForegroundColor Green
@@ -4346,6 +4376,128 @@ function Get-InstanceNames {
     }
     catch {
         return @()
+    }
+}
+
+function Connect-DatabaseWithWindowsAuthentication {
+    if (-not [string]::IsNullOrWhiteSpace($Global:SelectedDb)) {
+        return
+    }
+
+    if (-not (Test-SqlCommandAvailable)) { return }
+
+    Clear-Host
+    Show-SectionTitle "Connect with Windows Authentication"
+    Write-Host "The current Windows account will be used. No database user name or password is required." -ForegroundColor Cyan
+    Write-Host "Type 'q' at any prompt to go back." -ForegroundColor DarkGray
+    Write-Host ""
+
+    try {
+        $windowsIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    }
+    catch {
+        $windowsIdentity = '{0}\{1}' -f $env:USERDOMAIN, $env:USERNAME
+    }
+    Write-Host "Windows account: $windowsIdentity" -ForegroundColor Gray
+
+    $instanceNames = Get-InstanceNames
+    if ($instanceNames.Count -eq 0) {
+        while ($true) {
+            $enteredInstance = Read-Host "Enter the SQL Server name or instance (example: localhost or SERVER\INSTANCE)"
+            if (Test-IsBack $enteredInstance) { Clear-DatabaseConnection; return }
+
+            $enteredInstance = Normalize-UserPath $enteredInstance
+            if (-not [string]::IsNullOrWhiteSpace($enteredInstance)) {
+                $Global:SelectedInstance = $enteredInstance
+                break
+            }
+            Write-Host "Please enter a SQL Server name or type 'q' to go back." -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host ""
+        Write-Host "Detected SQL Server instances:" -ForegroundColor Cyan
+        for ($index = 0; $index -lt $instanceNames.Count; $index++) {
+            Write-Host "[$($index + 1)] $($instanceNames[$index])"
+        }
+        Write-Host "[M] Enter a server name manually"
+
+        while ($true) {
+            $selection = Read-Host "Choose a SQL Server connection"
+            if (Test-IsBack $selection) { Clear-DatabaseConnection; return }
+
+            if ($selection -ieq 'm') {
+                $manualInstance = Read-Host "Enter the SQL Server name or instance"
+                if (Test-IsBack $manualInstance) { Clear-DatabaseConnection; return }
+
+                $manualInstance = Normalize-UserPath $manualInstance
+                if (-not [string]::IsNullOrWhiteSpace($manualInstance)) {
+                    $Global:SelectedInstance = $manualInstance
+                    break
+                }
+                Write-Host "Please enter a SQL Server name." -ForegroundColor Yellow
+                continue
+            }
+
+            $selectedInstanceIndex = 0
+            if ([int]::TryParse($selection, [ref]$selectedInstanceIndex) -and
+                $selectedInstanceIndex -ge 1 -and
+                $selectedInstanceIndex -le $instanceNames.Count) {
+                $Global:SelectedInstance = $instanceNames[$selectedInstanceIndex - 1]
+                break
+            }
+            Write-Host "That is not a valid choice. Try again." -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Loading available databases with Windows Authentication..." -ForegroundColor Gray
+    $databaseQuery = 'select name from sys.databases where database_id > 4 order by name'
+
+    try {
+        $databaseList = @(
+            Invoke-D4ASqlcmd `
+                -ServerInstance $Global:SelectedInstance `
+                -UseWindowsAuthentication `
+                -Query $databaseQuery `
+                -QueryTimeout 30 |
+                Select-Object -ExpandProperty name
+        )
+        if ($databaseList.Count -eq 0) {
+            throw 'No application databases were found or the Windows account cannot list them.'
+        }
+
+        Write-Host ""
+        Write-Host "Available databases:" -ForegroundColor Cyan
+        for ($index = 0; $index -lt $databaseList.Count; $index++) {
+            Write-Host "[$($index + 1)] $($databaseList[$index])"
+        }
+
+        while ($true) {
+            $databaseSelection = Read-Host "Choose a database"
+            if (Test-IsBack $databaseSelection) { Clear-DatabaseConnection; return }
+
+            $selectedDatabaseIndex = 0
+            if ([int]::TryParse($databaseSelection, [ref]$selectedDatabaseIndex) -and
+                $selectedDatabaseIndex -ge 1 -and
+                $selectedDatabaseIndex -le $databaseList.Count) {
+                $Global:SelectedDb = $databaseList[$selectedDatabaseIndex - 1]
+                break
+            }
+            Write-Host "That is not a valid database choice. Try again." -ForegroundColor Yellow
+        }
+
+        $Global:User = $windowsIdentity
+        $Global:PlainPass = ''
+        $Global:UseWindowsAuthentication = $true
+        Write-Host ""
+        Write-Host "Connected to $($Global:SelectedInstance), database $($Global:SelectedDb), using Windows Authentication." -ForegroundColor Green
+        Start-Sleep -Seconds 1
+    }
+    catch {
+        Show-LoggedError -Prefix "Could not connect with Windows Authentication" -Context "Connect to SQL Server with Windows Authentication" -ErrorRecord $_
+        Clear-DatabaseConnection
+        Pause-Screen
     }
 }
 
@@ -4421,6 +4573,7 @@ function Connect-DatabaseManually {
     $rawPass = Read-PasswordWithClipboardSupport -Prompt "Database password"
     if (Test-IsBack $rawPass) { Clear-DatabaseConnection; return }
     $Global:PlainPass = $rawPass
+    $Global:UseWindowsAuthentication = $false
 
     Write-Host ""
     Write-Host "Loading available databases..." -ForegroundColor Gray
@@ -4475,13 +4628,17 @@ function Connect-Database {
     Clear-Host
     Show-SectionTitle "Connect to SQL Server"
     Write-Host "IT Tools can use the encrypted connection already configured for an active Decide4Action installation." -ForegroundColor White
-    Write-Host "Type M at the database selection prompt to use the existing manual SQL Server connection mode." -ForegroundColor Gray
+    Write-Host "Type M at the database selection prompt to connect manually with SQL credentials." -ForegroundColor Gray
+    Write-Host "Type W to connect with the current Windows account." -ForegroundColor Gray
     Write-Host "Type q at any prompt to go back." -ForegroundColor DarkGray
     Write-Host ""
 
     $connectionResult = Connect-DatabaseAutomatically
     if ($connectionResult -eq 'manual') {
         Connect-DatabaseManually
+    }
+    elseif ($connectionResult -eq 'windows') {
+        Connect-DatabaseWithWindowsAuthentication
     }
 }
 
@@ -4493,7 +4650,16 @@ function Invoke-TranslationQuery {
         throw "No database is selected. Please connect to a database first."
     }
 
-    Invoke-D4ASqlcmd -ServerInstance $settings.Instance -Database $settings.Database -Username $settings.User -Password $settings.Password -Query $Query -QueryTimeout 0
+    $sqlParameters = @{
+        ServerInstance           = $settings.Instance
+        Database                 = $settings.Database
+        Username                 = $settings.User
+        Password                 = $settings.Password
+        UseWindowsAuthentication = [bool]$settings.WindowsAuthentication
+        Query                    = $Query
+        QueryTimeout             = 0
+    }
+    Invoke-D4ASqlcmd @sqlParameters
 }
 
 function Invoke-DatabaseSearchQuery {
@@ -4551,7 +4717,16 @@ function Invoke-TranslationSqlFile {
         throw "No database is selected. Please connect to a database first."
     }
 
-    Invoke-D4ASqlcmd -ServerInstance $settings.Instance -Database $settings.Database -Username $settings.User -Password $settings.Password -InputFile $resolvedPath -QueryTimeout 0
+    $sqlParameters = @{
+        ServerInstance           = $settings.Instance
+        Database                 = $settings.Database
+        Username                 = $settings.User
+        Password                 = $settings.Password
+        UseWindowsAuthentication = [bool]$settings.WindowsAuthentication
+        InputFile                = $resolvedPath
+        QueryTimeout             = 0
+    }
+    Invoke-D4ASqlcmd @sqlParameters
 }
 
 function Get-RequiredScriptFolderFilePath {
@@ -4680,8 +4855,13 @@ function New-TranslationSqlConnection {
     $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
     $builder["Data Source"] = $settings.Instance
     $builder["Initial Catalog"] = $settings.Database
-    $builder["User ID"] = $settings.User
-    $builder["Password"] = $settings.Password
+    if ($settings.WindowsAuthentication) {
+        $builder["Integrated Security"] = $true
+    }
+    else {
+        $builder["User ID"] = $settings.User
+        $builder["Password"] = $settings.Password
+    }
     $builder["Encrypt"] = $false
     $builder["TrustServerCertificate"] = $true
 
@@ -9152,9 +9332,13 @@ function Show-DatabaseErrorLogs {
         [void](Write-ToolErrorLog -Context "Database Performance - database error log initial read" -ErrorRecord $initialError)
         $settings = Get-DatabaseConnectionSettings
         $sqlUser = [string]$settings.User
+        if ($settings.WindowsAuthentication -and [string]::IsNullOrWhiteSpace($sqlUser)) {
+            $sqlUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        }
         $quotedSqlUser = Get-QuotedSqlColumnName -ColumnName $sqlUser
 
-        Write-Host "The current SQL user '$sqlUser' could not read the SQL Server error log." -ForegroundColor Yellow
+        $identityLabel = if ($settings.WindowsAuthentication) { 'Windows identity' } else { 'SQL user' }
+        Write-Host "The current $identityLabel '$sqlUser' could not read the SQL Server error log." -ForegroundColor Yellow
         Write-Host "The script can try to grant EXECUTE on sys.xp_readerrorlog in master to this user." -ForegroundColor Yellow
         $confirm = Read-Host "Type GRANT to apply this permission, or q to go back"
         if (Test-IsBack $confirm) { return }
