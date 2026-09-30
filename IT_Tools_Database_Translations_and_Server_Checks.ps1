@@ -33,6 +33,7 @@
 #   3. Troubleshooting:
 #      - Diagnose a D4A dbconfig.js file
 #      - Dry-run and explain an installed D4A Watchdog
+#      - Test SMTP connectivity, authentication, and optional message delivery
 #   4. Site monitoring:
 #      - Deploy and schedule the D4A health and performance monitor
 #   5. Logs:
@@ -60,7 +61,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.9.2'
+$Script:ToolVersion = [version]'7.9.3'
 $Script:ToolReleaseDate = '2026-09-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -4228,10 +4229,10 @@ function Get-D4ADatabaseConfigFromFile {
     return $configurations.ToArray()
 }
 
-function Get-D4ADataCollectorDatabaseConnections {
+function Get-D4ADbConfigFileCandidates {
     $services = @()
     try {
-        $services = @(Invoke-OperationWithTimeout -OperationName "reading active Decide4Action Data Collector services" -TimeoutSeconds $Script:ServerCheckCimTimeoutSeconds -ScriptBlock {
+        $services = @(Invoke-OperationWithTimeout -OperationName "detecting D4A dbconfig.js files" -TimeoutSeconds $Script:ServerCheckCimTimeoutSeconds -ScriptBlock {
             Get-CimInstance -ClassName Win32_Service -ErrorAction Stop |
                 Where-Object {
                     ($_.Name -match '(?i)^(decide4action|d4a).*data\s*collector' -or
@@ -4245,9 +4246,8 @@ function Get-D4ADataCollectorDatabaseConnections {
         return @()
     }
 
-    $connections = [System.Collections.Generic.List[object]]::new()
+    $candidates = [System.Collections.Generic.List[object]]::new()
     $seenConfigPaths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $seenConnections = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($service in $services) {
         $executablePath = Get-D4AServiceExecutablePath -ServicePath ([string]$service.PathName)
         if ([string]::IsNullOrWhiteSpace($executablePath)) { continue }
@@ -4260,16 +4260,37 @@ function Get-D4ADataCollectorDatabaseConnections {
             $configPath = (Get-Item -LiteralPath $configPath -ErrorAction Stop).FullName
             if (-not $seenConfigPaths.Add($configPath)) { continue }
 
-            $configs = @(Get-D4ADatabaseConfigFromFile -ConfigPath $configPath)
+            $candidates.Add([pscustomobject]@{
+                InstallationName = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) { [string]$service.Name } else { [string]$service.DisplayName }
+                ServiceName      = [string]$service.Name
+                AppRoot         = $appRoot
+                ConfigPath      = $configPath
+            }) | Out-Null
+        }
+        catch {
+            # Ignore incomplete service paths and retain only installed configuration files.
+        }
+    }
+
+    return $candidates.ToArray()
+}
+
+function Get-D4ADataCollectorDatabaseConnections {
+    $configFiles = @(Get-D4ADbConfigFileCandidates)
+    $connections = [System.Collections.Generic.List[object]]::new()
+    $seenConnections = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($configFile in $configFiles) {
+        try {
+            $configs = @(Get-D4ADatabaseConfigFromFile -ConfigPath $configFile.ConfigPath)
             foreach ($config in $configs) {
-                $connectionKey = '{0}|{1}|{2}|{3}' -f $configPath, $config.ServerInstance, $config.Database, $config.User
+                $connectionKey = '{0}|{1}|{2}|{3}' -f $configFile.ConfigPath, $config.ServerInstance, $config.Database, $config.User
                 if (-not $seenConnections.Add($connectionKey)) { continue }
 
                 $connections.Add([pscustomobject]@{
-                    InstallationName  = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) { [string]$service.Name } else { [string]$service.DisplayName }
-                    ServiceName       = [string]$service.Name
-                    AppRoot           = $appRoot
-                    ConfigPath        = $configPath
+                    InstallationName  = $configFile.InstallationName
+                    ServiceName       = $configFile.ServiceName
+                    AppRoot           = $configFile.AppRoot
+                    ConfigPath        = $configFile.ConfigPath
                     ConfigName        = $config.ConfigName
                     Server            = $config.Server
                     ServerInstance    = $config.ServerInstance
@@ -4281,7 +4302,8 @@ function Get-D4ADataCollectorDatabaseConnections {
             }
         }
         catch {
-            # Ignore incomplete installations and retain only usable database configurations.
+            # SMTP-only or incomplete configurations are valid discovery results,
+            # but are not usable as automatic database connections.
         }
     }
 
@@ -11246,6 +11268,75 @@ function Invoke-WatchdogChecker {
     Pause-Screen
 }
 
+function Select-SmtpDiagnosticConfiguration {
+    $configFiles = @(Get-D4ADbConfigFileCandidates)
+
+    while ($true) {
+        Write-Host ''
+        if ($configFiles.Count -gt 0) {
+            Write-Host 'Detected D4A dbconfig.js files:' -ForegroundColor Cyan
+            for ($index = 0; $index -lt $configFiles.Count; $index++) {
+                Write-Host "[$($index + 1)] $($configFiles[$index].ConfigPath)"
+            }
+        }
+        else {
+            Write-Host 'No dbconfig.js file was detected from an active Decide4Action Data Collector service.' -ForegroundColor Yellow
+        }
+        Write-Host '[M] Enter SMTP settings manually' -ForegroundColor Gray
+        Write-Host '[q] Back to Troubleshooting' -ForegroundColor DarkGray
+
+        $selection = Read-Host 'Choose a dbconfig.js file number, M for manual SMTP settings, or q to go back'
+        if (Test-IsBack $selection) { return $null }
+        if ($selection -ieq 'm') {
+            return [pscustomobject]@{ Manual = $true; ConfigPath = '' }
+        }
+
+        $selectedIndex = 0
+        if ([int]::TryParse($selection, [ref]$selectedIndex) -and
+            $selectedIndex -ge 1 -and $selectedIndex -le $configFiles.Count) {
+            return [pscustomobject]@{
+                Manual     = $false
+                ConfigPath = [string]$configFiles[$selectedIndex - 1].ConfigPath
+            }
+        }
+
+        Write-Host 'Enter a displayed number, M, or q.' -ForegroundColor Yellow
+    }
+}
+
+function Invoke-SmtpDeliveryDiagnostic {
+    Clear-Host
+    Show-SectionTitle 'SMTP Delivery Diagnostic'
+    Write-Host 'Tests SMTP connectivity, TLS, and authentication without sending an email by default.' -ForegroundColor Cyan
+    Write-Host 'After a secure configuration is verified, you can optionally send one test message to confirm delivery.' -ForegroundColor Gray
+    Write-Host 'Passwords are masked, kept in memory, and are not written to IT Tools logs or command-line arguments.' -ForegroundColor Gray
+
+    $selection = Select-SmtpDiagnosticConfiguration
+    if ($null -eq $selection) { return }
+
+    $diagnosticPath = Get-RequiredScriptFolderFilePath `
+        -FileName 'Invoke-SmtpDiagnostic.ps1' `
+        -DownloadUrl 'https://raw.githubusercontent.com/Decide4action/IT_Tools_DB_Management_Server_Tools/main/Invoke-SmtpDiagnostic.ps1' `
+        -FeatureName 'SMTP Delivery Diagnostic'
+
+    Write-StreamingLog -Percent 20 -Step 'Verify diagnostic' -Description 'Validating the downloaded SMTP diagnostic before launch.'
+    Test-PowerShellCompanionScriptSyntax -ScriptPath $diagnosticPath -FeatureName 'SMTP Delivery Diagnostic'
+    Unblock-File -LiteralPath $diagnosticPath -ErrorAction SilentlyContinue
+
+    if ($selection.Manual) {
+        Write-StreamingLog -Percent 50 -Step 'Launch diagnostic' -Description 'Starting manual SMTP configuration and delivery testing.'
+        & $diagnosticPath -Manual
+    }
+    else {
+        Write-Host "Selected dbconfig.js: $($selection.ConfigPath)" -ForegroundColor Cyan
+        Write-StreamingLog -Percent 50 -Step 'Launch diagnostic' -Description 'Testing the selected D4A SMTP configuration.'
+        & $diagnosticPath -ConfigPath $selection.ConfigPath
+    }
+
+    Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'SMTP Delivery Diagnostic closed.'
+    Pause-Screen
+}
+
 function Show-TroubleshootingMenu {
     while ($true) {
         Clear-Host
@@ -11254,6 +11345,7 @@ function Show-TroubleshootingMenu {
         Write-Host ''
         Write-Host '1) DBConfig.js Diagnostic'
         Write-Host '2) Watchdog Checker'
+        Write-Host '3) SMTP Delivery Diagnostic'
         Write-Host 'q) Back to main menu'
         Write-Host '------------------------------------------------------------------------'
         $choice = Read-Host 'Choose an option'
@@ -11262,6 +11354,7 @@ function Show-TroubleshootingMenu {
         switch ($choice) {
             '1' { Invoke-LoggedToolAction -Context 'Troubleshooting - DBConfig.js Diagnostic' -Action { Invoke-DbConfigDiagnostic } }
             '2' { Invoke-LoggedToolAction -Context 'Troubleshooting - Watchdog Checker' -Action { Invoke-WatchdogChecker } }
+            '3' { Invoke-LoggedToolAction -Context 'Troubleshooting - SMTP Delivery Diagnostic' -Action { Invoke-SmtpDeliveryDiagnostic } }
             default {
                 Write-Host 'That is not a valid choice. Try again.' -ForegroundColor Yellow
                 Start-Sleep -Seconds 1

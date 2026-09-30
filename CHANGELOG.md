@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.9.3 - 2026-09-30
+
+- Added **SMTP Delivery Diagnostic** to Troubleshooting as a verified, independently updateable companion script.
+- Added numbered automatic discovery of `dbconfig.js` files from active Decide4Action Data Collector installations, plus `M` for masked manual SMTP host, port, TLS, username, and password entry.
+- SMTP checks verify connectivity, TLS, and authentication without sending by default, with a separate opt-in test message after a secure configuration succeeds.
+
 ## 7.9.2 - 2026-09-30
 
 - Split the SQL session diagnostic into **Pending SQL Queries** first and **Sleeping User Sessions** second for faster review.
