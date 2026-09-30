@@ -60,7 +60,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.9.0'
+$Script:ToolVersion = [version]'7.9.1'
 $Script:ToolReleaseDate = '2026-09-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -9371,31 +9371,79 @@ function Show-PendingSqlQueries {
     while ($true) {
         Clear-Host
         Show-SectionTitle "Pending SQL Queries"
-        Write-Host "Shows active SQL requests and their start time. SQL command text is shortened to 50 characters." -ForegroundColor Cyan
+        Write-Host "Shows active requests and sleeping user sessions, including blocking, waits, transactions, timing, and recent SQL text." -ForegroundColor Cyan
+        Write-Host "SQL text is shortened in the list; select any Session_ID to view the full current or most recently executed batch." -ForegroundColor Gray
         Write-Host "Type q to return to Database Performance." -ForegroundColor DarkGray
 
         try {
-            Write-StreamingLog -Percent 20 -Step "Collect" -Description "Checking active SQL Server requests."
+            Write-StreamingLog -Percent 20 -Step "Collect" -Description "Checking active and sleeping SQL Server user sessions."
             $query = @"
 select
-    r.session_id as Session_ID,
-    r.status as Status,
+    s.session_id as Session_ID,
+    s.status as Session_Status,
+    r.status as Request_Status,
     r.command as Command,
-    r.start_time as Start_Time,
-    datediff(second, r.start_time, getdate()) as Running_Seconds,
+    r.blocking_session_id as Blocking_Session_ID,
+    case
+        when exists (
+            select 1
+            from sys.dm_exec_requests blocked_request
+            where blocked_request.blocking_session_id = s.session_id
+        ) then 'YES'
+        else 'NO'
+    end as Is_Blocking_Other_Session,
+    r.wait_type as Wait_Type,
+    r.wait_time as Wait_Time_ms,
+    r.wait_resource as Wait_Resource,
+    s.open_transaction_count as Open_Transaction_Count,
+    r.start_time as Request_Start_Time,
+    case
+        when r.start_time is not null then datediff(second, r.start_time, getdate())
+    end as Running_Seconds,
+    s.last_request_start_time as Last_Request_Start_Time,
+    s.last_request_end_time as Last_Request_End_Time,
+    case
+        when r.session_id is null and s.last_request_end_time is not null
+            then datediff(second, s.last_request_end_time, getdate())
+    end as Idle_Seconds,
+    s.login_name as Login_Name,
     s.host_name as Host_Name,
     s.program_name as Program_Name,
-    left(t.text, 50) as SQL_Command_Preview
-from sys.dm_exec_requests r
-inner join sys.dm_exec_sessions s on r.session_id = s.session_id
-cross apply sys.dm_exec_sql_text(r.sql_handle) t
-where r.session_id <> @@spid
-order by r.start_time;
+    db_name(coalesce(r.database_id, s.database_id)) as Database_Name,
+    case
+        when r.sql_handle is not null then substring(
+            sql_text.text,
+            (r.statement_start_offset / 2) + 1,
+            ((case
+                when r.statement_end_offset = -1 then datalength(sql_text.text)
+                else r.statement_end_offset
+            end - r.statement_start_offset) / 2) + 1
+        )
+    end as Current_Statement,
+    left(sql_text.text, 200) as SQL_Text_Preview
+from sys.dm_exec_sessions s
+left join sys.dm_exec_requests r
+    on s.session_id = r.session_id
+left join sys.dm_exec_connections c
+    on s.session_id = c.session_id
+outer apply sys.dm_exec_sql_text(coalesce(r.sql_handle, c.most_recent_sql_handle)) sql_text
+where s.is_user_process = 1
+  and s.session_id <> @@spid
+order by
+    case when s.open_transaction_count > 0 then 0 else 1 end,
+    case when exists (
+        select 1
+        from sys.dm_exec_requests blocked_request
+        where blocked_request.blocking_session_id = s.session_id
+    ) then 0 else 1 end,
+    case when coalesce(r.blocking_session_id, 0) > 0 then 0 else 1 end,
+    r.start_time,
+    s.last_request_end_time desc;
 "@
             $results = @(Invoke-DatabaseSearchQuery -Query $query -CommandTimeout 120)
-            Write-StreamingLog -Percent 100 -Step "Complete" -Description "Active request check completed."
+            Write-StreamingLog -Percent 100 -Step "Complete" -Description "SQL session check completed."
             if ($results.Count -eq 0) {
-                Write-Host "No pending SQL queries are currently running." -ForegroundColor Green
+                Write-Host "No SQL Server user sessions were found." -ForegroundColor Green
                 Pause-Screen
                 return
             }
@@ -9422,26 +9470,64 @@ order by r.start_time;
                 Write-StreamingLog -Percent 60 -Step "Details" -Description "Loading the full SQL command for session $sessionId."
                 $detailsQuery = @"
 select
-    r.session_id as Session_ID,
-    r.status as Status,
+    s.session_id as Session_ID,
+    s.status as Session_Status,
+    r.status as Request_Status,
     r.command as Command,
-    r.start_time as Start_Time,
-    datediff(second, r.start_time, getdate()) as Running_Seconds,
+    r.blocking_session_id as Blocking_Session_ID,
+    case
+        when exists (
+            select 1
+            from sys.dm_exec_requests blocked_request
+            where blocked_request.blocking_session_id = s.session_id
+        ) then 'YES'
+        else 'NO'
+    end as Is_Blocking_Other_Session,
+    r.wait_type as Wait_Type,
+    r.wait_time as Wait_Time_ms,
+    r.wait_resource as Wait_Resource,
+    s.open_transaction_count as Open_Transaction_Count,
+    r.start_time as Request_Start_Time,
+    case
+        when r.start_time is not null then datediff(second, r.start_time, getdate())
+    end as Running_Seconds,
+    s.last_request_start_time as Last_Request_Start_Time,
+    s.last_request_end_time as Last_Request_End_Time,
+    case
+        when r.session_id is null and s.last_request_end_time is not null
+            then datediff(second, s.last_request_end_time, getdate())
+    end as Idle_Seconds,
+    s.login_name as Login_Name,
     s.host_name as Host_Name,
     s.program_name as Program_Name,
-    t.text as SQL_Command
-from sys.dm_exec_requests r
-inner join sys.dm_exec_sessions s on r.session_id = s.session_id
-cross apply sys.dm_exec_sql_text(r.sql_handle) t
-where r.session_id = $sessionId;
+    db_name(coalesce(r.database_id, s.database_id)) as Database_Name,
+    case
+        when r.sql_handle is not null then substring(
+            sql_text.text,
+            (r.statement_start_offset / 2) + 1,
+            ((case
+                when r.statement_end_offset = -1 then datalength(sql_text.text)
+                else r.statement_end_offset
+            end - r.statement_start_offset) / 2) + 1
+        )
+    end as Current_Statement,
+    sql_text.text as SQL_Text
+from sys.dm_exec_sessions s
+left join sys.dm_exec_requests r
+    on s.session_id = r.session_id
+left join sys.dm_exec_connections c
+    on s.session_id = c.session_id
+outer apply sys.dm_exec_sql_text(coalesce(r.sql_handle, c.most_recent_sql_handle)) sql_text
+where s.is_user_process = 1
+  and s.session_id = $sessionId;
 "@
                 $details = @(Invoke-DatabaseSearchQuery -Query $detailsQuery -CommandTimeout 120)
                 if ($details.Count -eq 0) {
-                    Write-Host "Session $sessionId is no longer running." -ForegroundColor Yellow
+                    Write-Host "Session $sessionId no longer exists or is not a user session." -ForegroundColor Yellow
                     continue
                 }
 
-                Show-DatabasePerformanceOutput -Data $details -FileNamePrefix "Pending_Sql_Query_$sessionId" -Title "Full SQL Command for Session $sessionId"
+                Show-DatabasePerformanceOutput -Data $details -FileNamePrefix "SQL_Session_$sessionId" -Title "SQL Session Details for Session $sessionId"
             }
             catch {
                 Show-LoggedError -Prefix "The full SQL command could not be loaded" -Context "Database Performance - pending SQL query details" -ErrorRecord $_
@@ -9577,7 +9663,7 @@ function Show-DatabasePerformanceMenu {
         Write-Host ""
         Write-Host "1) Disk usage per table"
         Write-Host "2) Database error logs"
-        Write-Host "3) Pending SQL queries"
+        Write-Host "3) Pending SQL queries and sleeping sessions"
         Write-Host "4) Identify heavy queries"
         Write-Host "5) Cache lifetime heaviest queries"
         Write-Host "6) Top resource-consuming queries (historical/cached)"

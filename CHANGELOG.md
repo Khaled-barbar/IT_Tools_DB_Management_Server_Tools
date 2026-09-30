@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.9.1 - 2026-09-30
+
+- Expanded **Pending SQL queries** to include sleeping user sessions by starting from `sys.dm_exec_sessions` and using the connection's most recent SQL handle when no request is active.
+- Added blocking relationships, blocking-session identification, waits, open transactions, active and idle durations, connection metadata, current statement, and recent SQL preview. Session details now work for both active and sleeping sessions.
+
 ## 7.9.0 - 2026-09-30
 
 - Added a Windows Authentication option immediately after the manual SQL credential option in Database Tools. It uses the current Windows account, supports detected or manually entered SQL Server instances, and presents a numbered database selection.
