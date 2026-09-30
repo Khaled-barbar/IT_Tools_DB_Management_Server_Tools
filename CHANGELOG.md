@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.10.1 - 2026-09-30
+
+- Disabled duplicate MDC, PLC, Mosquitto/MQTT, and Nginx services are soft-ignored when another renamed service in the same family is running. Existing per-service result keys are retained so an ongoing duplicate-service alert can recover.
+- SQL service alerts now apply only to Database Engine services (`MSSQLSERVER` and `MSSQL$<instance>`). SQL Server Agent and Browser are explicitly treated as optional, while CEIP and VSS Writer remain excluded.
+
 ## Monitoring 7.10.0 - 2026-09-30
 
 - Soft-ignores Watchdog evidence when either the optional `PLC` or `D4A_PLC` service is not installed, and emits an explicit healthy result that can recover previously delivered missing-service alerts.

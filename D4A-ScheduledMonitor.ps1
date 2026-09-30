@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.10.0
+# D4A-Monitor-Version: 7.10.1
 # D4A-Monitor-Release-Date: 2026-09-30
 
 <#
@@ -287,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.10.0'
+$script:MonitorVersion = '7.10.1'
 $script:MonitorReleaseDate = '2026-09-30'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -1612,8 +1612,8 @@ It can check one or more frontend site addresses, configured API health
     endpoints, TLS certificates, configured D4A database connectivity, local D4A
   Windows services, the local API listener, CPU, memory, disk space, Nginx errors, relevant Windows events, and local
   Decide4Action, Data Collector, MDC, PLC, Mosquitto/MQTT, Node-RED, Nginx,
-  reverse proxy, IIS, SQL Server Database Engine, SQL Server Agent, and SQL
-  Server Browser services.
+  reverse proxy, IIS, and SQL Server Database Engine services. SQL Server
+  Agent, Browser, CEIP, and VSS Writer services are optional and ignored.
 
 Notification behavior
 ---------------------
@@ -3342,24 +3342,121 @@ function Get-SystemClassInstance {
     return Get-WmiObject -Class $ClassName -Filter $Filter -ErrorAction Stop
 }
 
+function Get-D4AWindowsServiceFamily {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    $serviceText = '{0} {1}' -f [string]$Service.Name, [string]$Service.DisplayName
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])(?:d4a[\s_-]*)?mdc(?:service)?(?:$|[^a-z0-9])') {
+        return 'MDC'
+    }
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])(?:d4a[\s_-]*)?plc(?:service)?(?:$|[^a-z0-9])') {
+        return 'PLC'
+    }
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])(?:mosquitto|mqtt)(?:$|[^a-z0-9])') {
+        return 'Mosquitto/MQTT'
+    }
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])nginx(?:$|[^a-z0-9])') {
+        return 'Nginx'
+    }
+    return $null
+}
+
+function Test-D4AWindowsServiceHealthy {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    return (
+        [string]$Service.State -eq 'Running' -and
+        [string]$Service.Status -eq 'OK'
+    )
+}
+
+function Test-D4AWindowsServiceDisabled {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    return (
+        [string]$Service.StartMode -eq 'Disabled' -or
+        [string]$Service.State -eq 'Disabled' -or
+        [string]$Service.Status -eq 'Disabled'
+    )
+}
+
+function Get-D4ARunningServiceFamilyCounterparts {
+    param(
+        [Parameter(Mandatory = $true)]$Service,
+        [Parameter(Mandatory = $true)][object[]]$Services
+    )
+
+    $family = Get-D4AWindowsServiceFamily -Service $Service
+    if ([string]::IsNullOrWhiteSpace([string]$family)) {
+        return @()
+    }
+
+    return @($Services | Where-Object {
+            [string]$_.Name -ine [string]$Service.Name -and
+            (Get-D4AWindowsServiceFamily -Service $_) -eq $family -and
+            (Test-D4AWindowsServiceHealthy -Service $_)
+        })
+}
+
+function Get-D4AWindowsServiceDisplayName {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    if ([string]::IsNullOrWhiteSpace([string]$Service.DisplayName)) {
+        return [string]$Service.Name
+    }
+    return [string]$Service.DisplayName
+}
+
+function Add-D4AWindowsServiceMonitorResult {
+    param(
+        [Parameter(Mandatory = $true)]$Service,
+        [Parameter(Mandatory = $true)][object[]]$AllServices,
+        [Parameter(Mandatory = $true)][string]$Check,
+        [Parameter(Mandatory = $true)][string]$Key
+    )
+
+    $display = Get-D4AWindowsServiceDisplayName -Service $Service
+    $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
+        $display, $Service.Name, $Service.State, $Service.Status, $Service.StartMode
+
+    if (Test-D4AWindowsServiceHealthy -Service $Service) {
+        Add-MonitorResult -Severity OK -Category Server -Check $Check -Message $message -Key $Key
+        return
+    }
+
+    $runningCounterparts = @(Get-D4ARunningServiceFamilyCounterparts -Service $Service -Services $AllServices)
+    if ((Test-D4AWindowsServiceDisabled -Service $Service) -and $runningCounterparts.Count -gt 0) {
+        $family = Get-D4AWindowsServiceFamily -Service $Service
+        $counterpartNames = @(foreach ($counterpart in $runningCounterparts) {
+                '{0} [{1}]' -f (Get-D4AWindowsServiceDisplayName -Service $counterpart), $counterpart.Name
+            }) -join ', '
+        $message = '{0}; disabled duplicate was soft-ignored because the running {1} service counterpart is: {2}' -f
+            $message, $family, $counterpartNames
+        Add-MonitorResult -Severity OK -Category Server -Check $Check -Message $message -Key $Key
+        return
+    }
+
+    Add-MonitorResult -Severity Alert -Category Server -Check $Check -Message $message -Key $Key
+}
+
 function Test-D4AWindowsServices {
     $services = @(Get-SystemClassInstance -ClassName Win32_Service)
     $plcServices = @($services | Where-Object {
-            [string]$_.Name -match '(?i)^(?:D4A[_\s-]?)?PLC$' -or
-            [string]$_.DisplayName -match '(?i)^(?:D4A[_\s-]?)?PLC$'
+            (Get-D4AWindowsServiceFamily -Service $_) -eq 'PLC'
         })
     $matching = @(
         foreach ($service in $services) {
             $name = [string]$service.Name
             $displayName = [string]$service.DisplayName
             # D4A services consistently use the D4A or Decide4Action prefix.
-            # Exact PLC aliases are optional but monitored when installed.
+            # MDC and PLC aliases are also included after product renames.
             $serviceScopePattern = '(?i)^\s*(?:D4A|Decide4Action)'
+            $serviceFamily = Get-D4AWindowsServiceFamily -Service $service
             $matchesScope =
                 $name -match $serviceScopePattern -or
                 $displayName -match $serviceScopePattern -or
-                $name -match '(?i)^(?:D4A[_\s-]?)?PLC$' -or
-                $displayName -match '(?i)^(?:D4A[_\s-]?)?PLC$'
+                $serviceFamily -eq 'MDC' -or
+                $serviceFamily -eq 'PLC'
 
             if ($matchesScope) {
                 $service
@@ -3383,22 +3480,8 @@ function Test-D4AWindowsServices {
     }
 
     foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
-        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
-            [string]$service.Name
-        }
-        else {
-            [string]$service.DisplayName
-        }
-        $message = '{0} [{1}]; State={2}; Status={3}' -f
-            $display, $service.Name, $service.State, $service.Status
         $serviceKey = 'server-windows-service-{0}' -f $service.Name
-
-        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
-            Add-MonitorResult -Severity OK -Category Server -Check 'Windows service' -Message $message -Key $serviceKey
-        }
-        else {
-            Add-MonitorResult -Severity Alert -Category Server -Check 'Windows service' -Message $message -Key $serviceKey
-        }
+        Add-D4AWindowsServiceMonitorResult -Service $service -AllServices $services -Check 'Windows service' -Key $serviceKey
     }
 }
 
@@ -3422,22 +3505,8 @@ function Test-MosquittoWindowsService {
     }
 
     foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
-        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
-            [string]$service.Name
-        }
-        else {
-            [string]$service.DisplayName
-        }
-        $message = '{0} [{1}]; State={2}; Status={3}' -f
-            $display, $service.Name, $service.State, $service.Status
         $serviceKey = 'server-mosquitto-mqtt-service-{0}' -f $service.Name
-
-        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
-            Add-MonitorResult -Severity OK -Category Server -Check 'Mosquitto/MQTT service' -Message $message -Key $serviceKey
-        }
-        else {
-            Add-MonitorResult -Severity Alert -Category Server -Check 'Mosquitto/MQTT service' -Message $message -Key $serviceKey
-        }
+        Add-D4AWindowsServiceMonitorResult -Service $service -AllServices $services -Check 'Mosquitto/MQTT service' -Key $serviceKey
     }
 }
 
@@ -3462,64 +3531,56 @@ function Test-WebInfrastructureWindowsServices {
     }
 
     foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
-        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
-            [string]$service.Name
-        }
-        else {
-            [string]$service.DisplayName
-        }
-        $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
-            $display, $service.Name, $service.State, $service.Status, $service.StartMode
         $serviceKey = 'server-web-infrastructure-service-{0}' -f $service.Name
-
-        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
-            Add-MonitorResult -Severity OK -Category Server -Check 'Web infrastructure service' -Message $message -Key $serviceKey
-        }
-        else {
-            Add-MonitorResult -Severity Alert -Category Server -Check 'Web infrastructure service' -Message $message -Key $serviceKey
-        }
+        Add-D4AWindowsServiceMonitorResult -Service $service -AllServices $services -Check 'Web infrastructure service' -Key $serviceKey
     }
 }
 
 function Test-SqlServerWindowsServices {
     $services = @(Get-SystemClassInstance -ClassName Win32_Service)
-    $matching = @(
+    $databaseEngines = @(
         foreach ($service in $services) {
             $name = [string]$service.Name
-            # Monitor only database availability services. SQL CEIP telemetry
-            # and VSS Writer do not determine database availability.
-            $isDatabaseEngine = $name -ieq 'MSSQLSERVER' -or $name -match '(?i)^MSSQL\$'
-            $isSqlAgent = $name -ieq 'SQLSERVERAGENT' -or $name -match '(?i)^SQLAgent\$'
-            $isSqlBrowser = $name -ieq 'SQLBrowser'
-            if ($isDatabaseEngine -or $isSqlAgent -or $isSqlBrowser) {
+            if ($name -ieq 'MSSQLSERVER' -or $name -match '(?i)^MSSQL\$[^$]+$') {
                 $service
             }
         }
     )
+    $optionalPreviouslyMonitored = @($services | Where-Object {
+            $name = [string]$_.Name
+            $name -ieq 'SQLSERVERAGENT' -or
+            $name -match '(?i)^SQLAgent\$[^$]+$' -or
+            $name -ieq 'SQLBrowser'
+        })
 
-    if ($matching.Count -eq 0) {
-        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server services' -Message (
-            'No SQL Server Database Engine, SQL Server Agent, or SQL Server Browser service was found; SQL service monitoring was skipped.'
+    # Preserve the previous result keys as healthy so any delivered Agent or
+    # Browser alert receives one recovery when this release is installed.
+    foreach ($service in ($optionalPreviouslyMonitored | Sort-Object -Property DisplayName, Name)) {
+        $display = Get-D4AWindowsServiceDisplayName -Service $service
+        $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}; optional SQL service ignored because only Database Engine availability is mandatory.' -f
+            $display, $service.Name, $service.State, $service.Status, $service.StartMode
+        $serviceKey = 'server-sql-service-{0}' -f $service.Name
+        Add-MonitorResult -Severity OK -Category Server -Check 'Optional SQL Server service' -Message $message -Key $serviceKey
+    }
+
+    if ($databaseEngines.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine' -Message (
+            'No SQL Server Database Engine service (MSSQLSERVER or MSSQL$<instance>) was found; database-engine service monitoring was skipped.'
         ) -Key 'server-sql-services'
         return
     }
 
-    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
-        $display = if ([string]::IsNullOrWhiteSpace([string]$service.DisplayName)) {
-            [string]$service.Name
-        }
-        else {
-            [string]$service.DisplayName
-        }
+    foreach ($service in ($databaseEngines | Sort-Object -Property DisplayName, Name)) {
+        $display = Get-D4AWindowsServiceDisplayName -Service $service
         $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
             $display, $service.Name, $service.State, $service.Status, $service.StartMode
         $serviceKey = 'server-sql-service-{0}' -f $service.Name
 
         if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
-            Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server service' -Message $message -Key $serviceKey
+            Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine' -Message $message -Key $serviceKey
         }
         else {
-            Add-MonitorResult -Severity Alert -Category Server -Check 'SQL Server service' -Message $message -Key $serviceKey
+            Add-MonitorResult -Severity Alert -Category Server -Check 'SQL Server Database Engine' -Message $message -Key $serviceKey
         }
     }
 }
