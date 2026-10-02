@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.10.2
-# D4A-Monitor-Release-Date: 2026-09-30
+# D4A-Monitor-Version: 7.10.3
+# D4A-Monitor-Release-Date: 2026-10-02
 
 <#
 .SYNOPSIS
@@ -287,8 +287,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.10.2'
-$script:MonitorReleaseDate = '2026-09-30'
+$script:MonitorVersion = '7.10.3'
+$script:MonitorReleaseDate = '2026-10-02'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -2625,13 +2625,13 @@ function Set-AutomaticIssueCooldown {
     }
 }
 
-function Remove-ResolvedAutomaticIssueCooldowns {
-    param([string[]]$ActiveIssueKeys)
+function Remove-ExplicitlyResolvedAutomaticIssueCooldowns {
+    param([string[]]$ResolvedIssueKeys)
 
-    $activeKeys = @{}
-    foreach ($key in @($ActiveIssueKeys)) {
+    $resolvedKeys = @{}
+    foreach ($key in @($ResolvedIssueKeys)) {
         if (-not [string]::IsNullOrWhiteSpace([string]$key)) {
-            $activeKeys[(ConvertTo-IgnoreRuleKey -Value $key)] = $true
+            $resolvedKeys[(ConvertTo-IgnoreRuleKey -Value $key)] = $true
         }
     }
 
@@ -2657,9 +2657,12 @@ function Remove-ResolvedAutomaticIssueCooldowns {
             continue
         }
         $lineMode = if ($parts.Count -ge 2) { $parts[1].Trim().ToLowerInvariant() } else { '' }
-        if ($lineMode -eq 'automatic' -and -not $activeKeys.ContainsKey($lineKey)) {
+        # A missing result is inconclusive, particularly for short watchdog log
+        # lookback windows. Remove a cooldown only after this scan explicitly
+        # produced an OK result for the same rule key.
+        if ($lineMode -eq 'automatic' -and $resolvedKeys.ContainsKey($lineKey)) {
             $changed = $true
-            Write-RunLog -Category Ignore -Color Green -Message ('Resolved issue removed from automatic cooldown: {0}.' -f $lineKey)
+            Write-RunLog -Category Ignore -Color Green -Message ('Explicitly resolved issue removed from automatic cooldown: {0}.' -f $lineKey)
             continue
         }
 
@@ -6386,7 +6389,16 @@ function Invoke-D4AMonitor {
             # not send unrelated alerts found during the same diagnostic run.
             $unignoredNotifiableIssues = @()
         }
-        Remove-ResolvedAutomaticIssueCooldowns -ActiveIssueKeys @($issuesBeforeEmail | Select-Object -ExpandProperty Key -Unique)
+        $explicitlyResolvedIssueKeys = @(
+            $script:Results |
+                Group-Object -Property Key |
+                Where-Object {
+                    @($_.Group | Where-Object { $_.Severity -ne 'OK' }).Count -eq 0 -and
+                    @($_.Group | Where-Object { $_.Severity -eq 'OK' }).Count -gt 0
+                } |
+                Select-Object -ExpandProperty Name
+        )
+        Remove-ExplicitlyResolvedAutomaticIssueCooldowns -ResolvedIssueKeys $explicitlyResolvedIssueKeys
         if ($activeIgnoreRules.Count -gt 0) {
             Write-RunLog -Category Ignore -Color Cyan -Message ('Active ignore rules loaded: {0}; file={1}' -f $activeIgnoreRules.Count, $script:IgnoreRulesPath)
         }
