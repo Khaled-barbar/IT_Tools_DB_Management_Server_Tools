@@ -12,7 +12,7 @@ param(
     [switch]$SingleRun
 )
 $ErrorActionPreference='Stop'
-$script:UDVersion='2026.10.05.1'
+$script:UDVersion='2026.10.05.2'
 
 function ConvertTo-UDHash($Value) {
     if ($null -eq $Value) { return $null }
@@ -627,7 +627,17 @@ function ConvertTo-UDTerm([string]$Expression,[string]$FunctionName) {
     if($special.ContainsKey($token)){return $special[$token]}
     if($token -match '^\$monitoringConfig(?:\.[A-Za-z_][A-Za-z0-9_]*)+$'){
         $value=$monitoringConfig
-        foreach($part in ($token -split '\.' | Select-Object -Skip 1)){$value=$value[$part]}
+        foreach($part in ($token -split '\.' | Select-Object -Skip 1)){
+            if($null -eq $value){break}
+            if($value -is [System.Collections.IDictionary]){
+                if(-not $value.Contains($part)){$value=$null;break}
+                $value=$value[$part]
+            }else{
+                $property=@($value.PSObject.Properties | Where-Object {$_.Name -ieq $part} | Select-Object -First 1)
+                if(-not $property.Count){$value=$null;break}
+                $value=$property[0].Value
+            }
+        }
         return "$(Get-UDTermLabel $token) ($(Format-UDValue $token $value))"
     }
     if($token -match '^\$[A-Za-z_][A-Za-z0-9_]*$'){
@@ -1001,6 +1011,8 @@ $serverPath=$json.serverPath;$serverName=$json.serverName;$databaseName=$json.da
 $monitoringRoot=Get-UDRoot $sourceDirectory $json
 $logPath=Join-Path $monitoringRoot 'Log\TaskSchedulerOutput';$logDate=Get-Date -Format yyyyMMdd
 $apiProtocol=if($json.apiProtocol){[string]$json.apiProtocol}else{'http'}
+if($apiProtocol -notin @('http','https')){$apiProtocol='http'}
+$script:StateFolder=$logPath
 $tokens=$null;$parseErrors=$null
 $sourceAst=[System.Management.Automation.Language.Parser]::ParseFile($WatchdogPath,[ref]$tokens,[ref]$parseErrors)
 if($parseErrors.Count){
@@ -1044,16 +1056,33 @@ foreach($statement in $sourceAst.EndBlock.Statements){
     $isPolicyScalar=$name -match '(?i)threshold|timeout|grace|interval|cooldown|retry|stale|seconds|minutes|^max|^min|^serviceName|^mqttHost|^mqttPort'
     if($isCorePolicy -or ($isPolicyScalar -and $name -notmatch ':')){
         try{
+            $plainName=$name -replace '^script:',''
+            if($plainName -ieq 'monitoringConfig'){
+                # Newer watchdogs discover and create the state folder in a top-level
+                # foreach block. The diagnostic never executes that mutating setup,
+                # so provide its already-computed read-only equivalent instead.
+                $script:StateFolder=if($logPath){$logPath}else{$sourceDirectory}
+            }
             $configValue=Resolve-UDConfigValueExpression -ExpressionAst $statement.Right -Config $json
             if($configValue.Matched){$value=$configValue.Value}
             else{
                 $issue=Get-UDAuditIssue $statement.Right @() -Configuration
-                if($issue){if($isCorePolicy){$configurationProblems.Add("$name : $issue")};continue}
+                if($issue){
+                    # apiProtocol was already read directly from config.json above.
+                    # Preserve that value when a newer watchdog wraps Get-ConfigValue
+                    # in an if expression that the restricted evaluator will not run.
+                    if($plainName -ieq 'apiProtocol'){continue}
+                    if($isCorePolicy){$configurationProblems.Add("$name : $issue")}
+                    continue
+                }
                 # Resolve the source's PSScriptRoot without changing this tool's scope.
                 $expression=$statement.Right.Extent.Text.Replace('$PSScriptRoot',("'"+$sourceDirectory.Replace("'","''")+"'"))
                 $value=& ([scriptblock]::Create($expression))
             }
-            Set-Variable -Name ($name -replace '^script:','') -Value $value
+            # The source initializes logPath to null before a mutating discovery
+            # loop. Do not discard the diagnostic's safe computed fallback.
+            if($plainName -ieq 'logPath' -and $null -eq $value -and $logPath){continue}
+            Set-Variable -Name $plainName -Value $value
         }catch{$configurationProblems.Add("$name : $($_.Exception.Message)")}
     }
 }
@@ -1102,7 +1131,8 @@ if($ShowTechnicalDetails){
 $calls=@($sourceAst.FindAll({param($n)$n -is [System.Management.Automation.Language.CommandAst]},$true) | Where-Object {
     $parent=$_.Parent;$inFunction=$false
     while($parent){if($parent -is [System.Management.Automation.Language.FunctionDefinitionAst]){$inFunction=$true;break};$parent=$parent.Parent}
-    -not $inFunction -and $_.GetCommandName() -in $functionNames -and $_.GetCommandName() -match '^(Test[-A-Z]|Check[-A-Z]|Monitor[-A-Z]|Validate[-A-Z]|EnsureService|Invoke-DailyServiceRestart)'
+    $utilityCalls=@('Test-CheckOn','Test-LooksEncrypted','Test-MqttBrokerIsLocal','Test-MqttBrokerConnect','Test-BrokerLocalForRun')
+    -not $inFunction -and $_.GetCommandName() -in $functionNames -and $_.GetCommandName() -notin $utilityCalls -and $_.GetCommandName() -match '^(Test[-A-Z]|Check[-A-Z]|Monitor[-A-Z]|Validate[-A-Z]|EnsureService|Invoke-DailyServiceRestart)'
 } | Sort-Object {$_.Extent.StartOffset})
 $seen=@{}
 foreach($call in $calls){
