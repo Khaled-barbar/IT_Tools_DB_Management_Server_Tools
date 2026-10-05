@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.10.4 - 2026-10-05
+
+- Updated Watchdog Checker for both legacy and recent installed Watchdog policies without executing their entry points.
+- Healthy API, queue, workflow, KPI, and scheduled-command simulations now complete their in-memory recovery paths instead of reporting null-array execution errors.
+- Added reviewed compatibility for newer MQTT uptime, MQTT subscription, and service-discovery helpers, plus dynamic service ensure checks and daily-restart guards.
+- A missing optional service that the Watchdog explicitly skips is now reported as skipped rather than as a diagnostic execution failure.
+
 ## 7.10.3 - 2026-10-05
 
 - Fixed Watchdog Checker compatibility with installed Watchdogs that initialize their state folder inside a protected top-level discovery loop.

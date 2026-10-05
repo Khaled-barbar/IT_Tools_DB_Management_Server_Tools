@@ -12,7 +12,7 @@ param(
     [switch]$SingleRun
 )
 $ErrorActionPreference='Stop'
-$script:UDVersion='2026.10.05.2'
+$script:UDVersion='2026.10.05.3'
 
 function ConvertTo-UDHash($Value) {
     if ($null -eq $Value) { return $null }
@@ -89,6 +89,7 @@ function Get-UDMessageKind([string]$Title,[string]$Details) {
     # as failed just because it contains the noun "error".
     $text="$Title $Details"
     if($Title -match '(?i)(?:^|\s)Restart deferred$' -or $text -match '(?i)\brestart\b[^\r\n]*\bdeferred for\b') { return 'Deferred' }
+    if($text -match '(?i)(?:not found[^\r\n]*skipp|skipp[^\r\n]*not found)') { return 'Warning' }
     if($Title -match '(?i)(?:^|\s)(?:SCAN ERROR|error|exception)$' -or
        $text -match '(?i)\b(?:unable to|failed to|could not|cannot|not found|unavailable|exception)\b|\bERROR\s*:|\berror(?:s| events?)?\s+(?:detected|found|occurred|present)\b|\berror events\s*:\s*[1-9]\d*\b') { return 'Error' }
     if($text -match '(?i)\bUnknown\b|skipped|skips this check|not configured|no MQTT|no [^\r\n.;]*(?:records|entry|rows)\b|placeholder|disabled|did not contain|unsupported') { return 'Warning' }
@@ -875,6 +876,7 @@ function Read-UDWatchdogPath {
 
 # APPROVED_FUNCTION_DIGESTS is populated when the standalone file is built.
 $script:UDApproved=@{
+    '00B3BC18CCCD0DEC50072C2CC488188D17D1F7AFFD1D0DE143250C0778557455' = 'Open-MqttSession'
     '03B60020DED743801B66EA50E7393454249ACEDA6A32DF44FE09017487E91F51' = 'Invoke-DiagnosticCheck'
     '06C77DA289F13574F550BDDA21F366721362B0EEE9EEC473FA9E4F5463368341' = 'Get-ServiceStartTime'
     '0B1B6EDBEC882381FCFA604AD2B2D31240ED235601789213902FC8218B985EE4' = 'Test-WorkflowLog'
@@ -903,12 +905,14 @@ $script:UDApproved=@{
     '678343E0D6BD1883B3846078D5760BA720588737DE919FCF259830DCE3867E52' = 'EnsureMqttCertificate'
     '6C187F1CDC0F78E2FD15999920EAF0CDFF1D3A696C786E02D95D9EC82603731F' = 'EnsureMqttCertificate'
     '6C4BEDECE0FEF90DDCBE2C4017609F35809FCBE31362D8A319924B579AAC1392' = 'Invoke-MqttTandemRestart'
+    '6E77AE2D5A4963FB417E94BF25BF3108CA700FA63921B92F66152DBBD7F6E3A4' = 'Invoke-MqttSubscription'
     '6CCFACF1554BBFEFCB78A0E0C7BFE6DD9DE46E59DAEA1A217CA732535EE421B0' = 'Resolve-MosquittoService'
     '70FCA890E048114DD04D95304B9AB81D919C11B5C321542C180EDED453373079' = 'Invoke-SqlQuery'
     '7179F7D65DB2E224E6BC4E2252B137DAEE7FE036D1D11E241528E641872EB785' = 'Get-AggregatedHealthStatus'
     '79D0246581A990768EAA747DC5F98D3CB23D44105CFF822A39F1816787AD6883' = 'Write-LogMessage'
     '7F8198F547CABC44971AB49E96D19D80E6821360DBDAB3DE8D7C068A4EEF6F20' = 'Get-MqttSamples'
     '84E76915BCF7679B80C345273B6699FE1752818F72F160898C72EDCC703BFB6D' = 'Invoke-MdcMqttCoupledRestart'
+    '8628D7C5CAE154CA5B2F778A8028D70656528535B3E2BA225AADD0229EEDE881' = 'Invoke-DailyServiceRestart'
     '863A356F78A4948688A8A4F1CFF6E51551F22EFE40F6EEE8645D4570FA0CC411' = 'ConvertTo-MonitoringHashtable'
     '8B6CAA77473B2063E0B2851CDEA8B8FBA284BE4C337F75594B59F881E64FDEF8' = 'ParseMqttPayloadTimestamp'
     '8C2E1370761EBFB53E679FFD6048888F61D9E347DE93990D448AD98FF9A6C7C0' = 'Test-UnprocessedQueue'
@@ -926,6 +930,8 @@ $script:UDApproved=@{
     'B15287070F4B698AFAAFBAD051B97F4DFF9E309D5B582A1D12D4FEAA75C0E863' = 'Get-RestartPlanMinutes'
     'B19CD10C5893B5CE88CA6356E53CBBB1B849DC4ED4629C80021DEA02A19B1475' = 'Invoke-MdcMqttCoupledRestart'
     'B454FAF9680D0F5D0FB6FF4498597C779D9F72A28E6C137F1B0A9D85B0A3BFCC' = 'EncodeMqttRemainingLength'
+    'B801AF76F34B71338A4EC70CE8CA24DFB68A360B66E7FFBCCD418E6C8B939169' = 'Test-ServiceInstalled'
+    'B823ACC32756ECD57B8DFD29C15BD29E6E68493FFFB44F957D0E981F34DB0D19' = 'Test-BrokerUptime'
     'BBF3B89BC432BCDFB2831686BCA82BA7DB5EC3A0E4BA3A9A97686150706CF904' = 'EnsureServiceRunning'
     'BCE72C8AEB17939F41DA5C8FE790F8FD6B864C5785BA3C73F1AA3E2F342D37B9' = 'Get-HealthCheckStatus'
     'BDDBC1B70C264B74D10E84ACD3569DE10A2377B3D3D87F97B4F6245BFDFC271C' = 'Invoke-WatchdogServiceAction'
@@ -1090,6 +1096,13 @@ if(-not (Get-Variable monitoringConfig -ErrorAction SilentlyContinue)){$monitori
 $script:HealthChecks=@{}
 $script:UDSecrets+=@([string]$monitoringConfig.Mqtt.MqttPassword,[string]$monitoringConfig.Mqtt.Password)
 $State=New-UDState
+$script:State=$State
+# Recent watchdogs keep recovery notes outside the persisted state object.
+# Initialize the same structure in memory so healthy simulated checks can run
+# their reset path without writing the installed watchdog state file.
+$script:BackoffResetNotes=@{}
+$script:BrokerLocality=$null
+$script:BrokerProbe=$null
 $history='No saved state. Predictions use empty history; no file will be created.'
 if(-not $StateFilePath){
     if($monitoringConfig.StateFilePath){$StateFilePath=[string]$monitoringConfig.StateFilePath}
@@ -1135,6 +1148,7 @@ $calls=@($sourceAst.FindAll({param($n)$n -is [System.Management.Automation.Langu
     -not $inFunction -and $_.GetCommandName() -in $functionNames -and $_.GetCommandName() -notin $utilityCalls -and $_.GetCommandName() -match '^(Test[-A-Z]|Check[-A-Z]|Monitor[-A-Z]|Validate[-A-Z]|EnsureService|Invoke-DailyServiceRestart)'
 } | Sort-Object {$_.Extent.StartOffset})
 $seen=@{}
+$dynamicEnsureCall=$false
 foreach($call in $calls){
     $name=$call.GetCommandName()
     $definition=$functions | Where-Object Name -eq $name | Select-Object -First 1
@@ -1174,19 +1188,42 @@ foreach($call in $calls){
                 }
             }
             if(-not $issue){$arguments[$parameter]=$value}
+        }elseif($name -eq 'EnsureServiceRunning' -and $expression -eq '$ensureName'){
+            $dynamicEnsureCall=$true
+            $issue='DYNAMIC_ENSURE_LOOP'
+            break
         }else{$issue="Unsupported call expression: $expression";break}
     }
+    if($issue -eq 'DYNAMIC_ENSURE_LOOP'){continue}
     $label="$name $(if($arguments.ServiceName){'['+$arguments.ServiceName+']'})".Trim()
     Show-UDSection $label {
         if($issue){throw $issue}
         if($configurationProblems.Count){throw 'Source configuration could not be evaluated completely; inspect unsupported configuration above.'}
-        $guard=Get-UDCallGuard $call
+        $guard=if($name -eq 'Invoke-DailyServiceRestart'){@{Allowed=$true;Reason=$null}}else{Get-UDCallGuard $call}
         if(-not $guard.Allowed){Add-UDMessage 'SKIPPED' $guard.Reason;return}
         & $name @arguments
         if($name -eq 'Test-WorkflowLog' -and $monitoringConfig.SqlQueries.WorkflowLogLastDate -match '^\s*SELECT\s+GETDATE\(\)\s*;?\s*$'){
             Add-UDMessage 'Placeholder query' 'The source checks SQL clock time, not workflow activity.'
         }
     } $rules
+}
+if($dynamicEnsureCall -and $imported.ContainsKey('EnsureServiceRunning')){
+    $definition=$functions | Where-Object Name -eq 'EnsureServiceRunning' | Select-Object -First 1
+    $rules=@($definition.Body.FindAll({param($n)$n -is [System.Management.Automation.Language.IfStatementAst]},$true) | ForEach-Object {$_.Clauses | ForEach-Object {$_.Item1.Extent.Text}})
+    # Recent watchdogs build this loop from their resolved installed-service
+    # map. Reproduce only its installed subset; testing every configured
+    # default would create false missing-service failures for optional roles.
+    try{$inventory=@(Get-UDServiceInventory)}catch{$inventory=@()}
+    $configuredNames=@($monitoringConfig.Services.Values | Where-Object {-not [string]::IsNullOrWhiteSpace([string]$_)} | Select-Object -Unique)
+    $serviceNames=@($configuredNames | Where-Object {
+        $configuredName=[string]$_
+        @($inventory | Where-Object {$_.Name -ieq $configuredName}).Count -gt 0
+    })
+    foreach($serviceName in $serviceNames){
+        Show-UDSection "EnsureServiceRunning [$serviceName]" {
+            EnsureServiceRunning -ServiceName $serviceName
+        } $rules
+    }
 }
 $topActions=@($sourceAst.FindAll({param($n)$n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -match '^(Restart-Service|Start-Service|Stop-Service|sc.exe|net.exe)$'},$true) | Where-Object {
     $p=$_.Parent;$inside=$false;while($p){if($p -is [System.Management.Automation.Language.FunctionDefinitionAst]){$inside=$true;break};$p=$p.Parent};-not $inside
