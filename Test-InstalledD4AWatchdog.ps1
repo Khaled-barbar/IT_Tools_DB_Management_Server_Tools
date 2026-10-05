@@ -12,7 +12,7 @@ param(
     [switch]$SingleRun
 )
 $ErrorActionPreference='Stop'
-$script:UDVersion='2026.09.16.5'
+$script:UDVersion='2026.10.05.1'
 
 function ConvertTo-UDHash($Value) {
     if ($null -eq $Value) { return $null }
@@ -346,6 +346,59 @@ function Get-UDAuditIssue($Node,[string[]]$FunctionNames,[switch]$Configuration)
     }
     if($Node.FindAll({param($n)$n -is [System.Management.Automation.Language.TrapStatementAst] -or $n -is [System.Management.Automation.Language.ExitStatementAst]},$true).Count){return 'Exit/trap statements cannot be imported.'}
     return $null
+}
+function Resolve-UDConfigValueExpression($ExpressionAst,$Config) {
+    $commands=@($ExpressionAst.FindAll({param($n)$n -is [System.Management.Automation.Language.CommandAst]},$true))
+    if($commands.Count -ne 1 -or $commands[0].GetCommandName() -ine 'Get-ConfigValue'){
+        return [pscustomobject]@{Matched=$false;Value=$null}
+    }
+
+    $command=$commands[0]
+    $positional=New-Object 'System.Collections.Generic.List[object]'
+    $named=@{}
+    for($index=1;$index -lt $command.CommandElements.Count;$index++){
+        $element=$command.CommandElements[$index]
+        if($element -is [System.Management.Automation.Language.CommandParameterAst]){
+            $argument=$element.Argument
+            if($null -eq $argument){
+                $index++
+                if($index -ge $command.CommandElements.Count){throw "Get-ConfigValue parameter -$($element.ParameterName) has no value."}
+                $argument=$command.CommandElements[$index]
+            }
+            $named[$element.ParameterName.ToLowerInvariant()]=$argument
+        }else{$positional.Add($element)}
+    }
+
+    function Convert-UDConfigArgument($ArgumentAst,$JsonConfig) {
+        if($ArgumentAst -is [System.Management.Automation.Language.VariableExpressionAst]){
+            $variableName=$ArgumentAst.VariablePath.UserPath
+            if($variableName -ieq 'json'){return $JsonConfig}
+            if($variableName -ieq 'null'){return $null}
+            if($variableName -ieq 'true'){return $true}
+            if($variableName -ieq 'false'){return $false}
+            throw "Unsupported Get-ConfigValue variable: `$$variableName"
+        }
+        if($ArgumentAst -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+           $ArgumentAst -is [System.Management.Automation.Language.ConstantExpressionAst]){
+            return $ArgumentAst.Value
+        }
+        throw "Unsupported Get-ConfigValue argument: $($ArgumentAst.Extent.Text)"
+    }
+
+    $configAst=if($named.ContainsKey('config')){$named.config}elseif($named.ContainsKey('object')){$named.object}elseif($named.ContainsKey('inputobject')){$named.inputobject}elseif($positional.Count -ge 1){$positional[0]}else{$null}
+    $keyAst=if($named.ContainsKey('name')){$named.name}elseif($named.ContainsKey('key')){$named.key}elseif($named.ContainsKey('propertyname')){$named.propertyname}elseif($positional.Count -ge 2){$positional[1]}else{$null}
+    $defaultAst=if($named.ContainsKey('default')){$named.default}elseif($named.ContainsKey('defaultvalue')){$named.defaultvalue}elseif($positional.Count -ge 3){$positional[2]}else{$null}
+    if($null -eq $configAst -or $null -eq $keyAst){throw 'Get-ConfigValue requires a JSON object and property name.'}
+
+    $resolvedConfig=Convert-UDConfigArgument $configAst $Config
+    if($resolvedConfig -ne $Config){throw 'Get-ConfigValue can read only from the loaded $json configuration.'}
+    $key=[string](Convert-UDConfigArgument $keyAst $Config)
+    if([string]::IsNullOrWhiteSpace($key)){throw 'Get-ConfigValue property name cannot be empty.'}
+    $defaultValue=if($null -ne $defaultAst){Convert-UDConfigArgument $defaultAst $Config}else{$null}
+    $property=@($Config.PSObject.Properties | Where-Object {$_.Name -ieq $key} | Select-Object -First 1)
+    $value=if($property.Count){$property[0].Value}else{$null}
+    if($null -eq $value -or ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))){$value=$defaultValue}
+    return [pscustomobject]@{Matched=$true;Value=$value}
 }
 function Get-UDInstrumentedFunction($Function,[switch]$Trace) {
     $text=$Function.Extent.Text;$base=$Function.Extent.StartOffset
@@ -990,12 +1043,16 @@ foreach($statement in $sourceAst.EndBlock.Statements){
     $isCorePolicy=$name -match '(?i)^(script:)?(monitoringConfig|thresholds|restartPlanMinutes|services|mqttConfig|PLCConfig|monitoringRoot|logPath|logDate|apiProtocol)$'
     $isPolicyScalar=$name -match '(?i)threshold|timeout|grace|interval|cooldown|retry|stale|seconds|minutes|^max|^min|^serviceName|^mqttHost|^mqttPort'
     if($isCorePolicy -or ($isPolicyScalar -and $name -notmatch ':')){
-        $issue=Get-UDAuditIssue $statement.Right @() -Configuration
-        if($issue){if($isCorePolicy){$configurationProblems.Add("$name : $issue")};continue}
         try{
-            # Resolve the source's PSScriptRoot without changing this tool's scope.
-            $expression=$statement.Right.Extent.Text.Replace('$PSScriptRoot',("'"+$sourceDirectory.Replace("'","''")+"'"))
-            $value=& ([scriptblock]::Create($expression))
+            $configValue=Resolve-UDConfigValueExpression -ExpressionAst $statement.Right -Config $json
+            if($configValue.Matched){$value=$configValue.Value}
+            else{
+                $issue=Get-UDAuditIssue $statement.Right @() -Configuration
+                if($issue){if($isCorePolicy){$configurationProblems.Add("$name : $issue")};continue}
+                # Resolve the source's PSScriptRoot without changing this tool's scope.
+                $expression=$statement.Right.Extent.Text.Replace('$PSScriptRoot',("'"+$sourceDirectory.Replace("'","''")+"'"))
+                $value=& ([scriptblock]::Create($expression))
+            }
             Set-Variable -Name ($name -replace '^script:','') -Value $value
         }catch{$configurationProblems.Add("$name : $($_.Exception.Message)")}
     }
@@ -1074,7 +1131,19 @@ foreach($call in $calls){
         if($expression -eq '$State'){$arguments[$parameter]=$State}
         elseif($valueAst -is [System.Management.Automation.Language.StringConstantExpressionAst]){$arguments[$parameter]=$valueAst.Value}
         elseif($expression -match '^\$monitoringConfig(?:\.[A-Za-z_][A-Za-z0-9_]*)+$'){
-            $value=$monitoringConfig;foreach($part in ($expression -split '\.' | Select-Object -Skip 1)){$value=$value[$part]};$arguments[$parameter]=$value
+            $value=$monitoringConfig
+            foreach($part in ($expression -split '\.' | Select-Object -Skip 1)){
+                if($null -eq $value){$issue="Configuration value is unavailable: $expression";break}
+                if($value -is [System.Collections.IDictionary]){
+                    if(-not $value.Contains($part)){$issue="Configuration value is unavailable: $expression";break}
+                    $value=$value[$part]
+                }else{
+                    $property=@($value.PSObject.Properties | Where-Object {$_.Name -ieq $part} | Select-Object -First 1)
+                    if(-not $property.Count){$issue="Configuration value is unavailable: $expression";break}
+                    $value=$property[0].Value
+                }
+            }
+            if(-not $issue){$arguments[$parameter]=$value}
         }else{$issue="Unsupported call expression: $expression";break}
     }
     $label="$name $(if($arguments.ServiceName){'['+$arguments.ServiceName+']'})".Trim()

@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.10.2 - 2026-10-05
+
+- Updated Watchdog Checker configuration parsing to support restricted `Get-ConfigValue` reads used by newer installed Watchdog versions, including `apiProtocol` and paths needed to build `monitoringConfig`.
+- Missing nested policy values now produce a contained compatibility result instead of terminating the diagnostic with `Cannot index into a null array`.
+- Watchdog Checker now checks its signed companion release whenever the troubleshooting feature opens and automatically installs a verified newer copy.
+
 ## 7.10.1 - 2026-10-05
 
 - Corrected the main IT Tools release hash using the staged Git blob so automatic updates validate the same bytes published by GitHub.

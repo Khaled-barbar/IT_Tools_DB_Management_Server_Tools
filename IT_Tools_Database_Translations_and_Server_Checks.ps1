@@ -61,7 +61,7 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.10.1'
+$Script:ToolVersion = [version]'7.10.2'
 $Script:ToolReleaseDate = '2026-10-05'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -4755,19 +4755,20 @@ function Get-RequiredScriptFolderFilePath {
     param(
         [Parameter(Mandatory = $true)][string]$FileName,
         [Parameter(Mandatory = $true)][string]$DownloadUrl,
-        [Parameter(Mandatory = $true)][string]$FeatureName
+        [Parameter(Mandatory = $true)][string]$FeatureName,
+        [switch]$RefreshExisting
     )
 
     $scriptFolder = Get-CurrentScriptFolder
     $filePath = Join-Path -Path $scriptFolder -ChildPath $FileName
-    if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-        Write-Host "The required companion file '$FileName' is missing." -ForegroundColor Yellow
-        Write-Host "IT Tools will download the official release file for $FeatureName now." -ForegroundColor Cyan
-
-        if (-not (Test-ITToolsScriptFolderWritable -Folder $scriptFolder)) {
-            Write-Host "IT Tools cannot save the file in: $scriptFolder" -ForegroundColor Red
-            Write-Host 'Run IT Tools as Administrator, or move the complete IT Tools folder to a user-owned Desktop or Documents folder and try again.' -ForegroundColor Yellow
-            throw "Required companion file could not be saved: $filePath"
+    $fileExists = Test-Path -LiteralPath $filePath -PathType Leaf
+    if (-not $fileExists -or $RefreshExisting.IsPresent) {
+        if ($fileExists) {
+            Write-StreamingLog -Percent 10 -Step 'Update' -Description "Checking the installed companion file $FileName for an update."
+        }
+        else {
+            Write-Host "The required companion file '$FileName' is missing." -ForegroundColor Yellow
+            Write-Host "IT Tools will download the official release file for $FeatureName now." -ForegroundColor Cyan
         }
 
         $downloadFolder = Join-Path ([IO.Path]::GetTempPath()) ('ITToolsCompanion_{0}' -f [guid]::NewGuid().ToString('N'))
@@ -4786,6 +4787,21 @@ function Get-RequiredScriptFolderFilePath {
                 throw "The release manifest contains an invalid SHA-256 value for '$FileName'."
             }
 
+            if ($fileExists) {
+                $installedHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+                if ($installedHash -eq $expectedHash) {
+                    Write-StreamingLog -Percent 100 -Step 'Update' -Description "Companion file $FileName is current."
+                    return $filePath
+                }
+                Write-Host "An updated $FeatureName companion file is available. IT Tools will install the verified release now." -ForegroundColor Cyan
+            }
+
+            if (-not (Test-ITToolsScriptFolderWritable -Folder $scriptFolder)) {
+                Write-Host "IT Tools cannot save the file in: $scriptFolder" -ForegroundColor Red
+                Write-Host 'Run IT Tools as Administrator, or move the complete IT Tools folder to a user-owned Desktop or Documents folder and try again.' -ForegroundColor Yellow
+                throw "Required companion file could not be saved: $filePath"
+            }
+
             $temporaryFilePath = Join-Path $downloadFolder $FileName
             $temporaryFileFolder = Split-Path -Parent $temporaryFilePath
             [void](New-Item -Path $temporaryFileFolder -ItemType Directory -Force -ErrorAction Stop)
@@ -4799,16 +4815,23 @@ function Get-RequiredScriptFolderFilePath {
 
             Write-StreamingLog -Percent 70 -Step 'Verify' -Description "Verified the official file $FileName."
 
-            if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-                Copy-Item -LiteralPath $temporaryFilePath -Destination $filePath -Force -ErrorAction Stop
+            if ([IO.Path]::GetExtension($FileName) -ieq '.ps1') {
+                $tokens = $null
+                $parserErrors = $null
+                [void][Management.Automation.Language.Parser]::ParseFile($temporaryFilePath, [ref]$tokens, [ref]$parserErrors)
+                if ($parserErrors.Count -gt 0) {
+                    throw "The verified companion script '$FileName' contains a PowerShell syntax error: $($parserErrors[0].Message)"
+                }
             }
+
+            Copy-Item -LiteralPath $temporaryFilePath -Destination $filePath -Force -ErrorAction Stop
             Write-StreamingLog -Percent 100 -Step 'Download' -Description "Required file $FileName is ready to use."
-            Write-Host "Downloaded and verified: $filePath" -ForegroundColor Green
+            Write-Host "Downloaded, verified, and installed: $filePath" -ForegroundColor Green
         }
         catch {
-            Write-Host "Automatic download failed for '$FileName'." -ForegroundColor Red
+            Write-Host "Automatic synchronization failed for '$FileName'." -ForegroundColor Red
             Write-Host "Official source: $DownloadUrl" -ForegroundColor Cyan
-            throw "Required companion file could not be downloaded: $filePath. $($_.Exception.Message)"
+            throw "Required companion file could not be synchronized: $filePath. $($_.Exception.Message)"
         }
         finally {
             if (Test-Path -LiteralPath $downloadFolder -PathType Container) {
@@ -11256,7 +11279,8 @@ function Invoke-WatchdogChecker {
     $checkerPath = Get-RequiredScriptFolderFilePath `
         -FileName 'Test-InstalledD4AWatchdog.ps1' `
         -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/Test-InstalledD4AWatchdog.ps1' `
-        -FeatureName 'Watchdog Checker'
+        -FeatureName 'Watchdog Checker' `
+        -RefreshExisting
 
     Write-StreamingLog -Percent 20 -Step 'Verify checker' -Description 'Validating the downloaded Watchdog Checker before launch.'
     Test-PowerShellCompanionScriptSyntax -ScriptPath $checkerPath -FeatureName 'Watchdog Checker'
