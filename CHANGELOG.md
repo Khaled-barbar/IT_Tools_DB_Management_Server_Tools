@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.10.0 - 2026-10-05
+
+- Fixed on-demand Watchdog Checker downloads by correcting release-manifest hashes to match the exact bytes served by GitHub.
+- Refreshed affected companion-file hashes using commit-pinned raw downloads so line-ending conversion on Windows cannot invalidate release verification.
+
 ## Monitoring 7.10.3 - 2026-10-02
 
 - Fixed 24-hour duplicate-alert suppression for checks that do not produce a result in every scan, including Watchdog log checks with short evidence windows.

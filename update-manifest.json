@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "version": "7.9.4",
-  "releaseDate": "2026-09-30",
+  "version": "7.10.0",
+  "releaseDate": "2026-10-05",
   "monitoring": {
     "version": "7.10.3",
     "releaseDate": "2026-10-02",
@@ -21,7 +21,7 @@
     },
     {
       "path": "D4A-DiskSpaceAnalyzer.ps1",
-      "sha256": "87E81C2201413206B4E84B6DDD24A03B9A20E191398BA1DD525ABE548692098F"
+      "sha256": "A741BC234F7E1A9668566E7F5BF5355D3F704C5EF5E19828E7CA2FAA0E46E3E5"
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
@@ -37,15 +37,15 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "81B254E8FA0205E7D929830A64702F40790B7758AF22CE73EB107B6E94D2E318"
+      "sha256": "8B1ECAB115070D9CD20B472304770B33F1F73066AFDC0624EB0FCCC7058FD8C1"
     },
     {
       "path": "Invoke-SmtpDiagnostic.ps1",
-      "sha256": "3D2127F0491C993588D0A00A0E24F8DBCDD497223E5E785A1652335E8A6C5BFA"
+      "sha256": "15AFA06808FD2025CD15FC28A93C162D589CAD8E22A264A6A3D22F32E882EDD3"
     },
     {
       "path": "version.txt",
-      "sha256": "1FA50FEB875B6FE624060DD1A7FA06E8D87B88292564EA27D5B73FDA8CE68681"
+      "sha256": "B025E522BDD92B9F2B2D0623AF498845BE2778BA503162D85F029A5271BFAF62"
     },
     {
       "path": "Test-DBConfigFile.ps1",
@@ -53,7 +53,7 @@
     },
     {
       "path": "Test-InstalledD4AWatchdog.ps1",
-      "sha256": "494C59769CF84542D73932D60B02D132C126BC9F359F6B5727E8E8292026CD96"
+      "sha256": "D7C210BCDCFA0C46703ED9D5EDA83913389AF5D7C005A13DF00CE09DED7A2BED"
     },
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",
