@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.10.6 - 2026-10-09
+
+- Excluded the optional Watchdog health-publication failure caused specifically by a missing `dbo.D4A_Health_GenerateHealthData` stored procedure; no Scheduler alert is generated for this evidence.
+- Excluded the informational `[config] mqtt-broker uptime: ... stale ... grace ...` threshold declaration so the word `stale` is not mistaken for an active MQTT failure.
+- Other health-publication exceptions, missing stored procedures, and actual MQTT stale conditions remain actionable.
+
 ## 7.10.5 / Monitoring 7.10.5 - 2026-10-09
 
 - Added option `0`, **Add planned maintenance**, to the **Execute Monitoring Commands** menu.

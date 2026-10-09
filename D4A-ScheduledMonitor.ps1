@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.10.5
+# D4A-Monitor-Version: 7.10.6
 # D4A-Monitor-Release-Date: 2026-10-09
 
 <#
@@ -287,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.10.5'
+$script:MonitorVersion = '7.10.6'
 $script:MonitorReleaseDate = '2026-10-09'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -5051,6 +5051,26 @@ function Resolve-WatchdogRenamedServiceEvidence {
     }
 }
 
+function Test-IsNonActionableWatchdogHealthPublicationEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    # This is a static MQTT threshold declaration. The word "stale" describes
+    # the configured threshold, not a detected stale broker condition.
+    if ($normalized -match '(?i)\[config\]\s+mqtt-broker\s+uptime:\s*(?:on|off),\s*stale\s+\d+\s*s,\s*grace\s+\d+\s*s') {
+        return $true
+    }
+
+    # Health publication is optional on installations that do not contain the
+    # health-data generation procedure. No local corrective action is required.
+    return (
+        $normalized -match '(?i)failed\s+to\s+publish\s+health\s+data\b' -and
+        $normalized -match '(?i)could\s+not\s+find\s+stored\s+procedure\s+[''"]dbo\.D4A_Health_GenerateHealthData[''"]'
+    )
+}
+
 function Get-WatchdogEvidenceDisposition {
     param([Parameter(Mandatory = $true)][string]$Evidence)
 
@@ -5060,6 +5080,10 @@ function Get-WatchdogEvidenceDisposition {
     # PLC is optional. Watchdog records its absence as a skipped check rather
     # than a service failure, so this evidence must never generate an alert.
     if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence $normalized) {
+        return 'Ignore'
+    }
+
+    if (Test-IsNonActionableWatchdogHealthPublicationEvidence -Evidence $normalized) {
         return 'Ignore'
     }
 
