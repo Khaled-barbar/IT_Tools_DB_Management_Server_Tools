@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.10.4 - 2026-10-09
+
+- SQL Database Engine service health is now evaluated as aggregate availability: an alert is sent only when no detected `MSSQLSERVER` or `MSSQL$<instance>` service is running.
+- Stopped leftover or secondary engine instances are recorded as individually ignored while any engine is available, and historical per-service keys receive healthy results so earlier false alerts can recover.
+- SQL Server Agent, Browser, Full-text, Analysis Services, CEIP, and VSS services remain excluded from mandatory Database Engine availability.
+
 ## 7.10.4 - 2026-10-05
 
 - Updated Watchdog Checker for both legacy and recent installed Watchdog policies without executing their entry points.

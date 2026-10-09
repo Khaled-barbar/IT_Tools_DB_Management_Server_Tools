@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.10.3
-# D4A-Monitor-Release-Date: 2026-10-02
+# D4A-Monitor-Version: 7.10.4
+# D4A-Monitor-Release-Date: 2026-10-09
 
 <#
 .SYNOPSIS
@@ -287,8 +287,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.10.3'
-$script:MonitorReleaseDate = '2026-10-02'
+$script:MonitorVersion = '7.10.4'
+$script:MonitorReleaseDate = '2026-10-09'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -3573,18 +3573,50 @@ function Test-SqlServerWindowsServices {
         return
     }
 
+    $runningEngines = @($databaseEngines | Where-Object {
+            $status = [string]$_.Status
+            [string]$_.State -eq 'Running' -and
+                ([string]::IsNullOrWhiteSpace($status) -or $status -eq 'OK')
+        })
+
+    # Database connectivity checks validate every configured D4A database
+    # separately. This service-level check therefore reports one aggregate
+    # outage only when no local Database Engine instance is running. Stopped
+    # leftover instances must not alert while another engine is available.
     foreach ($service in ($databaseEngines | Sort-Object -Property DisplayName, Name)) {
         $display = Get-D4AWindowsServiceDisplayName -Service $service
         $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
             $display, $service.Name, $service.State, $service.Status, $service.StartMode
         $serviceKey = 'server-sql-service-{0}' -f $service.Name
 
-        if ([string]$service.State -eq 'Running' -and [string]$service.Status -eq 'OK') {
-            Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine' -Message $message -Key $serviceKey
+        if ($runningEngines -contains $service) {
+            $message += '; running Database Engine instance.'
         }
         else {
-            Add-MonitorResult -Severity Alert -Category Server -Check 'SQL Server Database Engine' -Message $message -Key $serviceKey
+            $message += '; inactive instance ignored individually; aggregate availability alerts only when no Database Engine instance is running.'
         }
+        # Retain the historical per-service key as healthy so false alerts from
+        # earlier monitor versions receive a recovery notification.
+        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine instance' -Message $message -Key $serviceKey
+    }
+
+    $runningText = @($runningEngines | Sort-Object -Property DisplayName, Name | ForEach-Object {
+            '{0} [{1}]' -f (Get-D4AWindowsServiceDisplayName -Service $_), $_.Name
+        }) -join ', '
+    if ($runningEngines.Count -gt 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine availability' -Message (
+            '{0} of {1} Database Engine service(s) running: {2}' -f
+                $runningEngines.Count, $databaseEngines.Count, $runningText
+        ) -Key 'server-sql-services'
+    }
+    else {
+        $detectedText = @($databaseEngines | Sort-Object -Property DisplayName, Name | ForEach-Object {
+                '{0} [{1}]; State={2}; Status={3}' -f
+                    (Get-D4AWindowsServiceDisplayName -Service $_), $_.Name, $_.State, $_.Status
+            }) -join ' | '
+        Add-MonitorResult -Severity Alert -Category Server -Check 'SQL Server Database Engine availability' -Message (
+            'No SQL Server Database Engine instance is running. Detected services: {0}' -f $detectedText
+        ) -Key 'server-sql-services'
     }
 }
 
