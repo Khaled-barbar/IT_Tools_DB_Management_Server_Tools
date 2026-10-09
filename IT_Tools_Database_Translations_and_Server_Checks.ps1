@@ -61,8 +61,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.10.4'
-$Script:ToolReleaseDate = '2026-10-05'
+$Script:ToolVersion = [version]'7.10.5'
+$Script:ToolReleaseDate = '2026-10-09'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -2109,6 +2109,8 @@ function New-SiteMonitoringConfigurationObject {
         # The monitor treats it as disabled until the user replaces it.
         DiscordWebhookUrl     = if ([string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) { 'your Discord webhook URL' } else { $DiscordWebhookUrl }
         DiscordWebhookUrlNote = 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.'
+        MaintenanceWindows    = @()
+        MaintenanceWindowsNote = 'Optional: add Name, Schedule (Once, Daily, Weekly, or Monthly), Start, and End. Weekly entries require DaysOfWeek; monthly entries require DayOfMonth. Times use the server local time.'
         D4AInstallRoot       = $installRoot
         LogDirectory        = $logDirectory
         WatchdogLogRoot     = Join-Path $installRoot 'Log\TaskSchedulerOutput'
@@ -3662,6 +3664,264 @@ function Read-MonitoringCooldownDuration {
     }
 }
 
+function Read-PlannedMaintenanceFrequency {
+    Write-Host ''
+    Write-Host 'Maintenance frequency:' -ForegroundColor Cyan
+    Write-Host '1) Once'
+    Write-Host '2) Daily'
+    Write-Host '3) Weekly'
+    Write-Host '4) Monthly'
+
+    while ($true) {
+        $selection = Read-Host 'Select the frequency number (q to go back)'
+        if (Test-IsBack $selection) { return $null }
+        switch ($selection) {
+            '1' { return 'Once' }
+            '2' { return 'Daily' }
+            '3' { return 'Weekly' }
+            '4' { return 'Monthly' }
+            default { Write-Host 'Select 1, 2, 3, 4, or q.' -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Read-PlannedMaintenanceDate {
+    while ($true) {
+        $value = Read-Host 'Maintenance date (YYYY-MM-DD; q to go back)'
+        if (Test-IsBack $value) { return $null }
+        $parsed = [datetime]::MinValue
+        if ([datetime]::TryParseExact($value.Trim(), 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+            return $parsed.Date
+        }
+        Write-Host 'Enter a valid date in YYYY-MM-DD format.' -ForegroundColor Yellow
+    }
+}
+
+function Read-PlannedMaintenanceTime {
+    param([Parameter(Mandatory = $true)][ValidateSet('start', 'end')][string]$Label)
+
+    while ($true) {
+        $value = Read-Host ("Maintenance {0} time (HH:MM, 24-hour format; q to go back)" -f $Label)
+        if (Test-IsBack $value) { return $null }
+        $parsed = [timespan]::Zero
+        if ([timespan]::TryParseExact($value.Trim(), 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+            return $parsed.ToString('hh\:mm')
+        }
+        Write-Host 'Enter a valid 24-hour time such as 00:30 or 23:45.' -ForegroundColor Yellow
+    }
+}
+
+function Read-PlannedMaintenanceWeekday {
+    $days = @('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+    Write-Host ''
+    Write-Host 'Maintenance weekday:' -ForegroundColor Cyan
+    for ($index = 0; $index -lt $days.Count; $index++) {
+        Write-Host ('{0}) {1}' -f ($index + 1), $days[$index])
+    }
+
+    while ($true) {
+        $selection = Read-Host 'Select the weekday number (q to go back)'
+        if (Test-IsBack $selection) { return $null }
+        $number = 0
+        if ([int]::TryParse($selection, [ref]$number) -and $number -ge 1 -and $number -le $days.Count) {
+            return $days[$number - 1]
+        }
+        Write-Host 'Select one of the displayed weekday numbers.' -ForegroundColor Yellow
+    }
+}
+
+function Read-PlannedMaintenanceDayOfMonth {
+    while ($true) {
+        $value = Read-Host 'Day of month (1-31; q to go back)'
+        if (Test-IsBack $value) { return $null }
+        $day = 0
+        if ([int]::TryParse($value, [ref]$day) -and $day -ge 1 -and $day -le 31) {
+            return $day
+        }
+        Write-Host 'Enter a day from 1 through 31.' -ForegroundColor Yellow
+    }
+}
+
+function Read-PlannedMaintenanceComment {
+    while ($true) {
+        $value = Read-Host 'Maintenance details/comment (optional; press Enter to skip; q to go back)'
+        if (Test-IsBack $value) { return $null }
+        $value = $value.Trim()
+        if ($value.Length -le 300 -and $value -notmatch '[\x00-\x08\x0B\x0C\x0E-\x1F]') {
+            return $value
+        }
+        Write-Host 'The comment must be 300 characters or fewer and cannot contain control characters.' -ForegroundColor Yellow
+    }
+}
+
+function Show-AddPlannedMonitoringMaintenance {
+    $actionAudit = $null
+    $backupPath = $null
+    $configurationChanged = $false
+    Clear-Host
+    Show-SectionTitle 'Add Planned Maintenance'
+    Write-Host 'Adds a maintenance interval to the selected monitor configuration. Monitoring checks and notifications are skipped while it is active.' -ForegroundColor Cyan
+    Write-Host 'All dates and times use the monitored server local time.' -ForegroundColor Gray
+
+    try {
+        $target = Select-SiteMonitoringCommandTarget
+        if ($null -eq $target) { return }
+        if (-not $target.ConfigExists) {
+            throw "The monitoring configuration file was not found: $($target.ConfigPath)"
+        }
+
+        $installedVersion = $null
+        if (-not [version]::TryParse([string]$target.Version, [ref]$installedVersion) -or
+            $installedVersion -lt [version]'7.10.5') {
+            Write-Host 'Planned maintenance start/end intervals require Monitoring 7.10.5 or later.' -ForegroundColor Yellow
+            Write-Host 'Use Site Monitoring > Update Existing Monitoring Settings > Update monitoring script version, then try again.' -ForegroundColor Gray
+            Pause-Screen
+            return
+        }
+
+        $schedule = Read-PlannedMaintenanceFrequency
+        if ($null -eq $schedule) { return }
+
+        $maintenanceDate = $null
+        $weekday = $null
+        $dayOfMonth = $null
+        if ($schedule -eq 'Once') {
+            $maintenanceDate = Read-PlannedMaintenanceDate
+            if ($null -eq $maintenanceDate) { return }
+        }
+        elseif ($schedule -eq 'Weekly') {
+            $weekday = Read-PlannedMaintenanceWeekday
+            if ($null -eq $weekday) { return }
+        }
+        elseif ($schedule -eq 'Monthly') {
+            $dayOfMonth = Read-PlannedMaintenanceDayOfMonth
+            if ($null -eq $dayOfMonth) { return }
+        }
+
+        $startTime = Read-PlannedMaintenanceTime -Label start
+        if ($null -eq $startTime) { return }
+        while ($true) {
+            $endTime = Read-PlannedMaintenanceTime -Label end
+            if ($null -eq $endTime) { return }
+            if ($endTime -ne $startTime) { break }
+            Write-Host 'The end time must differ from the start time.' -ForegroundColor Yellow
+        }
+        $comment = Read-PlannedMaintenanceComment
+        if ($null -eq $comment) { return }
+
+        $startValue = $startTime
+        $endValue = $endTime
+        $crossesMidnight = ([timespan]::ParseExact($endTime, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture) -lt
+            [timespan]::ParseExact($startTime, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture))
+        if ($schedule -eq 'Once') {
+            $startDateTime = $maintenanceDate.Add([timespan]::ParseExact($startTime, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture))
+            $endDateTime = $maintenanceDate.Add([timespan]::ParseExact($endTime, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture))
+            if ($endDateTime -le $startDateTime) { $endDateTime = $endDateTime.AddDays(1) }
+            $startValue = $startDateTime.ToString('yyyy-MM-ddTHH:mm:ss')
+            $endValue = $endDateTime.ToString('yyyy-MM-ddTHH:mm:ss')
+        }
+
+        $entry = [ordered]@{
+            Name     = 'Planned maintenance {0}' -f (Get-Date -Format 'yyyyMMddHHmmss')
+            Enabled  = $true
+            Schedule = $schedule
+            Start    = $startValue
+            End      = $endValue
+        }
+        if ($schedule -eq 'Weekly') { $entry['DaysOfWeek'] = @($weekday) }
+        if ($schedule -eq 'Monthly') { $entry['DayOfMonth'] = $dayOfMonth }
+        if (-not [string]::IsNullOrWhiteSpace($comment)) { $entry['Comment'] = $comment }
+
+        Write-Host ''
+        Show-SectionTitle 'Planned Maintenance Summary'
+        Write-Host "Monitor file: $($target.ScriptPath)" -ForegroundColor White
+        Write-Host "Configuration: $($target.ConfigPath)" -ForegroundColor White
+        Write-Host "Frequency: $schedule" -ForegroundColor White
+        if ($schedule -eq 'Once') { Write-Host ('Date: {0:yyyy-MM-dd}' -f $maintenanceDate) -ForegroundColor White }
+        if ($schedule -eq 'Weekly') { Write-Host "Weekday: $weekday" -ForegroundColor White }
+        if ($schedule -eq 'Monthly') {
+            Write-Host "Day of month: $dayOfMonth" -ForegroundColor White
+            if ($dayOfMonth -gt 28) { Write-Host 'Months without this day are skipped.' -ForegroundColor Yellow }
+        }
+        Write-Host "Start: $startValue" -ForegroundColor White
+        Write-Host "End: $endValue" -ForegroundColor White
+        if ($crossesMidnight) { Write-Host 'This maintenance interval ends on the following day.' -ForegroundColor Yellow }
+        Write-Host ('Comment: {0}' -f $(if ([string]::IsNullOrWhiteSpace($comment)) { 'None' } else { $comment })) -ForegroundColor White
+        Write-Host 'The current JSON configuration will be backed up before this interval is added.' -ForegroundColor Yellow
+        $confirmation = Read-Host 'Type ADD to save this planned maintenance (q to go back)'
+        if (Test-IsBack $confirmation -or $confirmation -cne 'ADD') {
+            Write-Host 'Planned maintenance was not added.' -ForegroundColor Cyan
+            Pause-Screen
+            return
+        }
+
+        $auditVariables = 'Schedule={0}; Start={1}; End={2}; ConfigurationFile={3}' -f $schedule, $startValue, $endValue, $target.ConfigPath
+        $actionAudit = New-ScriptActionAuditRecord -Intervention 'Site Monitoring - Add Planned Maintenance' -Variables $auditVariables
+        $configuration = Read-SiteMonitoringConfiguration -ConfigurationPath $target.ConfigPath
+        $existingWindows = if ($null -ne $configuration.PSObject.Properties['MaintenanceWindows']) {
+            @($configuration.MaintenanceWindows | Where-Object { $null -ne $_ })
+        }
+        else { @() }
+
+        $deploymentFolder = Split-Path -Parent $target.ScriptPath
+        $backupFolder = Join-Path (Join-Path $deploymentFolder 'monitor-backups') ('maintenance_{0}' -f (Get-Date -Format 'yyyyMMddHHmmss'))
+        New-Item -ItemType Directory -Path $backupFolder -Force -ErrorAction Stop | Out-Null
+        $backupPath = Join-Path $backupFolder ([IO.Path]::GetFileName($target.ConfigPath))
+        Write-StreamingLog -Percent 30 -Step 'Backup' -Description "Backing up the current monitoring configuration to $backupFolder."
+        Copy-Item -LiteralPath $target.ConfigPath -Destination $backupPath -ErrorAction Stop
+
+        if ($null -eq $configuration.PSObject.Properties['MaintenanceWindows']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name MaintenanceWindows -Value @($existingWindows + [pscustomobject]$entry)
+        }
+        else {
+            $configuration.MaintenanceWindows = @($existingWindows + [pscustomobject]$entry)
+        }
+        $maintenanceNote = 'Optional: add Name, Schedule (Once, Daily, Weekly, or Monthly), Start, and End. Weekly entries require DaysOfWeek; monthly entries require DayOfMonth. Times use the server local time.'
+        if ($null -eq $configuration.PSObject.Properties['MaintenanceWindowsNote']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name MaintenanceWindowsNote -Value $maintenanceNote
+        }
+        else { $configuration.MaintenanceWindowsNote = $maintenanceNote }
+        if ($null -eq $configuration.PSObject.Properties['LastSettingsUpdate']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name LastSettingsUpdate -Value (Get-Date).ToString('o')
+        }
+        else { $configuration.LastSettingsUpdate = (Get-Date).ToString('o') }
+
+        Write-StreamingLog -Percent 65 -Step 'Save' -Description 'Saving the planned maintenance interval.'
+        Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $target.ConfigPath -AllowOverwrite | Out-Null
+        $configurationChanged = $true
+
+        Write-StreamingLog -Percent 85 -Step 'Validate' -Description 'Validating the updated configuration with the installed monitor.'
+        $validationOutput = @(& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $target.ScriptPath -ConfigPath $target.ConfigPath -ValidateConfiguration -SkipAutomaticUpdate 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "The monitor rejected the updated configuration: $($validationOutput -join ' ')"
+        }
+
+        Complete-ScriptActionAudit -AuditRecord $actionAudit
+        Write-StreamingLog -Percent 100 -Step 'Done' -Description 'Planned maintenance added successfully.'
+        Write-Host 'Success: planned maintenance was added.' -ForegroundColor Green
+        Write-Host "Configuration backup: $backupPath" -ForegroundColor Green
+        Write-Host 'Monitoring checks and notifications will be skipped while the interval is active.' -ForegroundColor Green
+    }
+    catch {
+        $originalError = $_
+        if ($configurationChanged -and -not [string]::IsNullOrWhiteSpace($backupPath) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+            try {
+                Copy-Item -LiteralPath $backupPath -Destination $target.ConfigPath -Force -ErrorAction Stop
+                Write-Host 'The previous monitoring configuration was restored.' -ForegroundColor Yellow
+            }
+            catch {
+                Write-Warning "The configuration rollback failed: $($_.Exception.Message)"
+            }
+        }
+        if ($null -ne $actionAudit) {
+            try { Complete-ScriptActionAudit -AuditRecord $actionAudit -ErrorValue $originalError } catch { Write-Warning $_.Exception.Message }
+        }
+        Show-LoggedError -Prefix 'Planned maintenance could not be added' -Context 'Execute Monitoring Commands - Add Planned Maintenance' -ErrorRecord $originalError
+    }
+
+    Pause-Screen
+}
+
 function Get-MonitoringRecoveryTargetOptions {
     $options = [System.Collections.Generic.List[object]]::new()
     $seenValues = @{}
@@ -3750,6 +4010,7 @@ function Show-ExecuteMonitoringCommandsMenu {
         Write-Host '========================================================================' -ForegroundColor DarkGray
         Write-Host 'Each command uses the selected installed monitor and its JSON configuration.' -ForegroundColor Gray
         Write-Host ''
+        Write-Host '0) Add planned maintenance'
         Write-Host '1) Add site to existing monitoring'
         Write-Host '2) Show current monitoring configuration'
         Write-Host '3) Run monitoring test and send email'
@@ -3769,6 +4030,7 @@ function Show-ExecuteMonitoringCommandsMenu {
         if (Test-IsBack $choice) { return }
 
         switch ($choice) {
+            '0' { Show-AddPlannedMonitoringMaintenance }
             '1' {
                 $target = Select-SiteMonitoringCommandTarget
                 if ($null -eq $target) { continue }

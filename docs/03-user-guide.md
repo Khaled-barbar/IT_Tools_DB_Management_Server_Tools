@@ -461,7 +461,7 @@ Each `SiteAddress` entry has a matching `ApiAddress` entry in `monitor-logs\D4A-
 
 `LocalApiAddress` controls the Direct API performance probe run from the monitored server. New configurations use `http://127.0.0.1:32167/`. If the local D4A API listens on another loopback host or port, edit that single value in the same JSON file, then run the monitor with `-ValidateConfiguration`. Existing monitor configurations receive the setting automatically after version 7.4.2 starts, with a one-time pre-migration JSON backup retained beside the configuration.
 
-The monitor automatically discovers and checks local SQL Server Database Engine (`MSSQLSERVER` and `MSSQL$<instance>`), SQL Server Agent (`SQLSERVERAGENT` and `SQLAgent$<instance>`), and SQL Server Browser services. It also checks any detected Node-RED, Nginx, reverse proxy, IIS, World Wide Web Publishing Service, or Internet Information Services Windows service. Each detected service must be `Running/OK` or it produces a service alert and later recovery notification. SQL CEIP telemetry and SQL VSS Writer are intentionally excluded because they do not determine database availability.
+The monitor automatically discovers local SQL Server Database Engine services (`MSSQLSERVER` and `MSSQL$<instance>`). Database Engine availability alerts only when none of the detected engines are running, so stopped leftover instances do not create false alerts while another engine is available. Optional SQL Agent, Browser, Full-text, Analysis Services, CEIP, and VSS services are excluded from mandatory engine availability. The monitor also checks detected Node-RED, Nginx, reverse proxy, IIS, World Wide Web Publishing Service, or Internet Information Services Windows services.
 
 ### Execute Monitoring Commands
 
@@ -469,6 +469,7 @@ The menu exposes common management and test commands:
 
 | Action | Stand-alone command argument |
 |---|---|
+| Add planned maintenance | IT Tools option `0`; updates `MaintenanceWindows` in the JSON configuration |
 | Add site(s) persistently | `-AddSiteAddress 'site1,site2'` |
 | Show configuration | `-ShowConfiguration` |
 | Run test and send complete notification | `-SendTestResultsEmail` |
@@ -486,6 +487,8 @@ The menu exposes common management and test commands:
 | Skip monitor update check once | `-SkipAutomaticUpdate` |
 
 Use the IT Tools menu when possible because it discovers installed monitors, displays the exact command, and records command failures in the main daily error log.
+
+To add planned maintenance, select **Site Monitoring > Execute Monitoring Commands > 0) Add planned maintenance**. Select the installed monitor, then choose the frequency by number: Once, Daily, Weekly, or Monthly. Enter the start and end in 24-hour `HH:MM` format. One-time maintenance also asks for `YYYY-MM-DD`; weekly maintenance asks for a weekday; monthly maintenance asks for a day from 1 through 31. An end time earlier than the start time means the interval ends the following day. Months without the selected day are skipped. The optional comment is stored with the entry. Review the summary and type `ADD`; IT Tools backs up the configuration and validates the saved window before reporting success.
 
 For a guided recovery check, select **Site Monitoring > Execute Monitoring Commands > Check a component and force a recovery notification if healthy**. Choose a numbered discovered service or standard monitoring component. Select `M` to enter a Windows service name, display name, monitoring check, component text, or rule key manually. The command performs live checks and sends through the enabled notification channels only when every matching result is `OK`; it does not send unrelated alerts found during that diagnostic run.
 

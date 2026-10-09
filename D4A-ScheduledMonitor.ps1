@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.10.4
+# D4A-Monitor-Version: 7.10.5
 # D4A-Monitor-Release-Date: 2026-10-09
 
 <#
@@ -33,8 +33,8 @@
     Use -ForceRecoveryTarget to verify one selected service, resource, or
     application component and send a recovery only when its live result is OK.
     MaintenanceWindows in the JSON configuration can suppress an entire scan
-    for one to three minutes after a one-time, daily, or weekly maintenance
-    start. Suppressed runs write an informational result and send nothing.
+    during a one-time, daily, weekly, or monthly planned maintenance interval.
+    Suppressed runs write an informational result and send nothing.
     Use -DisableEmail -DisableDiscord to run all checks and write logs without
     delivering an email or Discord webhook notification.
 
@@ -149,7 +149,7 @@ param(
     # Never place a webhook URL in the distributed script or Git repository.
     [string]$DiscordWebhookUrl = '',
 
-    # Optional one-time, daily, or weekly maintenance definitions loaded from
+    # Optional one-time, daily, weekly, or monthly maintenance definitions loaded from
     # the JSON configuration. Active windows skip all checks and notifications.
     [object[]]$MaintenanceWindows = @(),
 
@@ -287,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.10.4'
+$script:MonitorVersion = '7.10.5'
 $script:MonitorReleaseDate = '2026-10-09'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -677,7 +677,7 @@ function Set-MonitorInstalledReleaseMetadata {
             [pscustomobject]@{ Name = 'DiscordWebhookUrl'; Value = 'your Discord webhook URL' },
             [pscustomobject]@{ Name = 'DiscordWebhookUrlNote'; Value = 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.' },
             [pscustomobject]@{ Name = 'MaintenanceWindows'; Value = @() },
-            [pscustomobject]@{ Name = 'MaintenanceWindowsNote'; Value = 'Optional: add Name, Schedule (Once, Daily, or Weekly), Start, and DurationMinutes (1-3). Weekly entries also require DaysOfWeek. Times use the server local time.' },
+            [pscustomobject]@{ Name = 'MaintenanceWindowsNote'; Value = 'Optional: add Name, Schedule (Once, Daily, Weekly, or Monthly), Start, and End. Weekly entries require DaysOfWeek; monthly entries require DayOfMonth. Legacy DurationMinutes (1-3) entries remain supported. Times use the server local time.' },
             [pscustomobject]@{ Name = 'InstalledMonitorVersion'; Value = $Version.ToString() },
             [pscustomobject]@{ Name = 'InstalledMonitorReleaseDate'; Value = $ReleaseDate },
             [pscustomobject]@{ Name = 'LastMonitorUpdate'; Value = (Get-Date).ToString('o') }
@@ -1024,7 +1024,7 @@ function Ensure-MonitorConfigurationDefaults {
         $maintenanceWindowsAdded = $true
     }
     if ($null -eq $Configuration.PSObject.Properties['MaintenanceWindowsNote']) {
-        $Configuration | Add-Member -MemberType NoteProperty -Name 'MaintenanceWindowsNote' -Value 'Optional: add Name, Schedule (Once, Daily, or Weekly), Start, and DurationMinutes (1-3). Weekly entries also require DaysOfWeek. Times use the server local time.'
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'MaintenanceWindowsNote' -Value 'Optional: add Name, Schedule (Once, Daily, Weekly, or Monthly), Start, and End. Weekly entries require DaysOfWeek; monthly entries require DayOfMonth. Legacy DurationMinutes (1-3) entries remain supported. Times use the server local time.'
         $changed = $true
         $maintenanceWindowsAdded = $true
     }
@@ -1154,7 +1154,8 @@ function Import-MonitorConfiguration {
 function ConvertTo-MonitorMaintenanceTimeOfDay {
     param(
         [Parameter(Mandatory = $true)][string]$Value,
-        [Parameter(Mandatory = $true)][string]$WindowName
+        [Parameter(Mandatory = $true)][string]$WindowName,
+        [string]$FieldName = 'Start'
     )
 
     $parsed = [timespan]::Zero
@@ -1163,7 +1164,7 @@ function ConvertTo-MonitorMaintenanceTimeOfDay {
             return $parsed
         }
     }
-    throw "Maintenance window '$WindowName' Start must use HH:mm or HH:mm:ss for Daily and Weekly schedules."
+    throw "Maintenance window '$WindowName' $FieldName must use HH:mm or HH:mm:ss for recurring schedules."
 }
 
 function Get-ValidatedMonitorMaintenanceWindows {
@@ -1182,6 +1183,13 @@ function Get-ValidatedMonitorMaintenanceWindows {
         else {
             "Maintenance window $index"
         }
+        $comment = if ($null -ne $window.PSObject.Properties['Comment']) {
+            (Repair-MonitorTextEncoding -Value ([string]$window.Comment)).Trim()
+        }
+        else { '' }
+        if ($comment.Length -gt 300 -or $comment -match '[\x00-\x08\x0B\x0C\x0E-\x1F]') {
+            throw "Maintenance window '$name' Comment must be 300 characters or fewer and cannot contain control characters."
+        }
         $enabled = $true
         if ($null -ne $window.PSObject.Properties['Enabled']) {
             if ($window.Enabled -is [bool]) {
@@ -1197,25 +1205,31 @@ function Get-ValidatedMonitorMaintenanceWindows {
         }
 
         $schedule = if ($null -ne $window.PSObject.Properties['Schedule']) { ([string]$window.Schedule).Trim() } else { '' }
-        if ($schedule -notin @('Once', 'Daily', 'Weekly')) {
-            throw "Maintenance window '$name' Schedule must be Once, Daily, or Weekly."
+        if ($schedule -notin @('Once', 'Daily', 'Weekly', 'Monthly')) {
+            throw "Maintenance window '$name' Schedule must be Once, Daily, Weekly, or Monthly."
         }
         $startText = if ($null -ne $window.PSObject.Properties['Start']) { ([string]$window.Start).Trim() } else { '' }
         if ([string]::IsNullOrWhiteSpace($startText)) {
             throw "Maintenance window '$name' requires Start."
         }
 
-        $durationMinutes = 3
-        if ($null -ne $window.PSObject.Properties['DurationMinutes']) {
-            if (-not [int]::TryParse([string]$window.DurationMinutes, [ref]$durationMinutes) -or
-                $durationMinutes -lt 1 -or $durationMinutes -gt 3) {
-                throw "Maintenance window '$name' DurationMinutes must be between 1 and 3."
+        $endText = if ($null -ne $window.PSObject.Properties['End']) { ([string]$window.End).Trim() } else { '' }
+        $duration = $null
+        if ([string]::IsNullOrWhiteSpace($endText)) {
+            $durationMinutes = 3
+            if ($null -ne $window.PSObject.Properties['DurationMinutes']) {
+                if (-not [int]::TryParse([string]$window.DurationMinutes, [ref]$durationMinutes) -or
+                    $durationMinutes -lt 1 -or $durationMinutes -gt 3) {
+                    throw "Maintenance window '$name' DurationMinutes must be between 1 and 3."
+                }
             }
+            $duration = [timespan]::FromMinutes($durationMinutes)
         }
 
         $startDateTime = $null
         $startTimeOfDay = $null
         $daysOfWeek = @()
+        $dayOfMonth = $null
         if ($schedule -eq 'Once') {
             $parsedStart = [datetime]::MinValue
             if (-not [datetime]::TryParse(
@@ -1226,9 +1240,34 @@ function Get-ValidatedMonitorMaintenanceWindows {
                 throw "Maintenance window '$name' Start must be an ISO local date/time, for example 2026-09-26T00:00:00."
             }
             $startDateTime = if ($parsedStart.Kind -eq [DateTimeKind]::Utc) { $parsedStart.ToLocalTime() } else { $parsedStart }
+            if (-not [string]::IsNullOrWhiteSpace($endText)) {
+                $parsedEnd = [datetime]::MinValue
+                if (-not [datetime]::TryParse(
+                        $endText,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::AllowWhiteSpaces,
+                        [ref]$parsedEnd)) {
+                    throw "Maintenance window '$name' End must be an ISO local date/time, for example 2026-10-10T02:00:00."
+                }
+                $endDateTime = if ($parsedEnd.Kind -eq [DateTimeKind]::Utc) { $parsedEnd.ToLocalTime() } else { $parsedEnd }
+                if ($endDateTime -le $startDateTime) {
+                    throw "Maintenance window '$name' End must be later than Start."
+                }
+                $duration = $endDateTime - $startDateTime
+            }
         }
         else {
             $startTimeOfDay = ConvertTo-MonitorMaintenanceTimeOfDay -Value $startText -WindowName $name
+            if (-not [string]::IsNullOrWhiteSpace($endText)) {
+                $endTimeOfDay = ConvertTo-MonitorMaintenanceTimeOfDay -Value $endText -WindowName $name -FieldName 'End'
+                if ($endTimeOfDay -eq $startTimeOfDay) {
+                    throw "Maintenance window '$name' End must differ from Start."
+                }
+                if ($endTimeOfDay -lt $startTimeOfDay) {
+                    $endTimeOfDay = $endTimeOfDay.Add([timespan]::FromDays(1))
+                }
+                $duration = $endTimeOfDay - $startTimeOfDay
+            }
             if ($schedule -eq 'Weekly') {
                 $configuredDays = @(if ($null -ne $window.PSObject.Properties['DaysOfWeek']) { $window.DaysOfWeek })
                 if ($configuredDays.Count -eq 0) {
@@ -1245,16 +1284,27 @@ function Get-ValidatedMonitorMaintenanceWindows {
                 }
                 $daysOfWeek = @($daysOfWeek | Select-Object -Unique)
             }
+            elseif ($schedule -eq 'Monthly') {
+                $parsedDayOfMonth = 0
+                if ($null -eq $window.PSObject.Properties['DayOfMonth'] -or
+                    -not [int]::TryParse([string]$window.DayOfMonth, [ref]$parsedDayOfMonth) -or
+                    $parsedDayOfMonth -lt 1 -or $parsedDayOfMonth -gt 31) {
+                    throw "Monthly maintenance window '$name' requires DayOfMonth between 1 and 31."
+                }
+                $dayOfMonth = $parsedDayOfMonth
+            }
         }
 
         $validated.Add([pscustomobject]@{
                 Name            = $name
+                Comment         = $comment
                 Enabled         = $enabled
                 Schedule        = $schedule
                 StartDateTime   = $startDateTime
                 StartTimeOfDay  = $startTimeOfDay
                 DaysOfWeek      = $daysOfWeek
-                DurationMinutes = $durationMinutes
+                DayOfMonth      = $dayOfMonth
+                Duration        = $duration
             }) | Out-Null
     }
     return $validated.ToArray()
@@ -1272,15 +1322,17 @@ function Get-ActiveMonitorMaintenanceWindow {
         else {
             foreach ($date in @($Now.Date, $Now.Date.AddDays(-1))) {
                 if ($window.Schedule -eq 'Weekly' -and $window.DaysOfWeek -notcontains $date.DayOfWeek) { continue }
+                if ($window.Schedule -eq 'Monthly' -and $date.Day -ne $window.DayOfMonth) { continue }
                 $candidateStarts.Add($date.Add([timespan]$window.StartTimeOfDay)) | Out-Null
             }
         }
 
         foreach ($start in $candidateStarts) {
-            $end = $start.AddMinutes([int]$window.DurationMinutes)
+            $end = $start.Add([timespan]$window.Duration)
             if ($Now -ge $start -and $Now -lt $end) {
                 return [pscustomobject]@{
                     Name     = $window.Name
+                    Comment  = $window.Comment
                     Schedule = $window.Schedule
                     Start    = $start
                     End      = $end
@@ -6231,11 +6283,13 @@ function Invoke-D4AMonitor {
 
     $activeMaintenance = Get-ActiveMonitorMaintenanceWindow
     if ($null -ne $activeMaintenance) {
-        $maintenanceMessage = 'Scheduled maintenance is active: {0}; schedule={1}; start={2}; monitoring checks and notifications are skipped until {3}.' -f
+        $maintenanceDetails = if ([string]::IsNullOrWhiteSpace([string]$activeMaintenance.Comment)) { '' } else { '; details={0}' -f $activeMaintenance.Comment }
+        $maintenanceMessage = 'Scheduled maintenance is active: {0}; schedule={1}; start={2}; monitoring checks and notifications are skipped until {3}{4}.' -f
             $activeMaintenance.Name,
             $activeMaintenance.Schedule,
             $activeMaintenance.Start.ToString('yyyy-MM-dd HH:mm:ss'),
-            $activeMaintenance.End.ToString('yyyy-MM-dd HH:mm:ss')
+            $activeMaintenance.End.ToString('yyyy-MM-dd HH:mm:ss'),
+            $maintenanceDetails
         Write-RunLog -Level INFO -Category Maintenance -Color Cyan -Message $maintenanceMessage
         Add-MonitorResult -Severity OK -Category Maintenance -Check 'Scheduled maintenance' -Message $maintenanceMessage -Key 'maintenance-window-active'
         return

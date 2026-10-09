@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.10.5 / Monitoring 7.10.5 - 2026-10-09
+
+- Added option `0`, **Add planned maintenance**, to the **Execute Monitoring Commands** menu.
+- The guided workflow supports numbered Once, Daily, Weekly, and Monthly schedules, validated start/end times, overnight intervals, and an optional maintenance comment.
+- Monitoring now suppresses checks and notifications for the full configured start/end interval while preserving legacy one-to-three-minute `DurationMinutes` entries.
+- Planned maintenance changes back up the JSON configuration, validate the updated file, roll back failed changes, and record the confirmed configuration update in the action log.
+
 ## Monitoring 7.10.4 - 2026-10-09
 
 - SQL Database Engine service health is now evaluated as aggregate availability: an alert is sent only when no detected `MSSQLSERVER` or `MSSQL$<instance>` service is running.
