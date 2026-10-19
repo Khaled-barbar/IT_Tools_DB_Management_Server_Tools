@@ -61,7 +61,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.11.0'
+$Script:MonitoringOverlapWaitTimeoutSeconds = 900
+$Script:ToolVersion = [version]'7.11.1'
 $Script:ToolReleaseDate = '2026-10-19'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -3561,6 +3562,47 @@ function Write-SiteMonitoringOutputLine {
     Write-Host $text -ForegroundColor $color
 }
 
+function Wait-SiteMonitoringCommandOverlap {
+    param(
+        [Parameter(Mandatory = $true)][object]$Target,
+        [ValidateRange(30, 3600)][int]$TimeoutSeconds = 900
+    )
+
+    $monitorLogDirectory = Split-Path -Parent ([string]$Target.ConfigPath)
+    if ([string]::IsNullOrWhiteSpace($monitorLogDirectory)) {
+        throw 'The monitoring log directory could not be resolved from the selected configuration path.'
+    }
+    $lockPath = Join-Path $monitorLogDirectory 'scheduled-monitor.lock'
+    $startedAt = Get-Date
+    while ($true) {
+        $probe = $null
+        try {
+            $probe = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            if (((Get-Date) - $startedAt).TotalSeconds -ge 1) {
+                Write-StreamingLog -Percent 20 -Step 'Overlap wait' -Description (
+                    'The overlapping monitoring run completed after {0:N1} second(s). Starting the manual command.' -f
+                        ((Get-Date) - $startedAt).TotalSeconds
+                )
+            }
+            return
+        }
+        catch [IO.IOException] {
+            $elapsedSeconds = [int][math]::Floor(((Get-Date) - $startedAt).TotalSeconds)
+            if ($elapsedSeconds -ge $TimeoutSeconds) {
+                throw ('Another monitoring run is still active after {0} second(s). The manual command was not started.' -f $TimeoutSeconds)
+            }
+            Write-StreamingLog -Percent 20 -Step 'Overlap wait' -Description (
+                'Another monitoring run is active. Waiting 5 seconds before retrying; elapsed {0}s of {1}s.' -f
+                    $elapsedSeconds, $TimeoutSeconds
+            )
+            Start-Sleep -Seconds 5
+        }
+        finally {
+            if ($null -ne $probe) { $probe.Dispose() }
+        }
+    }
+}
+
 function Invoke-SiteMonitoringCommand {
     param(
         [Parameter(Mandatory = $true)][object]$Target,
@@ -3573,9 +3615,15 @@ function Invoke-SiteMonitoringCommand {
 
     Clear-Host
     Show-SectionTitle $Title
+    $managementArguments = @('-AddSiteAddress', '-ShowConfiguration', '-ValidateConfiguration', '-SetIssueCooldown', '-ClearIssueCooldown')
+    $waitForOverlap = @($ArgumentList | Where-Object { $_ -in $managementArguments }).Count -eq 0
     Write-Host $Description -ForegroundColor Cyan
     Write-Host "Monitor file: $($Target.ScriptPath)" -ForegroundColor Gray
     Write-Host "Configuration: $($Target.ConfigPath)" -ForegroundColor Gray
+    if ($waitForOverlap) {
+        Write-Host ('Overlap handling: wait up to {0} minutes for an active monitoring run to finish.' -f
+            [math]::Round($Script:MonitoringOverlapWaitTimeoutSeconds / 60, 0)) -ForegroundColor Gray
+    }
     Write-Host 'Command:' -ForegroundColor Cyan
     Write-Host (Get-SiteMonitoringCommandText -Target $Target -ArgumentList $ArgumentList) -ForegroundColor Yellow
     $confirmation = Read-Host 'Press Enter to run this command, or type q to go back'
@@ -3587,15 +3635,31 @@ function Invoke-SiteMonitoringCommand {
     }
 
     try {
+        if ($waitForOverlap) {
+            Wait-SiteMonitoringCommandOverlap -Target $Target -TimeoutSeconds $Script:MonitoringOverlapWaitTimeoutSeconds
+        }
         Write-StreamingLog -Percent 20 -Step 'Monitor command' -Description 'Running the selected monitoring command.'
         $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Target.ScriptPath, '-ConfigPath', $Target.ConfigPath) + $ArgumentList
         $output = [System.Collections.Generic.List[string]]::new()
-        & powershell.exe @arguments 2>&1 | ForEach-Object {
-            $line = $_
-            $output.Add([string]$line) | Out-Null
-            Write-SiteMonitoringOutputLine -Line $line
+        $previousWaitForOverlap = [Environment]::GetEnvironmentVariable('D4A_MONITOR_WAIT_FOR_OVERLAP', 'Process')
+        $previousOverlapTimeout = [Environment]::GetEnvironmentVariable('D4A_MONITOR_OVERLAP_WAIT_TIMEOUT_SECONDS', 'Process')
+        $exitCode = $null
+        try {
+            if ($waitForOverlap) {
+                [Environment]::SetEnvironmentVariable('D4A_MONITOR_WAIT_FOR_OVERLAP', '1', 'Process')
+                [Environment]::SetEnvironmentVariable('D4A_MONITOR_OVERLAP_WAIT_TIMEOUT_SECONDS', [string]$Script:MonitoringOverlapWaitTimeoutSeconds, 'Process')
+            }
+            & powershell.exe @arguments 2>&1 | ForEach-Object {
+                $line = $_
+                $output.Add([string]$line) | Out-Null
+                Write-SiteMonitoringOutputLine -Line $line
+            }
+            $exitCode = $LASTEXITCODE
         }
-        $exitCode = $LASTEXITCODE
+        finally {
+            [Environment]::SetEnvironmentVariable('D4A_MONITOR_WAIT_FOR_OVERLAP', $previousWaitForOverlap, 'Process')
+            [Environment]::SetEnvironmentVariable('D4A_MONITOR_OVERLAP_WAIT_TIMEOUT_SECONDS', $previousOverlapTimeout, 'Process')
+        }
         if ($exitCode -eq 1) {
             # The monitor reserves exit code 1 for completed runs containing warnings.
             Complete-ScriptActionAudit -AuditRecord $actionAudit

@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.11.1 / Monitoring 7.11.2 - 2026-10-19
+
+- Manual monitoring commands launched from IT Tools now wait for an overlapping scheduled or manual run to finish instead of immediately returning an overlap warning.
+- IT Tools shows five-second wait progress and enforces a 15-minute timeout before starting the selected command.
+- A temporary process environment marker lets the updated monitor preserve the wait across the launch handoff without adding an incompatible command-line parameter. Scheduled Task executions retain the existing skip-on-overlap behavior.
+
 ## Monitoring 7.11.1 - 2026-10-19
 
 - Synchronized the `D4A-Monitor-Version` and `D4A-Monitor-Release-Date` header comments with the embedded runtime metadata and release manifest in both canonical and legacy monitoring payloads.

@@ -486,7 +486,7 @@ The menu exposes common management and test commands:
 | Verify a component and force recovery if healthy | `-ForceRecoveryTarget 'notification reference, service, resource, check, or rule key'` |
 | Skip monitor update check once | `-SkipAutomaticUpdate` |
 
-Use the IT Tools menu when possible because it discovers installed monitors, displays the exact command, and records command failures in the main daily error log.
+Use the IT Tools menu when possible because it discovers installed monitors, displays the exact command, and records command failures in the main daily error log. If another monitoring run is active, a manual command waits with visible five-second progress for up to 15 minutes, then starts automatically when the overlap lock is released. Scheduled monitoring runs continue to skip rather than wait when they overlap.
 
 To add planned maintenance, select **Site Monitoring > Execute Monitoring Commands > 0) Add planned maintenance**. Select the installed monitor, then choose the frequency by number: Once, Daily, Weekly, or Monthly. Enter the start and end in 24-hour `HH:MM` format. One-time maintenance also asks for `YYYY-MM-DD`; weekly maintenance asks for a weekday; monthly maintenance asks for a day from 1 through 31. An end time earlier than the start time means the interval ends the following day. Months without the selected day are skipped. The optional comment is stored with the entry. Review the summary and type `ADD`; IT Tools backs up the configuration and validates the saved window before reporting success.
 

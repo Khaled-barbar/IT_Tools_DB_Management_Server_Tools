@@ -1,5 +1,5 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.11.1
+# D4A-Monitor-Version: 7.11.2
 # D4A-Monitor-Release-Date: 2026-10-19
 
 <#
@@ -287,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.11.1'
+$script:MonitorVersion = '7.11.2'
 $script:MonitorReleaseDate = '2026-10-19'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -6617,15 +6617,46 @@ function Invoke-D4AMonitor {
 
     $lockPath = Join-Path (Split-Path -Parent $script:RunLogPath) 'scheduled-monitor.lock'
     $lockStream = $null
+    $waitForOverlap = [string]$env:D4A_MONITOR_WAIT_FOR_OVERLAP -match '^(?i:1|true|yes)$'
+    $overlapWaitTimeoutSeconds = 900
+    $configuredOverlapWaitTimeout = 0
+    if ([int]::TryParse([string]$env:D4A_MONITOR_OVERLAP_WAIT_TIMEOUT_SECONDS, [ref]$configuredOverlapWaitTimeout) -and
+        $configuredOverlapWaitTimeout -ge 30 -and $configuredOverlapWaitTimeout -le 3600) {
+        $overlapWaitTimeoutSeconds = $configuredOverlapWaitTimeout
+    }
     try {
-        try {
-            $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $overlapWaitStartedAt = Get-Date
+        while ($null -eq $lockStream) {
+            try {
+                $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            }
+            catch {
+                if (-not $waitForOverlap) {
+                    Add-MonitorResult -Severity Warning -Category Monitor -Check 'Overlap lock' -Message (
+                        'Another monitor instance is running. This scan was skipped.'
+                    )
+                    return
+                }
+
+                $elapsedSeconds = [int][math]::Floor(((Get-Date) - $overlapWaitStartedAt).TotalSeconds)
+                if ($elapsedSeconds -ge $overlapWaitTimeoutSeconds) {
+                    Add-MonitorResult -Severity Warning -Category Monitor -Check 'Overlap lock' -Message (
+                        'Another monitor instance was still running after {0} second(s). The manual scan was not started.' -f $overlapWaitTimeoutSeconds
+                    )
+                    return
+                }
+                Write-RunLog -Level INFO -Category Monitor -Color Blue -Message (
+                    'Another monitor instance is running. Manual scan is waiting for the overlap lock; elapsed={0}s; timeout={1}s.' -f
+                        $elapsedSeconds, $overlapWaitTimeoutSeconds
+                )
+                Start-Sleep -Seconds 5
+            }
         }
-        catch {
-            Add-MonitorResult -Severity Warning -Category Monitor -Check 'Overlap lock' -Message (
-                'Another monitor instance is running. This scan was skipped.'
+        if ($waitForOverlap -and ((Get-Date) - $overlapWaitStartedAt).TotalSeconds -ge 1) {
+            Write-RunLog -Level OK -Category Monitor -Color Green -Message (
+                'The overlapping monitor run completed. Manual scan acquired the lock after {0:N1} second(s).' -f
+                    ((Get-Date) - $overlapWaitStartedAt).TotalSeconds
             )
-            return
         }
 
         foreach ($endpoint in @($monitorEndpoints)) {
