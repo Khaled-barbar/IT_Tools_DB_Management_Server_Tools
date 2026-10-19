@@ -6,6 +6,11 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.11.1 - 2026-10-19
+
+- Synchronized the `D4A-Monitor-Version` and `D4A-Monitor-Release-Date` header comments with the embedded runtime metadata and release manifest in both canonical and legacy monitoring payloads.
+- Restored automatic-update compatibility for Monitoring 7.11.x by ensuring downloaded-script metadata validation sees the same version and release date advertised by `monitor-version.txt` and `update-manifest.json`.
+
 ## 7.11.0 / Monitoring 7.11.0 - 2026-10-19
 
 - Watchdog API timeout/restart evidence is reconciled with the current API endpoint and API service/listener checks. A completed restart followed by healthy live checks is soft-ignored and explicitly resolves the original Watchdog rule; the alert remains actionable when the endpoint or service is still unhealthy.

@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.10.6
-# D4A-Monitor-Release-Date: 2026-10-09
+# D4A-Monitor-Version: 7.11.1
+# D4A-Monitor-Release-Date: 2026-10-19
 
 <#
 .SYNOPSIS
@@ -287,7 +287,7 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.11.0'
+$script:MonitorVersion = '7.11.1'
 $script:MonitorReleaseDate = '2026-10-19'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
