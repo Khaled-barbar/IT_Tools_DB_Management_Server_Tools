@@ -61,8 +61,8 @@ $Script:ServerCheckCimTimeoutSeconds = 45
 $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
-$Script:ToolVersion = [version]'7.10.5'
-$Script:ToolReleaseDate = '2026-10-09'
+$Script:ToolVersion = [version]'7.11.0'
+$Script:ToolReleaseDate = '2026-10-19'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -3975,10 +3975,22 @@ function Read-MonitoringRecoveryTarget {
         Write-Host ('[{0}] {1}' -f ($index + 1), $options[$index].Label)
     }
     Write-Host '[M] Enter a service or component name manually'
+    Write-Host '[R] Paste a monitoring notification reference'
 
     while ($true) {
-        $selection = Read-Host 'Select a target (M for manual entry; q to go back)'
+        $selection = Read-Host 'Select a target (R for notification reference; M for manual entry; q to go back)'
         if (Test-IsBack $selection) { return $null }
+
+        if ($selection -match '^(?i)r$') {
+            while ($true) {
+                $reference = (Read-Host 'Paste the notification reference, for example D4A-1A2B3C4D5E6F (q to go back)').Trim()
+                if (Test-IsBack $reference) { return $null }
+                if ($reference -match '^(?i)D4A-[0-9A-F]{12}$') {
+                    return $reference.ToUpperInvariant()
+                }
+                Write-Host 'Enter the D4A reference exactly as shown in the alert.' -ForegroundColor Yellow
+            }
+        }
 
         if ($selection -match '^(?i)m$') {
             while ($true) {
@@ -3998,7 +4010,7 @@ function Read-MonitoringRecoveryTarget {
         if ([int]::TryParse($selection, [ref]$number) -and $number -ge 1 -and $number -le $options.Count) {
             return [string]$options[$number - 1].Value
         }
-        Write-Host 'Select one of the displayed numbers, M for manual entry, or q to go back.' -ForegroundColor Yellow
+        Write-Host 'Select one of the displayed numbers, R for a notification reference, M for manual entry, or q to go back.' -ForegroundColor Yellow
     }
 }
 
@@ -4149,8 +4161,15 @@ function Show-ExecuteMonitoringCommandsMenu {
                 }
                 $recoveryTarget = Read-MonitoringRecoveryTarget
                 if ($null -eq $recoveryTarget) { continue }
+                if ($recoveryTarget -match '^(?i)D4A-[0-9A-F]{12}$' -and
+                    $installedMonitorVersion -lt [version]'7.11.0') {
+                    Write-Host 'Notification-reference recovery requires Monitoring 7.11.0 or later.' -ForegroundColor Yellow
+                    Write-Host 'Update the monitoring script version, then retry with the same reference.' -ForegroundColor Gray
+                    Pause-Screen
+                    continue
+                }
                 Invoke-LoggedToolAction -Context 'Execute Monitoring Commands - Forced recovery check' -Action {
-                    Invoke-SiteMonitoringCommand -Target $target -Title 'Check Component and Send Recovery' -Description ('Runs live monitoring checks for "{0}" and forces a recovery notification only when every matching result is healthy.' -f $recoveryTarget) -ArgumentList @('-ForceRecoveryTarget', $recoveryTarget)
+                    Invoke-SiteMonitoringCommand -Target $target -Title 'Check Component and Send Recovery' -Description ('Runs live monitoring checks for "{0}". A pasted alert reference rechecks the original rule and sends recovery only when it is healthy; otherwise the active alert details are displayed.' -f $recoveryTarget) -ArgumentList @('-ForceRecoveryTarget', $recoveryTarget)
                 }
             }
             default {

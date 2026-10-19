@@ -287,8 +287,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.10.6'
-$script:MonitorReleaseDate = '2026-10-09'
+$script:MonitorVersion = '7.11.0'
+$script:MonitorReleaseDate = '2026-10-19'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -2126,7 +2126,7 @@ function Initialize-MonitorLogging {
 
 function Get-MonitorRuntimeState {
     $defaultState = [pscustomobject]@{
-        StateVersion = 5
+        StateVersion = 6
         DataCollectorLastEvent = [pscustomobject]@{
             ConsecutiveFailures = 0
             LastHealthy         = $null
@@ -2184,12 +2184,15 @@ function Get-MonitorRuntimeState {
             if ($null -ne $notifiedIssue -and $null -eq $notifiedIssue.PSObject.Properties['LastMessage']) {
                 $notifiedIssue | Add-Member -MemberType NoteProperty -Name LastMessage -Value ''
             }
+            if ($null -ne $notifiedIssue -and $null -eq $notifiedIssue.PSObject.Properties['NotificationReference']) {
+                $notifiedIssue | Add-Member -MemberType NoteProperty -Name NotificationReference -Value ''
+            }
         }
         if ($null -eq $state.PSObject.Properties['StateVersion']) {
-            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 5
+            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 6
         }
         else {
-            $state.StateVersion = 5
+            $state.StateVersion = 6
         }
         return $state
     }
@@ -2304,6 +2307,18 @@ function ConvertTo-IgnoreRuleKey {
         throw 'An ignore-rule key cannot be empty.'
     }
     return $key
+}
+
+function New-MonitorNotificationReference {
+    $bytes = New-Object byte[] 6
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    }
+    finally {
+        $generator.Dispose()
+    }
+    return 'D4A-{0}' -f (($bytes | ForEach-Object { $_.ToString('X2') }) -join '')
 }
 
 function Add-MonitorResult {
@@ -2767,6 +2782,7 @@ function Get-RecoveredNotifiedIssues {
                 IgnoreUntil          = $null
                 NotificationEligible = $true
                 IsRecovery           = $true
+                NotificationReference = if ($null -ne $notifiedIssue.PSObject.Properties['NotificationReference']) { [string]$notifiedIssue.NotificationReference } else { '' }
             }) | Out-Null
         Write-RunLog -Level OK -Category Recovery -Color Green -Message (
             'Previously notified issue is healthy: {0}; component={1}; check={2}.' -f $key, $notifiedIssue.Category, $notifiedIssue.Check
@@ -2783,24 +2799,121 @@ function Get-ForcedRecoveryResults {
         throw 'A recovery target is required.'
     }
 
+    $state = Get-MonitorRuntimeState
+    $storedIssues = @($state.NotifiedIssues)
+    $storedTargetIssues = @($storedIssues | Where-Object {
+            $null -ne $_ -and
+            $null -ne $_.PSObject.Properties['NotificationReference'] -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.NotificationReference) -and
+            [string]$_.NotificationReference -ieq $searchText
+        })
+    $matchedByReference = $storedTargetIssues.Count -gt 0
+
     $allResults = @($script:Results | Where-Object {
             $_.Category -notin @('Configuration', 'Email', 'Discord', 'Ignore', 'Recovery')
         })
-    $matchingResults = @($allResults | Where-Object {
-            [string]$_.Key -ieq $searchText -or
-            [string]$_.Check -ieq $searchText -or
-            [string]$_.Category -ieq $searchText
-        })
-    if ($matchingResults.Count -eq 0) {
-        $matchingResults = @($allResults | Where-Object {
-                foreach ($value in @([string]$_.Key, [string]$_.Check, [string]$_.Category, [string]$_.Message)) {
-                    if (-not [string]::IsNullOrWhiteSpace($value) -and
-                        $value.IndexOf($searchText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                        return $true
-                    }
+    $matchingResults = @()
+    if ($matchedByReference) {
+        $resolvedResults = [System.Collections.Generic.List[object]]::new()
+        foreach ($storedIssue in $storedTargetIssues) {
+            $storedKey = ConvertTo-IgnoreRuleKey -Value ([string]$storedIssue.Key)
+            $currentForKey = @($allResults | Where-Object {
+                    (ConvertTo-IgnoreRuleKey -Value ([string]$_.Key)) -eq $storedKey
+                })
+            if ($currentForKey.Count -eq 0 -and $storedKey -eq 'diagnostics-watchdog-api') {
+                $apiHealth = Get-WatchdogApiLiveHealthSummary
+                if ($apiHealth.HasEvidence) {
+                    $resolvedResults.Add([pscustomobject]@{
+                            Severity = if ($apiHealth.IsHealthy) { 'OK' } else { 'Alert' }
+                            Category = 'Diagnostics'
+                            Check    = 'Watchdog service logs'
+                            Message  = 'Live API recovery verification: {0}' -f $apiHealth.Message
+                            Key      = $storedKey
+                        }) | Out-Null
+                    continue
                 }
-                return $false
+            }
+            if ($currentForKey.Count -eq 0) {
+                throw ('Notification reference {0} matched {1}, but this run produced no conclusive result for rule {2}. The original alert remains active: {3}' -f
+                    $searchText, $storedIssue.Check, $storedKey, $storedIssue.LastMessage)
+            }
+            foreach ($currentResult in $currentForKey) { $resolvedResults.Add($currentResult) | Out-Null }
+        }
+        $matchingResults = @($resolvedResults.ToArray())
+    }
+    else {
+        $storedNameMatches = @($storedIssues | Where-Object {
+                [string]$_.Key -ieq $searchText -or
+                [string]$_.Check -ieq $searchText -or
+                [string]$_.Category -ieq $searchText
             })
+        if ($storedNameMatches.Count -eq 1) {
+            $storedTargetIssues = $storedNameMatches
+            $storedKey = ConvertTo-IgnoreRuleKey -Value ([string]$storedNameMatches[0].Key)
+            $matchingResults = @($allResults | Where-Object {
+                    (ConvertTo-IgnoreRuleKey -Value ([string]$_.Key)) -eq $storedKey
+                })
+            if ($matchingResults.Count -eq 0 -and $storedKey -eq 'diagnostics-watchdog-api') {
+                $apiHealth = Get-WatchdogApiLiveHealthSummary
+                if ($apiHealth.HasEvidence) {
+                    $matchingResults = @([pscustomobject]@{
+                            Severity = if ($apiHealth.IsHealthy) { 'OK' } else { 'Alert' }
+                            Category = 'Diagnostics'
+                            Check    = 'Watchdog service logs'
+                            Message  = 'Live API recovery verification: {0}' -f $apiHealth.Message
+                            Key      = $storedKey
+                        })
+                }
+            }
+        }
+        elseif ($storedNameMatches.Count -gt 1 -and
+            @($storedNameMatches | Where-Object { [string]$_.Check -ieq $searchText }).Count -gt 1) {
+            $matchedKeys = @($storedNameMatches | Select-Object -ExpandProperty Key -Unique) -join ', '
+            throw ('Several active alerts match "{0}": {1}. Paste a notification reference or enter one exact rule key.' -f
+                $searchText, $matchedKeys)
+        }
+        else {
+            $matchingResults = @($allResults | Where-Object {
+                    [string]$_.Key -ieq $searchText -or
+                    [string]$_.Check -ieq $searchText -or
+                    [string]$_.Category -ieq $searchText
+                })
+        }
+        if ($matchingResults.Count -eq 0) {
+            $matchingResults = @($allResults | Where-Object {
+                    foreach ($value in @([string]$_.Key, [string]$_.Check, [string]$_.Category, [string]$_.Message)) {
+                        if (-not [string]::IsNullOrWhiteSpace($value) -and
+                            $value.IndexOf($searchText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            return $true
+                        }
+                    }
+                    return $false
+                })
+        }
+        if ($matchingResults.Count -eq 0) {
+            $storedTargetIssues = @($storedIssues | Where-Object {
+                    foreach ($value in @([string]$_.Key, [string]$_.Check, [string]$_.Category)) {
+                        if (-not [string]::IsNullOrWhiteSpace($value) -and
+                            $value.IndexOf($searchText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            return $true
+                        }
+                    }
+                    return $false
+                })
+            if ($storedTargetIssues.Count -eq 1 -and
+                (ConvertTo-IgnoreRuleKey -Value ([string]$storedTargetIssues[0].Key)) -eq 'diagnostics-watchdog-api') {
+                $apiHealth = Get-WatchdogApiLiveHealthSummary
+                if ($apiHealth.HasEvidence) {
+                    $matchingResults = @([pscustomobject]@{
+                            Severity = if ($apiHealth.IsHealthy) { 'OK' } else { 'Alert' }
+                            Category = 'Diagnostics'
+                            Check    = 'Watchdog service logs'
+                            Message  = 'Live API recovery verification: {0}' -f $apiHealth.Message
+                            Key      = 'diagnostics-watchdog-api'
+                        })
+                }
+            }
+        }
     }
 
     if ($matchingResults.Count -eq 0) {
@@ -2828,10 +2941,14 @@ function Get-ForcedRecoveryResults {
         $summary = @($unhealthyResults | Select-Object -First 4 | ForEach-Object {
                 '{0}: {1}' -f $_.Check, $_.Message
             }) -join ' | '
-        throw ('Recovery notification was not sent because "{0}" is not healthy: {1}' -f $searchText, $summary)
+        $originalSummary = if ($storedTargetIssues.Count -gt 0) {
+            @($storedTargetIssues | Select-Object -First 4 | ForEach-Object { '{0}: {1}' -f $_.Check, $_.LastMessage }) -join ' | '
+        }
+        else { 'No stored alert message was matched.' }
+        throw ('Recovery notification was not sent because "{0}" is still not healthy. Original alert: {1} | Current result: {2}' -f
+            $searchText, $originalSummary, $summary)
     }
 
-    $state = Get-MonitorRuntimeState
     $previousByKey = @{}
     foreach ($notifiedIssue in @($state.NotifiedIssues)) {
         if ($null -eq $notifiedIssue -or [string]::IsNullOrWhiteSpace([string]$notifiedIssue.Key)) { continue }
@@ -2862,6 +2979,11 @@ function Get-ForcedRecoveryResults {
                 IgnoreUntil          = $null
                 NotificationEligible = $true
                 IsRecovery           = $true
+                NotificationReference = if ($previousByKey.ContainsKey($key) -and
+                    $null -ne $previousByKey[$key].PSObject.Properties['NotificationReference']) {
+                    [string]$previousByKey[$key].NotificationReference
+                }
+                else { '' }
             }) | Out-Null
     }
     return $recoveries.ToArray()
@@ -2870,7 +2992,8 @@ function Get-ForcedRecoveryResults {
 function Update-NotifiedIssueStateAfterDelivery {
     param(
         [object[]]$NewlyNotifiedIssues,
-        [object[]]$RecoveredIssues
+        [object[]]$RecoveredIssues,
+        [string]$NotificationReference
     )
 
     $state = Get-MonitorRuntimeState
@@ -2895,6 +3018,7 @@ function Update-NotifiedIssueStateAfterDelivery {
             Severity       = [string]$issue.Severity
             LastNotifiedAt = (Get-Date).ToString('o')
             LastMessage    = [string]$issue.Message
+            NotificationReference = [string]$NotificationReference
         }
     }
 
@@ -5202,6 +5326,63 @@ function Add-WatchdogSqlConnectivityResult {
     }
 }
 
+function Get-WatchdogApiLiveHealthSummary {
+    $apiEndpointResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Application' -and [string]$_.Check -match '^(?i)API health(?:\s|\()'
+        })
+    $apiServiceResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Server' -and
+            [string]$_.Check -eq 'Windows service' -and
+            (('{0} {1}' -f [string]$_.Key, [string]$_.Message) -match '(?i)(?:^|[^a-z0-9])api(?:$|[^a-z0-9])')
+        })
+    $apiListenerResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Server' -and [string]$_.Check -eq 'API listener'
+        })
+
+    $endpointHealthy = $apiEndpointResults.Count -gt 0 -and
+        @($apiEndpointResults | Where-Object { [string]$_.Severity -in @('Alert', 'Error') }).Count -eq 0
+    $serviceEvidence = if ($apiServiceResults.Count -gt 0) { $apiServiceResults } else { $apiListenerResults }
+    $serviceHealthy = @($serviceEvidence).Count -gt 0 -and
+        @($serviceEvidence | Where-Object { [string]$_.Severity -in @('Alert', 'Error') }).Count -eq 0
+    $healthy = $endpointHealthy -and $serviceHealthy
+
+    $endpointSummary = if ($apiEndpointResults.Count -eq 0) {
+        'API endpoint health was not evaluated'
+    }
+    else {
+        @($apiEndpointResults | ForEach-Object { '{0}={1}' -f $_.Check, $_.Severity }) -join ', '
+    }
+    $serviceSummary = if (@($serviceEvidence).Count -eq 0) {
+        'API service/listener health was not evaluated'
+    }
+    else {
+        @($serviceEvidence | ForEach-Object { '{0}={1}' -f $_.Check, $_.Severity }) -join ', '
+    }
+
+    return [pscustomobject]@{
+        IsHealthy   = $healthy
+        HasEvidence = ($apiEndpointResults.Count -gt 0 -and @($serviceEvidence).Count -gt 0)
+        Message     = '{0}; {1}' -f $endpointSummary, $serviceSummary
+    }
+}
+
+function Test-IsWatchdogApiEndpointFailureEvidence {
+    param([string]$Evidence)
+
+    if ([string]::IsNullOrWhiteSpace($Evidence)) { return $false }
+    return $Evidence -match '(?i)(?:https?://\S+|api\s+endpoint).*?(?:unavailable|timed?\s*out|timeout|not\s+responding)'
+}
+
+function Test-IsWatchdogApiRestartSuccessEvidence {
+    param([string]$Evidence)
+
+    if ([string]::IsNullOrWhiteSpace($Evidence)) { return $false }
+    return (
+        $Evidence -match '(?i)restart\s+succeeded' -and
+        $Evidence -match '(?i)(?:monitor:\s*api-endpoint|restarted\s+service\s+[''\"]?[^|]*api|reason:\s*\[api\])'
+    )
+}
+
 function Test-WatchdogServiceLogs {
     $watchdogRoot = Resolve-WatchdogLogRoot
     if ([string]::IsNullOrWhiteSpace($watchdogRoot)) {
@@ -5275,8 +5456,16 @@ function Test-WatchdogServiceLogs {
         $warningSamples = [System.Collections.Generic.List[string]]::new()
         $renamedServiceResolutions = [System.Collections.Generic.List[string]]::new()
         $plcNotConfigured = $false
+        $apiLiveHealth = if ($serviceName -match '(?i)^api$') { Get-WatchdogApiLiveHealthSummary } else { $null }
+        $reconciledApiRecovery = $false
         foreach ($record in $records) {
             if ([datetime]$record.Time -lt $since) { continue }
+            if ($null -ne $apiLiveHealth -and $apiLiveHealth.IsHealthy -and
+                ((Test-IsWatchdogApiEndpointFailureEvidence -Evidence ([string]$record.Text)) -or
+                    (Test-IsWatchdogApiRestartSuccessEvidence -Evidence ([string]$record.Text)))) {
+                $reconciledApiRecovery = $true
+                continue
+            }
             if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence ([string]$record.Text)) {
                 $plcNotConfigured = $true
                 continue
@@ -5316,6 +5505,12 @@ function Test-WatchdogServiceLogs {
 
         $severity = if ($alertSamples.Count -gt 0) { 'Alert' } elseif ($warningSamples.Count -gt 0) { 'Warning' } else { $null }
         if ($null -eq $severity) {
+            if ($reconciledApiRecovery) {
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+                    'A recent Watchdog API timeout/restart was soft-ignored because the current API endpoint and API service/listener checks are healthy. {0}' -f
+                        $apiLiveHealth.Message
+                ) -Key $watchdogRuleKey
+            }
             if ($renamedServiceResolutions.Count -gt 0) {
                 Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
                     'Watchdog missing-service evidence was soft-ignored after live service alias validation. {0}' -f
@@ -5733,6 +5928,7 @@ function New-EmailContent {
     param(
         [Parameter(Mandatory = $true)][string]$MonitoredSite,
         [Parameter(Mandatory = $true)][string]$MonitoringName,
+        [string]$NotificationReference,
         [object[]]$ActiveIgnoreRules,
         [object[]]$RecoveryResults,
         [ValidateSet('Alert', 'Recovery', 'Test', 'Daily')]
@@ -5772,6 +5968,9 @@ function New-EmailContent {
     $text = [Text.StringBuilder]::new()
     [void]$text.AppendLine($heading)
     [void]$text.AppendLine(('Monitoring name: {0}' -f $MonitoringName))
+    if (-not [string]::IsNullOrWhiteSpace($NotificationReference)) {
+        [void]$text.AppendLine(('Notification reference: {0}' -f $NotificationReference))
+    }
     [void]$text.AppendLine(('Sites: {0}' -f $MonitoredSite))
     [void]$text.AppendLine(('Server: {0}' -f $env:COMPUTERNAME))
     [void]$text.AppendLine(('Scan started: {0}' -f $script:RunStartedAt.ToString('yyyy-MM-dd HH:mm:ss zzz')))
@@ -5854,6 +6053,9 @@ function New-EmailContent {
     $html = [Text.StringBuilder]::new()
     [void]$html.AppendLine('<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#202124;font-size:14px">')
     [void]$html.AppendLine(('<h2>{0}</h2>' -f [Net.WebUtility]::HtmlEncode($heading)))
+    if (-not [string]::IsNullOrWhiteSpace($NotificationReference)) {
+        [void]$html.AppendLine(('<p><b>Notification reference:</b> <code>{0}</code></p>' -f [Net.WebUtility]::HtmlEncode($NotificationReference)))
+    }
     [void]$html.AppendLine(('<p><b>Monitoring name:</b> {0}<br><b>Sites:</b> {1}<br><b>Server:</b> {2}<br><b>Time:</b> {3}<br><b>Issues detected:</b> {4}<br><b>Not ignored:</b> {5}<br><b>Covered by active ignore rules:</b> {6}<br><b>Recovered previously notified issues:</b> {7}</p>' -f
         [Net.WebUtility]::HtmlEncode($MonitoringName),
         [Net.WebUtility]::HtmlEncode($MonitoredSite),
@@ -6065,6 +6267,7 @@ function New-DiscordNotificationPayload {
         [Parameter(Mandatory = $true)][string]$MonitoredSite,
         [Parameter(Mandatory = $true)][string]$MonitoringName,
         [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily', 'Status')][string]$NotificationType,
+        [string]$NotificationReference,
         [object[]]$RecoveryResults
     )
 
@@ -6093,10 +6296,11 @@ function New-DiscordNotificationPayload {
     }
     $title = Limit-DiscordText -Text ('{0} {1} - {2}' -f (Get-DiscordNotificationEmoji -NotificationType $NotificationType -IssueResults $distinctIssues), $notificationLabel, $MonitoringName) -MaximumLength 256
     $fields = [System.Collections.Generic.List[object]]::new()
+    $referenceLine = if ([string]::IsNullOrWhiteSpace($NotificationReference)) { '' } else { "**Reference:** ``$NotificationReference```n" }
     $fields.Add([ordered]@{
             name = 'Notification'
             value = Limit-DiscordText -Text (
-                "**Type:** $NotificationType`n**Affected component(s):** $componentText`n**Server:** $env:COMPUTERNAME`n**Time:** $((Get-Date).ToString('ddd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))"
+                "${referenceLine}**Type:** $NotificationType`n**Affected component(s):** $componentText`n**Server:** $env:COMPUTERNAME`n**Time:** $((Get-Date).ToString('ddd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))"
             ) -MaximumLength 600 -PreserveLineBreaks
             inline = $false
         }) | Out-Null
@@ -6106,7 +6310,7 @@ function New-DiscordNotificationPayload {
             $component = Get-MonitorSubjectComponentLabel -Result $recovery
             $fields.Add([ordered]@{
                     name = Limit-DiscordText -Text (':green_circle: Recovery | {0}' -f $component) -MaximumLength 100
-                    value = Limit-DiscordText -Text ("**Check:** {0}`n**Alert value:** {1}`n**Current value:** {2}`n**Status:** {3}`n**Rule:** ``{4}``" -f $recovery.Check, $recovery.PreviousValue, $recovery.CurrentValue, $recovery.Message, $recovery.Key) -MaximumLength 900 -PreserveLineBreaks
+                    value = Limit-DiscordText -Text ("**Reference:** ``{0}```n**Check:** {1}`n**Alert value:** {2}`n**Current value:** {3}`n**Status:** {4}`n**Rule:** ``{5}``" -f $recovery.NotificationReference, $recovery.Check, $recovery.PreviousValue, $recovery.CurrentValue, $recovery.Message, $recovery.Key) -MaximumLength 900 -PreserveLineBreaks
                     inline = $false
                 }) | Out-Null
         }
@@ -6542,6 +6746,24 @@ function Invoke-D4AMonitor {
             'Recovery'
         }
         $discordNotificationType = if ($SendDiscordStatus.IsPresent) { 'Status' } else { $emailType }
+        $notificationReference = ''
+        if ($emailType -eq 'Alert') {
+            $notificationReference = New-MonitorNotificationReference
+        }
+        elseif ($emailType -eq 'Recovery') {
+            $recoveryReferences = @($recoveredNotifiedIssues | ForEach-Object {
+                    if ($null -ne $_.PSObject.Properties['NotificationReference'] -and
+                        -not [string]::IsNullOrWhiteSpace([string]$_.NotificationReference)) {
+                        [string]$_.NotificationReference
+                    }
+                } | Select-Object -Unique)
+            $notificationReference = if ($recoveryReferences.Count -eq 1) {
+                $recoveryReferences[0]
+            }
+            else {
+                New-MonitorNotificationReference
+            }
+        }
         if (($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent) -and -not $emailReportRequested) {
             Write-RunLog -Category Email -Color DarkGray -Message (
                 'The requested email report was skipped because email delivery is {0}. Set EnableEmailNotifications to true in the JSON configuration to enable it.' -f
@@ -6577,6 +6799,7 @@ function Invoke-D4AMonitor {
                 $content = New-EmailContent `
                     -MonitoredSite $siteForNotification `
                     -MonitoringName $resolvedMonitoringName `
+                    -NotificationReference $notificationReference `
                     -ActiveIgnoreRules $activeIgnoreRules `
                     -RecoveryResults $recoveredNotifiedIssues `
                     -EmailType $emailType
@@ -6602,6 +6825,7 @@ function Invoke-D4AMonitor {
                         -MonitoredSite $siteForNotification `
                         -MonitoringName $resolvedMonitoringName `
                         -NotificationType $discordNotificationType `
+                        -NotificationReference $notificationReference `
                         -RecoveryResults $recoveredNotifiedIssues
                     Write-RunLog -Category Discord -Color Cyan -Message (
                         'Sending Discord notification; type={0}; component(s) are included in the formatted message.' -f $discordNotificationType
@@ -6623,7 +6847,8 @@ function Invoke-D4AMonitor {
                 try {
                     Update-NotifiedIssueStateAfterDelivery `
                         -NewlyNotifiedIssues $newlyNotifiedIssues `
-                        -RecoveredIssues $recoveredNotifiedIssues
+                        -RecoveredIssues $recoveredNotifiedIssues `
+                        -NotificationReference $notificationReference
                 }
                 catch {
                     Add-MonitorResult -Severity Warning -Category Recovery -Check 'Notification state' -Message (

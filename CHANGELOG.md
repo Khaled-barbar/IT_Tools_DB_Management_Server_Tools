@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.11.0 / Monitoring 7.11.0 - 2026-10-19
+
+- Watchdog API timeout/restart evidence is reconciled with the current API endpoint and API service/listener checks. A completed restart followed by healthy live checks is soft-ignored and explicitly resolves the original Watchdog rule; the alert remains actionable when the endpoint or service is still unhealthy.
+- Every alert receives a random `D4A-XXXXXXXXXXXX` notification reference shown in email and Discord and saved with the delivered issue. The matching recovery reuses the same reference.
+- Forced recovery can resolve a saved alert by pasted notification reference, recheck its exact rule, and either send recovery or display the original and current failure details. A single legacy Watchdog alert without a reference remains recoverable by selecting **Watchdog service logs**.
+- IT Tools now exposes `R` in the guided recovery target list for pasting a notification reference and validates that reference before running the monitor.
+
 ## Monitoring 7.10.6 - 2026-10-09
 
 - Excluded the optional Watchdog health-publication failure caused specifically by a missing `dbo.D4A_Health_GenerateHealthData` stored procedure; no Scheduler alert is generated for this evidence.

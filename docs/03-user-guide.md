@@ -483,14 +483,14 @@ The menu exposes common management and test commands:
 | Run Discord-only | `-DisableEmail` (requires `DiscordWebhookUrl`) |
 | Set cooldown | `-SetIssueCooldown 'issue-key' -IssueCooldownDuration '12h'` |
 | Clear cooldown | `-ClearIssueCooldown 'issue-key'` |
-| Verify a component and force recovery if healthy | `-ForceRecoveryTarget 'service, resource, check, or rule key'` |
+| Verify a component and force recovery if healthy | `-ForceRecoveryTarget 'notification reference, service, resource, check, or rule key'` |
 | Skip monitor update check once | `-SkipAutomaticUpdate` |
 
 Use the IT Tools menu when possible because it discovers installed monitors, displays the exact command, and records command failures in the main daily error log.
 
 To add planned maintenance, select **Site Monitoring > Execute Monitoring Commands > 0) Add planned maintenance**. Select the installed monitor, then choose the frequency by number: Once, Daily, Weekly, or Monthly. Enter the start and end in 24-hour `HH:MM` format. One-time maintenance also asks for `YYYY-MM-DD`; weekly maintenance asks for a weekday; monthly maintenance asks for a day from 1 through 31. An end time earlier than the start time means the interval ends the following day. Months without the selected day are skipped. The optional comment is stored with the entry. Review the summary and type `ADD`; IT Tools backs up the configuration and validates the saved window before reporting success.
 
-For a guided recovery check, select **Site Monitoring > Execute Monitoring Commands > Check a component and force a recovery notification if healthy**. Choose a numbered discovered service or standard monitoring component. Select `M` to enter a Windows service name, display name, monitoring check, component text, or rule key manually. The command performs live checks and sends through the enabled notification channels only when every matching result is `OK`; it does not send unrelated alerts found during that diagnostic run.
+For a guided recovery check, select **Site Monitoring > Execute Monitoring Commands > Check a component and force a recovery notification if healthy**. Choose a numbered discovered service or standard monitoring component. Select `R` to paste the `D4A-XXXXXXXXXXXX` reference shown in an alert, or select `M` to enter a Windows service name, display name, monitoring check, component text, or rule key manually. A reference rechecks the original rule and reuses the same reference in recovery. If the issue persists, the command displays the original alert and the current failure instead of sending recovery. Unrelated alerts found during that diagnostic run are not sent.
 
 ## Understanding monitoring output
 
@@ -520,6 +520,7 @@ Normal endpoint behavior:
 - database internal free space: alert when a non-log data file has less than 500 MB unallocated; files ending in `_log` and SQL `LOG` files are excluded;
 - successfully delivered issue: suppress the same rule key automatically for 24 hours, whether delivery succeeded through email or Discord;
 - previously notified issue later returns `OK`: send one recovery notification through each enabled channel; clear its recovery state after at least one channel succeeds;
+- notification reference: each delivered alert includes a random `D4A-XXXXXXXXXXXX` reference that can be pasted into the guided forced-recovery command;
 - one immediate issue: subject identifies component and level, such as `API Alert` or `Disk Space Critical`; multiple issues use `Multiple Alerts detected`.
 
 The monitor reports and collects evidence. It does not restart services.

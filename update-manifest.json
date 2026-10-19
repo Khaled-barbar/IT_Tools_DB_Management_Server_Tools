@@ -1,18 +1,18 @@
 {
   "schemaVersion": 2,
-  "version": "7.10.5",
-  "releaseDate": "2026-10-09",
+  "version": "7.11.0",
+  "releaseDate": "2026-10-19",
   "monitoring": {
-    "version": "7.10.6",
-    "releaseDate": "2026-10-09",
+    "version": "7.11.0",
+    "releaseDate": "2026-10-19",
     "scriptPath": "D4A-ScheduledMonitor-v5.ps1",
-    "sha256": "9BB4586AB57D93F1B14BE4FE3455421F68DBAAF15EEEA4F4B1886C60661FF4C1"
+    "sha256": "B22B7794FF2A173CC5CEE40B0BC534D2C32255132D1847E042359285F015AFC2"
   },
   "canonicalMonitoring": {
-    "version": "7.10.6",
-    "releaseDate": "2026-10-09",
+    "version": "7.11.0",
+    "releaseDate": "2026-10-19",
     "scriptPath": "D4A-ScheduledMonitor.ps1",
-    "sha256": "9BB4586AB57D93F1B14BE4FE3455421F68DBAAF15EEEA4F4B1886C60661FF4C1"
+    "sha256": "B22B7794FF2A173CC5CEE40B0BC534D2C32255132D1847E042359285F015AFC2"
   },
   "files": [
     {
@@ -25,19 +25,19 @@
     },
     {
       "path": "D4A-ScheduledMonitor-v5.ps1",
-      "sha256": "9BB4586AB57D93F1B14BE4FE3455421F68DBAAF15EEEA4F4B1886C60661FF4C1"
+      "sha256": "B22B7794FF2A173CC5CEE40B0BC534D2C32255132D1847E042359285F015AFC2"
     },
     {
       "path": "D4A-ScheduledMonitor.ps1",
-      "sha256": "9BB4586AB57D93F1B14BE4FE3455421F68DBAAF15EEEA4F4B1886C60661FF4C1"
+      "sha256": "B22B7794FF2A173CC5CEE40B0BC534D2C32255132D1847E042359285F015AFC2"
     },
     {
       "path": "monitor-version.txt",
-      "sha256": "B409E642B9F9680A858E2AD68E2B95025641ECB146017F386AF416E114D66710"
+      "sha256": "63A96BA92D9B5E8BA39392BE0C20304457519A408AB9382F967804C7A158E52A"
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "2A46487B5EDAE87F6165690AC590EB46866E8AE10FAA20785854626B80839B2B"
+      "sha256": "7CDB47CFE864E462F1CC52FE3BCB9A31E431ED205B549897A5EE49C7149D77D1"
     },
     {
       "path": "Invoke-SmtpDiagnostic.ps1",
@@ -45,7 +45,7 @@
     },
     {
       "path": "version.txt",
-      "sha256": "716C774F1EB0509C62657F15B309E338B04DD53CC5D0DF95A29DB781C1823559"
+      "sha256": "63A96BA92D9B5E8BA39392BE0C20304457519A408AB9382F967804C7A158E52A"
     },
     {
       "path": "Test-DBConfigFile.ps1",
