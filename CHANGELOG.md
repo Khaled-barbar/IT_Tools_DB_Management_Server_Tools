@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.12.0 - 2026-10-27
+
+- Suppressed all Watchdog `Failed to publish health data` evidence, including timeout and transport failures, because direct endpoint and Windows-service checks remain the authority for actionable availability alerts.
+- Added a healthy result under the same Watchdog rule key when publication failure is the only recent evidence, allowing previously delivered publication alerts to send their normal one-time recovery notification.
+- Other actionable Watchdog Scheduler evidence remains eligible for alerting and prevents a false recovery for the shared Scheduler rule.
+
 ## 7.11.1 / Monitoring 7.11.2 - 2026-10-19
 
 - Manual monitoring commands launched from IT Tools now wait for an overlapping scheduled or manual run to finish instead of immediately returning an overlap warning.

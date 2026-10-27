@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.11.2
-# D4A-Monitor-Release-Date: 2026-10-19
+# D4A-Monitor-Version: 7.12.0
+# D4A-Monitor-Release-Date: 2026-10-27
 
 <#
 .SYNOPSIS
@@ -287,8 +287,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.11.2'
-$script:MonitorReleaseDate = '2026-10-19'
+$script:MonitorVersion = '7.12.0'
+$script:MonitorReleaseDate = '2026-10-27'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -5175,6 +5175,15 @@ function Resolve-WatchdogRenamedServiceEvidence {
     }
 }
 
+function Test-IsWatchdogHealthPublicationFailureEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    return $normalized -match '(?i)failed\s+to\s+publish\s+health\s+data\b'
+}
+
 function Test-IsNonActionableWatchdogHealthPublicationEvidence {
     param([Parameter(Mandatory = $true)][string]$Evidence)
 
@@ -5187,12 +5196,10 @@ function Test-IsNonActionableWatchdogHealthPublicationEvidence {
         return $true
     }
 
-    # Health publication is optional on installations that do not contain the
-    # health-data generation procedure. No local corrective action is required.
-    return (
-        $normalized -match '(?i)failed\s+to\s+publish\s+health\s+data\b' -and
-        $normalized -match '(?i)could\s+not\s+find\s+stored\s+procedure\s+[''"]dbo\.D4A_Health_GenerateHealthData[''"]'
-    )
+    # Watchdog health publication is optional and is not a local service-health
+    # authority. Endpoint and Windows-service checks independently report any
+    # outage that requires action.
+    return Test-IsWatchdogHealthPublicationFailureEvidence -Evidence $normalized
 }
 
 function Get-WatchdogEvidenceDisposition {
@@ -5456,6 +5463,7 @@ function Test-WatchdogServiceLogs {
         $warningSamples = [System.Collections.Generic.List[string]]::new()
         $renamedServiceResolutions = [System.Collections.Generic.List[string]]::new()
         $plcNotConfigured = $false
+        $healthPublicationIgnored = $false
         $apiLiveHealth = if ($serviceName -match '(?i)^api$') { Get-WatchdogApiLiveHealthSummary } else { $null }
         $reconciledApiRecovery = $false
         foreach ($record in $records) {
@@ -5468,6 +5476,10 @@ function Test-WatchdogServiceLogs {
             }
             if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence ([string]$record.Text)) {
                 $plcNotConfigured = $true
+                continue
+            }
+            if (Test-IsWatchdogHealthPublicationFailureEvidence -Evidence ([string]$record.Text)) {
+                $healthPublicationIgnored = $true
                 continue
             }
             $renamedServiceResolution = Resolve-WatchdogRenamedServiceEvidence `
@@ -5524,6 +5536,11 @@ function Test-WatchdogServiceLogs {
                     # Bridge alerts produced by releases that used the folder name in the rule key.
                     Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message $plcMessage -Key $legacyWatchdogRuleKey
                 }
+            }
+            if ($healthPublicationIgnored) {
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+                    'Watchdog health-data publication failure evidence was ignored because health publication is optional; direct endpoint and Windows-service checks remain authoritative.'
+                ) -Key $watchdogRuleKey
             }
             continue
         }
