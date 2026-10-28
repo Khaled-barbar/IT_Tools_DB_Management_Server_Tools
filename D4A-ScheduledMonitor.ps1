@@ -1,6 +1,6 @@
 #requires -Version 5.1
-# D4A-Monitor-Version: 7.12.0
-# D4A-Monitor-Release-Date: 2026-10-27
+# D4A-Monitor-Version: 7.12.1
+# D4A-Monitor-Release-Date: 2026-10-28
 
 <#
 .SYNOPSIS
@@ -42,6 +42,8 @@
     4500 ms are recorded in error_log without an email alert. CPU and RAM alert
     only after two consecutive monitor runs at 90% or more. NSSM server.log
     rotation events, plus harmless pipe-ended output-read events, are excluded.
+    Service-related alerts also require two immediately consecutive failed
+    monitoring runs so a successful Watchdog restart can resolve the first run.
 
     To change an automatic cooldown, use -SetIssueCooldown with
     -IssueCooldownDuration. The command rewrites both the duration and its
@@ -287,8 +289,8 @@ catch {
 }
 
 $script:ScriptPath = [string]$MyInvocation.MyCommand.Path
-$script:MonitorVersion = '7.12.0'
-$script:MonitorReleaseDate = '2026-10-27'
+$script:MonitorVersion = '7.12.1'
+$script:MonitorReleaseDate = '2026-10-28'
 $script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $script:MonitorVersionFileName = 'monitor-version.txt'
@@ -311,6 +313,7 @@ $script:EndpointSlowLogMs = 4500
 $script:ResourceAlertPercent = 90
 $script:ResourceConsecutiveRunsRequired = 2
 $script:WatchdogSqlConnectivityConsecutiveRunsRequired = 2
+$script:ServiceAlertConsecutiveRunsRequired = 2
 $script:DiskCriticalFreeGb = 5
 $script:DiskCriticalUsedPercent = 95
 $script:DatabaseUnallocatedSpaceAlertMb = 500
@@ -1777,7 +1780,8 @@ NOTIFICATION AND RECOVERY POLICY
 Relevant Windows event warnings and errors are always retained in error_log and
 daily/test reports, but they do not cause immediate email. D4A, SQL Server,
 and Mosquitto service checks independently alert when a Windows service is not
-Running.
+Running. Service alerts notify only after the same rule fails on two immediately
+consecutive monitoring runs. A healthy or missing result resets the pending count.
 
 Disk usage does not generate warning emails. A critical alert is sent when a
 fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
@@ -1915,8 +1919,10 @@ notify only after two consecutive monitor runs at 90% or higher. NSSM
 server.log rotation events 1063 and 1077, and the harmless pipe-ended output
 read event, are excluded. All relevant Windows events are log-only because
 service availability is checked separately. Disk space alerts only at 5 GB
-free or less, or 95 percent used. A successfully delivered issue produces one
-recovery notification after a later check explicitly confirms that it is healthy.
+free or less, or 95 percent used. Service alerts require two immediately consecutive
+failed monitoring runs; a healthy or missing result resets the pending count. A
+successfully delivered issue produces one recovery notification after a later check
+explicitly confirms that it is healthy.
 '@
 }
 
@@ -1928,6 +1934,8 @@ NOTIFICATION AND RECOVERY POLICY
 Relevant Windows event warnings and errors are always retained in error_log and
 daily/test reports, but they do not cause an immediate notification. D4A, SQL Server,
 and Mosquitto service checks independently alert when a Windows service is not Running.
+Service alerts notify only after the same rule fails on two immediately consecutive
+monitoring runs. A healthy or missing result resets the pending count.
 
 Disk usage does not generate warning emails. A critical alert is sent when a
 fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
@@ -2126,7 +2134,7 @@ function Initialize-MonitorLogging {
 
 function Get-MonitorRuntimeState {
     $defaultState = [pscustomobject]@{
-        StateVersion = 6
+        StateVersion = 7
         DataCollectorLastEvent = [pscustomobject]@{
             ConsecutiveFailures = 0
             LastHealthy         = $null
@@ -2142,6 +2150,7 @@ function Get-MonitorRuntimeState {
             LastProcessedEvidence = $null
             LastDetectedAt         = $null
         }
+        ServiceAlertConfirmations = @()
         NotifiedIssues = @()
     }
     if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath) -or -not (Test-Path -LiteralPath $script:MonitorStatePath -PathType Leaf)) {
@@ -2174,6 +2183,12 @@ function Get-MonitorRuntimeState {
                 $state.WatchdogSqlConnectivity | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.WatchdogSqlConnectivity.$propertyName
             }
         }
+        if ($null -eq $state.PSObject.Properties['ServiceAlertConfirmations']) {
+            $state | Add-Member -MemberType NoteProperty -Name ServiceAlertConfirmations -Value @()
+        }
+        else {
+            $state.ServiceAlertConfirmations = @($state.ServiceAlertConfirmations)
+        }
         if ($null -eq $state.PSObject.Properties['NotifiedIssues']) {
             $state | Add-Member -MemberType NoteProperty -Name NotifiedIssues -Value @()
         }
@@ -2189,10 +2204,10 @@ function Get-MonitorRuntimeState {
             }
         }
         if ($null -eq $state.PSObject.Properties['StateVersion']) {
-            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 6
+            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 7
         }
         else {
-            $state.StateVersion = 6
+            $state.StateVersion = 7
         }
         return $state
     }
@@ -2582,6 +2597,97 @@ function Update-MonitorResourceConsecutiveHigh {
     $property.Value = if ($IsHigh) { [int]$property.Value + 1 } else { 0 }
     Save-MonitorRuntimeState -State $state
     return [int]$property.Value
+}
+
+function Test-IsServiceAlertConfirmationKey {
+    param([Parameter(Mandatory = $true)][string]$Key)
+
+    $normalizedKey = ConvertTo-IgnoreRuleKey -Value $Key
+    return (
+        $normalizedKey -match '^server-windows-service-' -or
+        $normalizedKey -eq 'server-d4a-windows-services' -or
+        $normalizedKey -eq 'server-sql-services' -or
+        $normalizedKey -match '^server-mosquitto-mqtt-service(?:-|$)' -or
+        $normalizedKey -match '^server-web-infrastructure-service(?:s|-)' -or
+        $normalizedKey -eq 'server-api-listener' -or
+        ($normalizedKey -match '^diagnostics-watchdog-' -and
+            $normalizedKey -ne 'diagnostics-watchdog-sql-connectivity')
+    )
+}
+
+function Apply-ServiceAlertConfirmationPolicy {
+    $state = Get-MonitorRuntimeState
+    $previousByKey = @{}
+    foreach ($entry in @($state.ServiceAlertConfirmations)) {
+        if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.Key)) { continue }
+        $previousByKey[(ConvertTo-IgnoreRuleKey -Value ([string]$entry.Key))] = $entry
+    }
+
+    $currentServiceResults = @($script:Results | Where-Object {
+            Test-IsServiceAlertConfirmationKey -Key ([string]$_.Key)
+        })
+    $nextConfirmations = [System.Collections.Generic.List[object]]::new()
+    $deferredResults = [System.Collections.Generic.List[object]]::new()
+    $deferredKeys = [System.Collections.Generic.List[string]]::new()
+    $confirmedKeys = [System.Collections.Generic.List[string]]::new()
+    foreach ($group in @($currentServiceResults | Group-Object -Property Key)) {
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$group.Name)
+        $alertResults = @($group.Group | Where-Object {
+                [string]$_.Severity -eq 'Alert' -and [bool]$_.NotificationEligible
+            })
+        if ($alertResults.Count -eq 0) { continue }
+
+        $previousCount = 0
+        if ($previousByKey.ContainsKey($key)) {
+            $previousCount = [int]$previousByKey[$key].ConsecutiveFailures
+        }
+        $consecutiveFailures = $previousCount + 1
+        $latestAlert = $alertResults | Select-Object -Last 1
+        $nextConfirmations.Add([pscustomobject]@{
+                Key                 = $key
+                ConsecutiveFailures = $consecutiveFailures
+                LastFailedAt        = (Get-Date).ToString('o')
+                LastMessage         = [string]$latestAlert.Message
+            }) | Out-Null
+
+        if ($consecutiveFailures -lt $script:ServiceAlertConsecutiveRunsRequired) {
+            foreach ($result in $alertResults) {
+                $deferredResults.Add($result) | Out-Null
+            }
+            $deferredKeys.Add($key) | Out-Null
+        }
+        else {
+            $confirmedKeys.Add(('{0}|{1}' -f $key, $consecutiveFailures)) | Out-Null
+        }
+    }
+
+    $state.ServiceAlertConfirmations = @($nextConfirmations.ToArray())
+    try {
+        Save-MonitorRuntimeState -State $state -ThrowOnFailure
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Notification -Color Yellow -Message (
+            'Service alert confirmation state could not be saved. Current service alerts remain notification-eligible: {0}' -f $_.Exception.Message
+        )
+        return
+    }
+
+    foreach ($result in $deferredResults) {
+        $result.NotificationEligible = $false
+    }
+    foreach ($key in $deferredKeys) {
+        Write-RunLog -Level Warning -Category Notification -Color Yellow -Message (
+            'Service alert {0} failed for the first consecutive monitoring run (1/{1}). Notification was deferred so Watchdog recovery can complete.' -f
+                $key, $script:ServiceAlertConsecutiveRunsRequired
+        )
+    }
+    foreach ($entry in $confirmedKeys) {
+        $parts = $entry -split '\|', 2
+        Write-RunLog -Level Alert -Category Notification -Color Red -Message (
+            'Service alert {0} persisted for {1} consecutive monitoring runs and is notification-eligible.' -f
+                $parts[0], $parts[1]
+        )
+    }
 }
 
 function Apply-IgnoreRulesToResults {
@@ -6710,6 +6816,8 @@ function Invoke-D4AMonitor {
         Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Nginx errors' -Action { Test-NginxErrors }
         Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Windows events' -Action { Test-RelevantWindowsEvents }
         Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Watchdog service logs' -Action { Test-WatchdogServiceLogs }
+
+        Apply-ServiceAlertConfirmationPolicy
 
         $activeIgnoreRules = @()
         try {

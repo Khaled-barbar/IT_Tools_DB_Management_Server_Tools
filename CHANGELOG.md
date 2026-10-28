@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## Monitoring 7.12.1 - 2026-10-28
+
+- Added persistent two-run confirmation for Windows-service, SQL-engine, MQTT, web-infrastructure, API-listener, and Watchdog service-log alerts.
+- The first failed monitoring run is logged but cannot notify, giving Watchdog time to complete an automatic service restart. Only the same rule failing on the immediately following monitoring run becomes notification-eligible.
+- A healthy or missing result on the next run resets the pending counter. Alerts that were actually delivered after two failures retain the existing recovery-notification behavior.
+
 ## Monitoring 7.12.0 - 2026-10-27
 
 - Suppressed all Watchdog `Failed to publish health data` evidence, including timeout and transport failures, because direct endpoint and Windows-service checks remain the authority for actionable availability alerts.
