@@ -62,8 +62,8 @@ $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
 $Script:MonitoringOverlapWaitTimeoutSeconds = 900
-$Script:ToolVersion = [version]'7.11.1'
-$Script:ToolReleaseDate = '2026-10-19'
+$Script:ToolVersion = [version]'7.12.0'
+$Script:ToolReleaseDate = '2026-10-29'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -5096,6 +5096,30 @@ function Invoke-TranslationSqlFile {
     Invoke-D4ASqlcmd @sqlParameters
 }
 
+function Assert-LocalCompanionFileCanRunOffline {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$FileName
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+        throw "Local companion file was not found: $FilePath"
+    }
+    $fileInfo = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+    if ($fileInfo.Length -le 0) {
+        throw "Local companion file is empty: $FilePath"
+    }
+
+    if ([IO.Path]::GetExtension($FileName) -ieq '.ps1') {
+        $tokens = $null
+        $parserErrors = $null
+        [void][Management.Automation.Language.Parser]::ParseFile($FilePath, [ref]$tokens, [ref]$parserErrors)
+        if (@($parserErrors).Count -gt 0) {
+            throw "Local companion script '$FileName' contains a PowerShell syntax error: $($parserErrors[0].Message)"
+        }
+    }
+}
+
 function Get-RequiredScriptFolderFilePath {
     param(
         [Parameter(Mandatory = $true)][string]$FileName,
@@ -5174,9 +5198,30 @@ function Get-RequiredScriptFolderFilePath {
             Write-Host "Downloaded, verified, and installed: $filePath" -ForegroundColor Green
         }
         catch {
-            Write-Host "Automatic synchronization failed for '$FileName'." -ForegroundColor Red
-            Write-Host "Official source: $DownloadUrl" -ForegroundColor Cyan
-            throw "Required companion file could not be synchronized: $filePath. $($_.Exception.Message)"
+            $synchronizationError = $_.Exception.Message
+            if ($fileExists) {
+                try {
+                    Assert-LocalCompanionFileCanRunOffline -FilePath $filePath -FileName $FileName
+                    Unblock-File -LiteralPath $filePath -ErrorAction SilentlyContinue
+                    Write-Host "Online update verification failed for '$FileName'." -ForegroundColor Yellow
+                    Write-Host 'The server may have no internet connection, or GitHub access may be restricted.' -ForegroundColor Yellow
+                    Write-Host "Using the existing parser-validated local file: $filePath" -ForegroundColor Green
+                    Write-Host 'The local file could not be compared with the latest official release.' -ForegroundColor Gray
+                    Write-Host "Manual download: $DownloadUrl" -ForegroundColor Cyan
+                    Write-StreamingLog -Percent 100 -Step 'Offline fallback' -Description "Using existing local companion file $FileName."
+                    return $filePath
+                }
+                catch {
+                    $localValidationError = $_.Exception.Message
+                    Write-Host "The existing local file cannot be used safely: $localValidationError" -ForegroundColor Red
+                }
+            }
+
+            Write-Host "Automatic download or update verification failed for '$FileName'." -ForegroundColor Red
+            Write-Host 'This is commonly caused by no internet connection, blocked GitHub access, a proxy, or another network restriction.' -ForegroundColor Yellow
+            Write-Host "Download the file manually from: $DownloadUrl" -ForegroundColor Cyan
+            Write-Host "Place it beside IT Tools at: $filePath" -ForegroundColor Cyan
+            throw "Required companion file is unavailable: $filePath. Online synchronization error: $synchronizationError. Manual download: $DownloadUrl. Place the file at: $filePath"
         }
         finally {
             if (Test-Path -LiteralPath $downloadFolder -PathType Container) {

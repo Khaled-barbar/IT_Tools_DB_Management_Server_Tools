@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.12.0 / Monitoring 7.12.1 - 2026-10-29
+
+- Added offline fallback support for standalone companion PowerShell tools, including Watchdog Checker, DBConfig Diagnostic, SMTP Diagnostic, and Disk Analyzer.
+- When online manifest or update verification fails, IT Tools now uses an existing non-empty local companion script after PowerShell parser validation and clearly states that its release version could not be verified.
+- When no safe local copy is available, IT Tools now explains the likely internet or network restriction, prints the manual-download URL, and prints the exact folder path where the companion file must be placed.
+
 ## Monitoring 7.12.1 - 2026-10-28
 
 - Added persistent two-run confirmation for Windows-service, SQL-engine, MQTT, web-infrastructure, API-listener, and Watchdog service-log alerts.

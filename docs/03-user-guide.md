@@ -25,7 +25,7 @@ The script offers to install these PowerShell modules for the current user when 
 ### Installation
 
 1. Download or clone the complete repository to `Desktop\IT Tools`, `Documents\IT Tools`, or another approved user-writable folder.
-2. Keep the main script, manifest, version file, and companion files together.
+2. Keep the main script, manifest, version file, and companion files together. On an offline server, manually copied companion PowerShell files can be used from the same folder as IT Tools. IT Tools validates local PowerShell syntax before using an unverified offline copy.
 3. Open Windows PowerShell. Use **Run as Administrator** for operations that require elevation.
 4. Change to the toolkit folder and start the script.
 
@@ -402,7 +402,7 @@ Use **Troubleshooting > DBConfig.js Diagnostic** to inspect a D4A `dbconfig.js` 
 
 ### Watchdog Checker
 
-Use **Troubleshooting > Watchdog Checker** to perform a read-only dry run of an installed watchdog. The checker detects Decide4Action Data Collector services, derives each installation's `Configuration` folder, and lists existing `D4AWatchdog.ps1` and `TaskScheduler.ps1` files with selection numbers. Choose a number, enter another full path, or type `q` to return. IT Tools downloads `Test-InstalledD4AWatchdog.ps1` only when first selected and verifies its manifest SHA-256 and PowerShell syntax before launch.
+Use **Troubleshooting > Watchdog Checker** to perform a read-only dry run of an installed watchdog. The checker detects Decide4Action Data Collector services, derives each installation's `Configuration` folder, and lists existing `D4AWatchdog.ps1` and `TaskScheduler.ps1` files with selection numbers. Choose a number, enter another full path, or type `q` to return. IT Tools downloads `Test-InstalledD4AWatchdog.ps1` only when first selected and verifies its manifest SHA-256 and PowerShell syntax before launch. If GitHub cannot be reached, IT Tools uses a non-empty parser-valid copy already located beside the main IT Tools script. If no safe local copy exists, the error displays the manual-download URL and exact destination path.
 
 The checker parses the installed watchdog and evaluates supported source policies without running its entry point. It suppresses service changes, state and log writes, certificate creation, and health publication. Real read probes may still contact SQL, MQTT, HTTP endpoints, and Windows service or event APIs. The report explains each supported check, predicted restart or start action, likely root cause, and practical handling guidance while redacting known credentials. Afterward, use `R` to repeat the same file, `M` to refresh the detected list or enter another path, or `Q` to return. Once downloaded, the companion is automatically refreshed by later IT Tools releases that contain a newer verified copy.
 
