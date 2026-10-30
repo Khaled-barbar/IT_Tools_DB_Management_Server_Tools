@@ -17,6 +17,7 @@
 #      - Copy P4A activities between machines
 #      - Enable Line Detailed View
 #      - Roll back script changes from timestamped backups
+#      - Execute recursive SQL update folders and remove successful files
 #      - Review database performance and SQL diagnostics
 #      - Find text that needs translation
 #      - Find missing translations
@@ -62,7 +63,7 @@ $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
 $Script:MonitoringOverlapWaitTimeoutSeconds = 900
-$Script:ToolVersion = [version]'7.12.2'
+$Script:ToolVersion = [version]'7.12.3'
 $Script:ToolReleaseDate = '2026-10-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -7102,7 +7103,9 @@ function Get-SqlFilePotentialModifiedTables {
         '(?im)\binsert\s+into\s+(?:\[dbo\]\.|\bdbo\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?',
         '(?im)\bupdate\s+(?:\[dbo\]\.|\bdbo\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?',
         '(?im)\bdelete\s+from\s+(?:\[dbo\]\.|\bdbo\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?',
-        '(?im)\bmerge\s+(?:into\s+)?(?:\[dbo\]\.|\bdbo\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?'
+        '(?im)\bmerge\s+(?:into\s+)?(?:\[dbo\]\.|\bdbo\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?',
+        '(?im)\b(?:alter\s+table|truncate\s+table)\s+(?:\[dbo\]\.|\bdbo\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?',
+        '(?im)\bdrop\s+table\s+(?:if\s+exists\s+)?(?:\[dbo\]\.|\bdbo\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?'
     )
 
     $tables = New-Object System.Collections.Generic.List[string]
@@ -10408,6 +10411,217 @@ function Show-DatabasePerformanceMenu {
     }
 }
 
+function Read-DatabaseSqlUpdateFolder {
+    while ($true) {
+        Write-Host ''
+        $folderInput = Read-Host 'Enter the folder containing the SQL files, or type q to return to Database Tools'
+        if (Test-IsBack $folderInput) { return $null }
+
+        $folderPath = Normalize-UserPath $folderInput
+        if (-not (Test-Path -LiteralPath $folderPath -PathType Container)) {
+            Write-Host "Folder not found: $folderPath" -ForegroundColor Yellow
+            continue
+        }
+
+        $resolvedFolder = (Get-Item -LiteralPath $folderPath -ErrorAction Stop).FullName
+        $pathRoot = [IO.Path]::GetPathRoot($resolvedFolder)
+        if ($resolvedFolder.TrimEnd('\', '/') -ieq $pathRoot.TrimEnd('\', '/')) {
+            Write-Host 'A drive root cannot be used. Select a dedicated folder containing only the intended SQL update files.' -ForegroundColor Red
+            continue
+        }
+        return $resolvedFolder
+    }
+}
+
+function Get-DatabaseSqlUpdateFiles {
+    param([Parameter(Mandatory = $true)][string]$RootFolder)
+
+    $root = (Get-Item -LiteralPath $RootFolder -ErrorAction Stop).FullName
+    $pendingFolders = New-Object 'System.Collections.Generic.Queue[string]'
+    $files = New-Object 'System.Collections.Generic.List[System.IO.FileInfo]'
+    $pendingFolders.Enqueue($root)
+
+    while ($pendingFolders.Count -gt 0) {
+        $currentFolder = $pendingFolders.Dequeue()
+        foreach ($file in @(Get-ChildItem -LiteralPath $currentFolder -File -Filter '*.sql' -ErrorAction Stop)) {
+            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            [void]$files.Add($file)
+        }
+        foreach ($directory in @(Get-ChildItem -LiteralPath $currentFolder -Directory -ErrorAction Stop)) {
+            if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            $pendingFolders.Enqueue($directory.FullName)
+        }
+    }
+
+    return @($files | Sort-Object FullName)
+}
+
+function Assert-DatabaseSqlUpdateFileSafety {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string]$RootFolder
+    )
+
+    $resolvedRoot = (Get-Item -LiteralPath $RootFolder -ErrorAction Stop).FullName.TrimEnd('\', '/')
+    $resolvedFile = (Get-Item -LiteralPath $FilePath -ErrorAction Stop).FullName
+    $rootPrefix = $resolvedRoot + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedFile.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "SQL file is outside the selected folder: $resolvedFile"
+    }
+
+    $sqlText = Get-Content -LiteralPath $resolvedFile -Raw -ErrorAction Stop
+    $sqlWithoutComments = [regex]::Replace($sqlText, '(?s)/\*.*?\*/', ' ')
+    $sqlWithoutComments = [regex]::Replace($sqlWithoutComments, '(?m)--.*$', ' ')
+    if ($sqlWithoutComments -match '(?im)^\s*use\s+(?:\[[^\]]+\]|[A-Za-z0-9_]+)\s*;?') {
+        throw "The SQL file contains a USE statement and could switch away from the selected database: $resolvedFile"
+    }
+    if ($sqlWithoutComments -match '(?im)^\s*:connect\b') {
+        throw "The SQL file contains a :connect directive and could switch SQL Server connections: $resolvedFile"
+    }
+    if ($sqlWithoutComments -match '(?im)^\s*:r\b') {
+        throw "The SQL file contains a :r directive that would execute another file outside this controlled queue: $resolvedFile"
+    }
+}
+
+function Invoke-DatabaseSqlUpdateFolder {
+    Clear-Host
+    Show-SectionTitle 'Execute SQL Update Folder'
+    Write-Host "Connected SQL Server: $($Global:SelectedInstance)" -ForegroundColor Gray
+    Write-Host "Selected database: $($Global:SelectedDb)" -ForegroundColor Gray
+    Write-Host 'This feature recursively processes every .sql file in one selected folder.' -ForegroundColor Cyan
+    Write-Host 'Type q at the folder prompt to return to Database Tools.' -ForegroundColor DarkGray
+
+    $folderPath = Read-DatabaseSqlUpdateFolder
+    if ($null -eq $folderPath) { return }
+
+    Write-StreamingLog -Percent 5 -Step 'Discover' -Description "Searching for SQL files under $folderPath."
+    $sqlFiles = @(Get-DatabaseSqlUpdateFiles -RootFolder $folderPath)
+    if ($sqlFiles.Count -eq 0) {
+        Write-Host "No .sql files were found in: $folderPath" -ForegroundColor Yellow
+        Pause-Screen
+        return
+    }
+
+    $rootPrefix = $folderPath.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $filePlans = New-Object 'System.Collections.Generic.List[object]'
+    $targetTables = New-Object 'System.Collections.Generic.List[string]'
+    for ($index = 0; $index -lt $sqlFiles.Count; $index++) {
+        $file = $sqlFiles[$index]
+        $relativePath = $file.FullName.Substring($rootPrefix.Length)
+        $percent = 5 + [int]((($index + 1) / $sqlFiles.Count) * 15)
+        Write-StreamingLog -Percent $percent -Step 'Preflight' -Description "Validating $relativePath."
+        Assert-DatabaseSqlUpdateFileSafety -FilePath $file.FullName -RootFolder $folderPath
+        $modifiedTables = @(Get-SqlFilePotentialModifiedTables -FilePath $file.FullName)
+        if ($modifiedTables -icontains 'RootTranslation') {
+            throw "The SQL file may modify RootTranslation, which this operation is not allowed to change: $($file.FullName)"
+        }
+        foreach ($tableName in $modifiedTables) { [void]$targetTables.Add($tableName) }
+        [void]$filePlans.Add([pscustomobject]@{
+            FullName     = $file.FullName
+            RelativePath = $relativePath
+            Tables       = $modifiedTables
+        })
+    }
+    $targetTables = @($targetTables | Sort-Object -Unique)
+
+    Write-Host ''
+    Write-Host "Selected folder: $folderPath" -ForegroundColor White
+    Write-Host "Target database: $($Global:SelectedInstance) / $($Global:SelectedDb)" -ForegroundColor White
+    Write-Host "SQL files found: $($filePlans.Count)" -ForegroundColor White
+    Write-Host 'Execution order:' -ForegroundColor Cyan
+    $previewCount = [Math]::Min(20, $filePlans.Count)
+    for ($index = 0; $index -lt $previewCount; $index++) {
+        Write-Host ("  [{0}] {1}" -f ($index + 1), $filePlans[$index].RelativePath) -ForegroundColor Gray
+    }
+    if ($filePlans.Count -gt $previewCount) {
+        Write-Host "  ... and $($filePlans.Count - $previewCount) more file(s)." -ForegroundColor Gray
+    }
+    if ($targetTables.Count -gt 0) {
+        Write-Host "Existing table backup targets detected: $($targetTables -join ', ')" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host 'No existing modified tables were detected automatically. SQL execution can still change database objects or data.' -ForegroundColor Yellow
+    }
+
+    Write-Host ''
+    Write-Host 'WARNING: This operation will execute every .sql file listed above against the selected database.' -ForegroundColor Red
+    Write-Host 'Each successfully executed SQL file will be permanently removed from its folder.' -ForegroundColor Red
+    Write-Host 'Files that fail SQL execution or cannot be removed will remain for investigation.' -ForegroundColor Red
+    while ($true) {
+        $confirmation = ([string](Read-Host 'Enter y or yes to continue; enter n, no, or q to abort')).Trim().ToLowerInvariant()
+        if ((Test-IsBack $confirmation) -or $confirmation -in @('n', 'no')) {
+            Write-Host 'Operation cancelled. No SQL files were executed or removed.' -ForegroundColor Cyan
+            Pause-Screen
+            return
+        }
+        if ($confirmation -in @('y', 'yes')) { break }
+        Write-Host 'Enter y/yes to continue, or n/no/q to abort.' -ForegroundColor Yellow
+    }
+
+    Start-DatabaseInterventionAudit -SqlText $null -InputFile $folderPath
+    if ($targetTables.Count -gt 0) {
+        for ($index = 0; $index -lt $targetTables.Count; $index++) {
+            $tableName = $targetTables[$index]
+            $percent = 20 + [int]((($index + 1) / $targetTables.Count) * 15)
+            Write-StreamingLog -Percent $percent -Step 'Backup' -Description "Creating a backup of dbo.$tableName before SQL file execution."
+            $backupTable = New-DatabaseTableBackup -TableName $tableName
+            Write-Host "Backup created: dbo.$backupTable" -ForegroundColor Green
+        }
+    }
+
+    $executedAndRemoved = 0
+    $retainedFiles = New-Object 'System.Collections.Generic.List[object]'
+    for ($index = 0; $index -lt $filePlans.Count; $index++) {
+        $filePlan = $filePlans[$index]
+        $percent = 35 + [int]((($index + 1) / $filePlans.Count) * 60)
+        Write-StreamingLog -Percent $percent -Step 'SQL file' -Description "Executing $($filePlan.RelativePath)."
+
+        try {
+            [void](Invoke-TranslationSqlFile -FilePath $filePlan.FullName)
+        }
+        catch {
+            Set-DatabaseInterventionFailure -ErrorValue $_
+            [void]$retainedFiles.Add([pscustomobject]@{
+                RelativePath = $filePlan.RelativePath
+                Reason       = $_.Exception.Message
+            })
+            Show-LoggedError -Prefix "SQL execution failed; file retained: $($filePlan.RelativePath)" -Context 'Database Tools - Execute SQL Update Folder' -ErrorRecord $_
+            continue
+        }
+
+        try {
+            $resolvedFile = (Get-Item -LiteralPath $filePlan.FullName -ErrorAction Stop).FullName
+            if (-not $resolvedFile.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing to remove a file outside the selected folder: $resolvedFile"
+            }
+            Remove-Item -LiteralPath $resolvedFile -Force -ErrorAction Stop
+            $executedAndRemoved++
+            Write-Host "[OK] Executed and removed: $($filePlan.RelativePath)" -ForegroundColor Green
+        }
+        catch {
+            Set-DatabaseInterventionFailure -ErrorValue $_
+            [void]$retainedFiles.Add([pscustomobject]@{
+                RelativePath = $filePlan.RelativePath
+                Reason       = "SQL execution succeeded, but file removal failed: $($_.Exception.Message)"
+            })
+            Show-LoggedError -Prefix "SQL succeeded but the file was retained: $($filePlan.RelativePath)" -Context 'Database Tools - Execute SQL Update Folder - file removal' -ErrorRecord $_
+        }
+    }
+
+    Write-StreamingLog -Percent 100 -Step 'Complete' -Description 'Recursive SQL update folder processing finished.'
+    Write-Host ''
+    Write-Host '------------------------------------------------------------------------' -ForegroundColor DarkGray
+    Write-Host 'SQL UPDATE FOLDER SUMMARY' -ForegroundColor Cyan
+    Write-Host "Selected database: $($Global:SelectedInstance) / $($Global:SelectedDb)"
+    Write-Host "Files discovered: $($filePlans.Count)"
+    Write-Host "Executed successfully and removed: $executedAndRemoved" -ForegroundColor Green
+    Write-Host "Retained files: $($retainedFiles.Count)" -ForegroundColor $(if ($retainedFiles.Count -gt 0) { 'Red' } else { 'Green' })
+    foreach ($retainedFile in $retainedFiles) {
+        Write-Host "  $($retainedFile.RelativePath): $($retainedFile.Reason)" -ForegroundColor Red
+    }
+    Pause-Screen
+}
+
 function Show-DatabaseMasterSuite {
     Connect-Database
     if ([string]::IsNullOrWhiteSpace($Global:SelectedDb)) { return }
@@ -10425,6 +10639,7 @@ function Show-DatabaseMasterSuite {
         Write-Host "4) Copy activities between machines"
         Write-Host "5) Enable Line Detailed View"
         Write-Host "6) Rollback script changes"
+        Write-Host "7) Execute SQL update folder (recursive)"
         Write-Host "8) Database Performance"
         Write-Host "9) Database Search Tools"
         Write-Host "10) Change SQL Server connection"
@@ -10442,6 +10657,7 @@ function Show-DatabaseMasterSuite {
             '4' { Invoke-LoggedToolAction -Context "Database Tools - copy activities between machines" -Action { Invoke-CopyActivitiesBetweenMachines } }
             '5' { Invoke-LoggedToolAction -Context "Database Tools - Enable Line Detailed View" -Action { Enable-LineDetailedView } }
             '6' { Invoke-LoggedToolAction -Context "Database Tools - rollback script changes" -Action { Show-RollbackScriptChangesMenu } }
+            '7' { Invoke-LoggedToolAction -Context "Database Tools - execute SQL update folder" -Action { Invoke-DatabaseSqlUpdateFolder } }
             '8' { Invoke-LoggedToolAction -Context "Database Tools - Database Performance" -Action { Show-DatabasePerformanceMenu } }
             '9' { Invoke-LoggedToolAction -Context "Database Tools - Database Search Tools" -Action { Show-DatabaseSearchToolsMenu } }
             '10' {

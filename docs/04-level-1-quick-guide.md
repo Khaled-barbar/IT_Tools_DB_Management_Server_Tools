@@ -99,6 +99,13 @@ Use these actions in this order: check availability first, collect evidence next
 4. Enter your name and the requested confirmation only when the change is approved.
 5. Record the final result in the ticket.
 
+### Execute an approved SQL update folder
+
+1. Open **Database Tools** > **Execute SQL update folder (recursive)** only for an approved deployment.
+2. Verify the connected server and selected database, then enter the dedicated folder containing the approved `.sql` files.
+3. Review the file list and backup targets. Type `y` or `yes` only when everything is correct; otherwise type `n`, `no`, or `q`.
+4. Record the summary. Successful files are removed automatically; any remaining file failed or could not be removed and must be escalated with its displayed reason.
+
 ## Stop And Escalate
 
 Stop and escalate when:

@@ -300,6 +300,20 @@ Procedure:
 
 The tool first creates a safety backup of the table's current state. Record both backup names.
 
+### 7. Execute SQL update folder (recursive)
+
+Purpose: run an approved folder of SQL deployment files against the database selected in Database Tools, including `.sql` files in subfolders.
+
+Procedure:
+
+1. Confirm the connected SQL Server and selected database.
+2. Enter the dedicated folder containing the approved SQL files.
+3. Review the complete file count, execution order, and detected backup targets.
+4. Read the red warning. Type `y` or `yes` only when the target and files are correct; type `n`, `no`, or `q` to abort without changes.
+5. Review the final summary. Successfully executed files are removed; failed files and files that could not be removed remain with their failure reason.
+
+The tool processes files in deterministic full-path order, skips reparse-point folders and files, and rejects `USE`, `:connect`, and `:r` instructions that could change the selected target or execute an unlisted file. Existing target tables detected from common data and table-change statements are backed up once before execution starts. Do not use a drive root or a folder containing unrelated SQL files.
+
 ### 8. Database Performance
 
 Available diagnostics:

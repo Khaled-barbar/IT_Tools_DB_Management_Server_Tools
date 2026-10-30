@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.12.3 / Monitoring 7.12.1 - 2026-10-30
+
+- Added **Execute SQL update folder (recursive)** to Database Tools for approved DBUpdate-style deployments against the currently selected database.
+- The workflow preflights every `.sql` file in the selected folder and its subfolders, blocks hidden server/database switching directives, creates one timestamped backup per detected existing target table, and executes files in deterministic path order.
+- A red destructive-action warning requires `y` or `yes`; `n`, `no`, or `q` aborts without changes. Successfully executed files are removed, while SQL failures and removal failures remain with a final reason summary.
+
 ## 7.12.2 / Monitoring 7.12.1 - 2026-10-30
 
 - Added the signed `nodemailer-9.1.1.tgz` release package for monitoring installation on servers without internet access. Version 9.1.1 is pinned for compatibility with existing Node.js installations.
