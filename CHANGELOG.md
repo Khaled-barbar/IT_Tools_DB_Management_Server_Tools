@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.12.1 / Monitoring 7.12.1 - 2026-10-30
+
+- Made the latest-release check optional for new monitoring installations and monitoring version updates when GitHub is unavailable.
+- When online verification fails, IT Tools now accepts an existing `D4A-ScheduledMonitor.ps1` beside the main script only after validating its PowerShell syntax and monitoring version headers.
+- Disk Analyzer, DBConfig Diagnostic, SMTP Diagnostic, Watchdog Checker, and downloadable SQL companions now check for a verified update when selected and fall back to their safe local copy when the server is offline.
+- Missing or unsafe local files now show the direct download URL, the IT Tools folder, and the exact destination path required for manual installation.
+
 ## 7.12.0 / Monitoring 7.12.1 - 2026-10-29
 
 - Added offline fallback support for standalone companion PowerShell tools, including Watchdog Checker, DBConfig Diagnostic, SMTP Diagnostic, and Disk Analyzer.

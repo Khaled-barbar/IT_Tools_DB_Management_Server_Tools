@@ -25,7 +25,7 @@ The script offers to install these PowerShell modules for the current user when 
 ### Installation
 
 1. Download or clone the complete repository to `Desktop\IT Tools`, `Documents\IT Tools`, or another approved user-writable folder.
-2. Keep the main script, manifest, version file, and companion files together. On an offline server, manually copied companion PowerShell files can be used from the same folder as IT Tools. IT Tools validates local PowerShell syntax before using an unverified offline copy.
+2. Keep the main script, manifest, version file, and companion files together. On an offline server, manually copied companion PowerShell files can be used from the same folder as IT Tools. IT Tools validates local PowerShell syntax before using an unverified offline copy. Monitoring templates must also contain valid monitoring version and release-date headers.
 3. Open Windows PowerShell. Use **Run as Administrator** for operations that require elevation.
 4. Change to the toolkit folder and start the script.
 
@@ -43,6 +43,8 @@ Unblock-File -LiteralPath '.\IT_Tools_Database_Translations_and_Server_Checks.ps
 ### Automatic updates
 
 At startup, IT Tools resolves the latest `main` commit through GitHub, then compares its embedded version with that commit's `version.txt`. If an update exists, it downloads the manifest and release files from that immutable commit to a temporary folder, validates SHA-256 hashes, parses the new main script, installs only verified files, verifies the version and hash written to disk, and shows an update summary. If the GitHub API is unavailable, it falls back to the `main` URL with finite verified retries. This works when the installed release is several versions behind. The summary remains visible until you press a key; IT Tools then reloads the verified version in the same PowerShell window. Right-click **Run with PowerShell** remains supported because the updater resolves and replaces the executed script path.
+
+When a standalone PowerShell or SQL tool is selected, IT Tools checks for a newer verified release when internet access is available. If that check fails, it uses the existing safe local file beside IT Tools; PowerShell files must pass parser validation. If the required local file is missing or unsafe, IT Tools displays the direct download URL, the current IT Tools folder, and the exact file path where the manually downloaded file must be placed.
 
 Deployed monitoring scripts update independently. New deployments use `D4A-ScheduledMonitor.ps1`. At the beginning of every scheduled or manual monitor run, the monitor compares its embedded version with `monitor-version.txt`, then verifies its matching definition and file hash in `update-manifest.json`. A newer verified monitor replaces the installed script at the same path after backing up its script, configuration, and related Scheduled Task definitions. Existing `D4A-ScheduledMonitor-v5.ps1`, `v6`, and other versioned filenames remain supported and update in place without changing their Scheduled Task path. The current health check finishes with the existing code; the next scheduled run uses the new version. Use `-SkipAutomaticUpdate` only for a troubleshooting run.
 
@@ -411,6 +413,8 @@ The checker parses the installed watchdog and evaluates supported source policie
 ### Add New Site Monitoring
 
 Purpose: deploy a configuration-driven D4A health monitor and optional Scheduled Tasks.
+
+Before installation or a manual monitoring version update, IT Tools attempts to download and verify the current official `D4A-ScheduledMonitor.ps1`. On a server without internet access, it instead uses an existing `D4A-ScheduledMonitor.ps1` beside the main IT Tools script after validating its PowerShell syntax and version headers. If the local file is missing or invalid, the wizard stops safely and displays the direct download URL and exact destination path.
 
 Prerequisites:
 

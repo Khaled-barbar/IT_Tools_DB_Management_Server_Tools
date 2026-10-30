@@ -62,8 +62,8 @@ $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
 $Script:MonitoringOverlapWaitTimeoutSeconds = 900
-$Script:ToolVersion = [version]'7.12.0'
-$Script:ToolReleaseDate = '2026-10-29'
+$Script:ToolVersion = [version]'7.12.1'
+$Script:ToolReleaseDate = '2026-10-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1823,6 +1823,7 @@ function Get-SiteMonitoringTemplatePath {
     $scriptFolder = Get-CurrentScriptFolder
     $templateName = 'D4A-ScheduledMonitor.ps1'
     $templatePath = Join-Path $scriptFolder $templateName
+    $downloadUrl = '{0}/{1}' -f $Script:ToolRepositoryRawRoot.TrimEnd('/'), $templateName
     $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorTemplate_{0}' -f [guid]::NewGuid().ToString('N'))
 
     try {
@@ -1890,6 +1891,38 @@ function Get-SiteMonitoringTemplatePath {
         }
         Write-StreamingLog -Percent 15 -Step 'Release' -Description "Official monitoring release $($releaseMetadata.VersionText) is ready."
         return $templatePath
+    }
+    catch {
+        $synchronizationError = $_.Exception.Message
+        if (Test-Path -LiteralPath $templatePath -PathType Leaf) {
+            try {
+                Assert-LocalCompanionFileCanRunOffline -FilePath $templatePath -FileName $templateName
+                $localMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $templatePath
+                if (-not $localMetadata.HasVersionHeader) {
+                    throw "Local monitoring template '$templateName' is missing valid version or release-date metadata."
+                }
+
+                Unblock-File -LiteralPath $templatePath -ErrorAction SilentlyContinue
+                Write-Host "Online release verification failed for '$templateName'." -ForegroundColor Yellow
+                Write-Host 'The server may have no internet connection, or GitHub access may be restricted.' -ForegroundColor Yellow
+                Write-Host "Using the existing parser-validated monitoring template: $templatePath" -ForegroundColor Green
+                Write-Host "Local monitoring version: $($localMetadata.VersionText); release date: $($localMetadata.ReleaseDate)" -ForegroundColor Gray
+                Write-Host 'The local template could not be compared with the latest official release.' -ForegroundColor Gray
+                Write-Host "Manual download: $downloadUrl" -ForegroundColor Cyan
+                Write-StreamingLog -Percent 15 -Step 'Offline fallback' -Description "Using existing local monitoring template $templateName."
+                return $templatePath
+            }
+            catch {
+                Write-Host "The existing local monitoring template cannot be used safely: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+
+        Write-Host "Automatic download or release verification failed for '$templateName'." -ForegroundColor Red
+        Write-Host 'This is commonly caused by no internet connection, blocked GitHub access, a proxy, or another network restriction.' -ForegroundColor Yellow
+        Write-Host "Download the monitoring script manually from: $downloadUrl" -ForegroundColor Cyan
+        Write-Host "IT Tools folder: $scriptFolder" -ForegroundColor Cyan
+        Write-Host "Place the file at: $templatePath" -ForegroundColor Cyan
+        throw "Monitoring template is unavailable: $templatePath. Online synchronization error: $synchronizationError. Manual download: $downloadUrl. Place the file at: $templatePath"
     }
     finally {
         if (Test-Path -LiteralPath $temporaryFolder -PathType Container) {
@@ -5208,6 +5241,7 @@ function Get-RequiredScriptFolderFilePath {
                     Write-Host "Using the existing parser-validated local file: $filePath" -ForegroundColor Green
                     Write-Host 'The local file could not be compared with the latest official release.' -ForegroundColor Gray
                     Write-Host "Manual download: $DownloadUrl" -ForegroundColor Cyan
+                    Write-Host "IT Tools folder: $scriptFolder" -ForegroundColor Cyan
                     Write-StreamingLog -Percent 100 -Step 'Offline fallback' -Description "Using existing local companion file $FileName."
                     return $filePath
                 }
@@ -5220,6 +5254,7 @@ function Get-RequiredScriptFolderFilePath {
             Write-Host "Automatic download or update verification failed for '$FileName'." -ForegroundColor Red
             Write-Host 'This is commonly caused by no internet connection, blocked GitHub access, a proxy, or another network restriction.' -ForegroundColor Yellow
             Write-Host "Download the file manually from: $DownloadUrl" -ForegroundColor Cyan
+            Write-Host "IT Tools folder: $scriptFolder" -ForegroundColor Cyan
             Write-Host "Place it beside IT Tools at: $filePath" -ForegroundColor Cyan
             throw "Required companion file is unavailable: $filePath. Online synchronization error: $synchronizationError. Manual download: $DownloadUrl. Place the file at: $filePath"
         }
@@ -6726,7 +6761,8 @@ function Invoke-LuleburgasAssemblyRulesSettings {
         $sqlFile = Get-RequiredScriptFolderFilePath `
             -FileName 'AssemblyRules_Luleburgas.sql' `
             -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/AssemblyRules_Luleburgas.sql' `
-            -FeatureName 'Import Luleburgas System Settings'
+            -FeatureName 'Import Luleburgas System Settings' `
+            -RefreshExisting
         Assert-AssemblyRulesImportFileIsStagingOnly -FilePath $sqlFile
 
         Write-Host "SQL file: $sqlFile" -ForegroundColor Gray
@@ -6922,7 +6958,8 @@ function Invoke-LuleburgasRolePermissionsImport {
         $sqlFile = Get-RequiredScriptFolderFilePath `
             -FileName 'RoleAdminLuleburgaz-DanoneStandard-090426.sql' `
             -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/RoleAdminLuleburgaz-DanoneStandard-090426.sql' `
-            -FeatureName 'Import Luleburgas User Roles and Privileges'
+            -FeatureName 'Import Luleburgas User Roles and Privileges' `
+            -RefreshExisting
 
         Write-Host "SQL file: $sqlFile" -ForegroundColor Gray
         $modifiedTables = @(Get-SqlFilePotentialModifiedTables -FilePath $sqlFile)
@@ -10872,7 +10909,8 @@ function Invoke-DiskSpaceAnalyzer {
     $analyzerPath = Get-RequiredScriptFolderFilePath `
         -FileName 'D4A-DiskSpaceAnalyzer.ps1' `
         -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/D4A-DiskSpaceAnalyzer.ps1' `
-        -FeatureName 'Analyze Disk Usage (Visual Report)'
+        -FeatureName 'Analyze Disk Usage (Visual Report)' `
+        -RefreshExisting
 
     Write-Host "Disk usage analyzer: $analyzerPath" -ForegroundColor Gray
     Write-StreamingLog -Percent 10 -Step 'Launch analyzer' -Description 'Starting the interactive visual disk usage analyzer.'
@@ -11646,7 +11684,8 @@ function Invoke-DbConfigDiagnostic {
     $diagnosticPath = Get-RequiredScriptFolderFilePath `
         -FileName 'Test-DBConfigFile.ps1' `
         -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/Test-DBConfigFile.ps1' `
-        -FeatureName 'DBConfig.js Diagnostic'
+        -FeatureName 'DBConfig.js Diagnostic' `
+        -RefreshExisting
 
     Write-StreamingLog -Percent 20 -Step 'Verify diagnostic' -Description 'Validating the downloaded DBConfig diagnostic script before launch.'
     Test-PowerShellCompanionScriptSyntax -ScriptPath $diagnosticPath -FeatureName 'DBConfig.js Diagnostic'
@@ -11731,8 +11770,9 @@ function Invoke-SmtpDeliveryDiagnostic {
 
         $diagnosticPath = Get-RequiredScriptFolderFilePath `
             -FileName 'Invoke-SmtpDiagnostic.ps1' `
-            -DownloadUrl 'https://raw.githubusercontent.com/Decide4action/IT_Tools_DB_Management_Server_Tools/main/Invoke-SmtpDiagnostic.ps1' `
-            -FeatureName 'SMTP Delivery Diagnostic'
+            -DownloadUrl 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main/Invoke-SmtpDiagnostic.ps1' `
+            -FeatureName 'SMTP Delivery Diagnostic' `
+            -RefreshExisting
 
         Write-StreamingLog -Percent 20 -Step 'Verify diagnostic' -Description 'Validating the downloaded SMTP diagnostic before launch.'
         Test-PowerShellCompanionScriptSyntax -ScriptPath $diagnosticPath -FeatureName 'SMTP Delivery Diagnostic'
