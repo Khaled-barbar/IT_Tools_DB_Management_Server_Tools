@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "version": "7.12.1",
+  "version": "7.12.2",
   "releaseDate": "2026-10-30",
   "monitoring": {
     "version": "7.12.1",
@@ -37,15 +37,19 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "42B5E8689742DA750A2D75ED2AFBC2C8B2EFD147D482D49AC6123C0C342044EF"
+      "sha256": "8C7E57586EA579FD43A5DDFB0C247A32453482279E5A5170550E63F483BE3CFD"
     },
     {
       "path": "Invoke-SmtpDiagnostic.ps1",
       "sha256": "15AFA06808FD2025CD15FC28A93C162D589CAD8E22A264A6A3D22F32E882EDD3"
     },
     {
+      "path": "nodemailer-9.1.1.tgz",
+      "sha256": "E28557A9ACD1C1351F2779E85491F721404E5D6CB6EF0566BBC0F2036851A073"
+    },
+    {
       "path": "version.txt",
-      "sha256": "969D5FCCA7FD1CF26AF2048DCE78713DF15CACD9DAF41C6C6A39FCE095BBCF9E"
+      "sha256": "E72F36E5B266A1C1F3095E0E018E9BF3A79308256324802D3F49F44A5054FE58"
     },
     {
       "path": "Test-DBConfigFile.ps1",

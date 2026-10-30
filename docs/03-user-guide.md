@@ -420,6 +420,7 @@ Prerequisites:
 
 - run IT Tools as Administrator;
 - Node.js/npm available, or Administrator access to approve its guided WinGet installation;
+- `nodemailer-9.1.1.tgz` beside IT Tools when installing on a server without internet access;
 - Decide4Action service installed or a known Configuration folder;
 - approved notification recipients;
 - outbound email path available and, when Discord delivery is required, outbound HTTPS access to `discord.com`.
@@ -431,7 +432,7 @@ Procedure:
 3. Confirm or select the Configuration deployment folder.
 4. Enter one or more notification addresses separated by commas. They are saved for optional use, but email delivery is disabled by default. An optional Discord webhook can be added afterward to the local monitoring JSON configuration; keep this credential out of shared files and screenshots.
 5. Review the complete deployment summary and type `DEPLOY`.
-6. If Node.js/npm are absent, type `INSTALL` to install or repair the official Node.js LTS package. Node.js, npm, and nodemailer are validated before new monitor files are created.
+6. If Node.js/npm are absent, type `INSTALL` to install or repair the official Node.js LTS package. Node.js, npm, and Nodemailer are validated before new monitor files are created. IT Tools reuses a healthy approved Nodemailer installation. Otherwise, it checks npm briefly and installs the pinned online version when available; if npm is unavailable, it verifies and installs `nodemailer-9.1.1.tgz` from the IT Tools folder without internet access.
 7. Choose a recurring frequency; 5 minutes is the recommended default unless the site requires another interval.
 8. Type `CREATE` to register the silent recurring task under `SYSTEM`.
 9. Optionally configure the daily healthy-status email and its server-local time.
@@ -444,6 +445,8 @@ Expected result:
 - configuration stored in `monitor-logs\D4A-ScheduledMonitor.config.json`;
 - Scheduled Task runs silently, including when users are logged out;
 - when `EnableEmailNotifications` is `true`, the test email confirms delivery; Discord test/status delivery remains controlled by the configured webhook.
+
+For an offline installation, copy `nodemailer-9.1.1.tgz` into the same folder as `IT_Tools_Database_Translations_and_Server_Checks.ps1` before starting deployment. Do not extract it manually. IT Tools verifies its signed release hash and runs npm against the local archive. If the package is missing or has been modified, setup stops and prints its GitHub download URL and exact required destination path. Node.js and npm must already be installed because the archive supplies Nodemailer only.
 
 If an earlier deployment stopped after creating the monitor/configuration but before Scheduled Tasks were created, the tool can identify that specific incomplete state even when nodemailer finished installing before the error appeared. It displays **Resume incomplete deployment** and requires `RESUME`; the existing JSON is preserved and backed up while runtime paths are repaired. An active or modified monitor is never treated as an incomplete deployment and must be managed through **Update Existing Monitoring Settings**.
 

@@ -62,13 +62,17 @@ $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
 $Script:MonitoringOverlapWaitTimeoutSeconds = 900
-$Script:ToolVersion = [version]'7.12.1'
+$Script:ToolVersion = [version]'7.12.2'
 $Script:ToolReleaseDate = '2026-10-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
 $Script:ToolUpdateManifestFileName = 'update-manifest.json'
 $Script:ToolMainScriptFileName = 'IT_Tools_Database_Translations_and_Server_Checks.ps1'
+$Script:NodemailerPackageVersion = '9.1.1'
+$Script:NodemailerPackageFileName = 'nodemailer-9.1.1.tgz'
+$Script:NodemailerPackageSha256 = 'E28557A9ACD1C1351F2779E85491F721404E5D6CB6EF0566BBC0F2036851A073'
+$Script:NodemailerRegistryTarballUrl = 'https://registry.npmjs.org/nodemailer/-/nodemailer-9.1.1.tgz'
 $Script:ActionLogPath = 'C:\Users\edit_log.txt'
 $Script:DatabaseEditLogPath = $Script:ActionLogPath
 $Script:CurrentToolActionContext = $null
@@ -1047,7 +1051,8 @@ function Invoke-InstallStepWithProgress {
         [AllowNull()][object]$Argument = $null,
         [int]$StartPercent = 10,
         [int]$EndPercent = 90,
-        [int]$IntervalSeconds = 5
+        [int]$IntervalSeconds = 5,
+        [int]$TimeoutSeconds = 0
     )
 
     Write-StreamingLog -Percent $StartPercent -Step $Step -Description $Description
@@ -1064,10 +1069,14 @@ function Invoke-InstallStepWithProgress {
 
     try {
         while ($job.State -in @('NotStarted', 'Running')) {
+            [void](Wait-Job -Job $job -Timeout $IntervalSeconds)
             $elapsedSeconds += $IntervalSeconds
             $currentPercent = [Math]::Min($EndPercent, $currentPercent + 3)
             Write-StreamingLog -Percent $currentPercent -Step $Step -Description "$Description elapsed ${elapsedSeconds}s..."
-            [void](Wait-Job -Job $job -Timeout $IntervalSeconds)
+            if ($TimeoutSeconds -gt 0 -and $elapsedSeconds -ge $TimeoutSeconds -and $job.State -in @('NotStarted', 'Running')) {
+                Stop-Job -Job $job -ErrorAction SilentlyContinue
+                throw "Background step '$Step' timed out after $TimeoutSeconds seconds."
+            }
         }
 
         if ($job.State -ne 'Completed') {
@@ -2281,22 +2290,98 @@ function Set-SiteMonitoringDeploymentConfiguration {
     return Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $configurationPath
 }
 
+function Test-SiteMonitoringNodemailerModule {
+    param(
+        [Parameter(Mandatory = $true)][string]$ModulePath,
+        [Parameter(Mandatory = $true)][string]$NodeExecutable,
+        [Parameter(Mandatory = $true)][string]$ExpectedVersion
+    )
+
+    $packageJsonPath = Join-Path $ModulePath 'package.json'
+    if (-not (Test-Path -LiteralPath $packageJsonPath -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) { return $false }
+
+    try {
+        $package = Get-Content -LiteralPath $packageJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ([string]$package.name -cne 'nodemailer' -or [string]$package.version -cne $ExpectedVersion) { return $false }
+
+        $probeScript = 'const m=require(process.argv[1]); if (!m || !m.createTransport) process.exit(2);'
+        $probeOutput = @(& $NodeExecutable '-e' $probeScript $ModulePath 2>&1)
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-SiteMonitoringNodemailerRegistry {
+    try {
+        Initialize-ITToolsWebTls
+        [void](Invoke-WebRequest `
+            -Uri $Script:NodemailerRegistryTarballUrl `
+            -Method Head `
+            -UseBasicParsing `
+            -TimeoutSec 8 `
+            -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } `
+            -ErrorAction Stop)
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-SiteMonitoringNodemailerPackage {
+    param([Parameter(Mandatory = $true)][string]$PackagePath)
+
+    if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
+        throw "The offline Nodemailer package was not found: $PackagePath"
+    }
+    $packageInfo = Get-Item -LiteralPath $PackagePath -ErrorAction Stop
+    if ($packageInfo.Length -le 0) {
+        throw "The offline Nodemailer package is empty: $PackagePath"
+    }
+
+    $actualHash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+    if ($actualHash -ne $Script:NodemailerPackageSha256) {
+        throw "The offline Nodemailer package failed SHA-256 verification. Expected $($Script:NodemailerPackageSha256); received $actualHash."
+    }
+}
+
 function Install-SiteMonitoringNodemailer {
     param(
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
-        [string]$NpmExecutable
+        [string]$NpmExecutable,
+        [string]$NodeExecutable
     )
 
-    if ([string]::IsNullOrWhiteSpace($NpmExecutable)) {
+    if ([string]::IsNullOrWhiteSpace($NpmExecutable) -or [string]::IsNullOrWhiteSpace($NodeExecutable)) {
         $runtime = Get-SiteMonitoringNodeRuntime
-        if ($null -ne $runtime) { $NpmExecutable = $runtime.NpmPath }
+        if ($null -ne $runtime) {
+            if ([string]::IsNullOrWhiteSpace($NpmExecutable)) { $NpmExecutable = $runtime.NpmPath }
+            if ([string]::IsNullOrWhiteSpace($NodeExecutable)) { $NodeExecutable = $runtime.NodePath }
+        }
     }
     if ([string]::IsNullOrWhiteSpace($NpmExecutable) -or -not (Test-Path -LiteralPath $NpmExecutable -PathType Leaf)) {
         throw 'npm could not be located after the Node.js prerequisite check.'
     }
+    if ([string]::IsNullOrWhiteSpace($NodeExecutable) -or -not (Test-Path -LiteralPath $NodeExecutable -PathType Leaf)) {
+        throw 'node.exe could not be located after the Node.js prerequisite check.'
+    }
 
-    Write-StreamingLog -Percent 35 -Step "Node.js" -Description "Preparing nodemailer in $DeploymentFolder."
-    Invoke-InstallStepWithProgress -Step "nodemailer" -Description "Installing nodemailer in the selected Configuration folder" -StartPercent 40 -EndPercent 75 -ScriptBlock {
+    $modulePath = Join-Path $DeploymentFolder 'node_modules\nodemailer'
+    if (Test-SiteMonitoringNodemailerModule `
+            -ModulePath $modulePath `
+            -NodeExecutable $NodeExecutable `
+            -ExpectedVersion $Script:NodemailerPackageVersion) {
+        Write-StreamingLog -Percent 75 -Step 'nodemailer' -Description "Nodemailer $($Script:NodemailerPackageVersion) is already installed and loadable."
+        return $modulePath
+    }
+
+    $scriptFolder = Get-CurrentScriptFolder
+    $offlinePackagePath = Join-Path $scriptFolder $Script:NodemailerPackageFileName
+    $manualDownloadUrl = '{0}/{1}' -f $Script:ToolRepositoryRawRoot.TrimEnd('/'), $Script:NodemailerPackageFileName
+    $installScript = {
         param([pscustomobject]$InstallSettings)
         $ErrorActionPreference = 'Stop'
         Set-Location -LiteralPath $InstallSettings.WorkingFolder
@@ -2333,16 +2418,104 @@ function Install-SiteMonitoringNodemailer {
                 -Arguments @('init', '-y') `
                 -Operation 'npm init'
         }
+        $installSourceArgument = [string]$InstallSettings.InstallSource
+        if ([bool]$InstallSettings.Offline -and $installSourceArgument -match '\s') {
+            $installSourceArgument = '"{0}"' -f $installSourceArgument
+        }
+        $installArguments = @(
+            'install', $installSourceArgument,
+            '--save', '--no-audit', '--no-fund', '--ignore-scripts'
+        )
+        if ([bool]$InstallSettings.Offline) {
+            $installArguments += '--offline'
+        }
+        else {
+            $installArguments += @(
+                '--fetch-retries=0',
+                '--fetch-timeout=10000',
+                '--fetch-retry-mintimeout=1000',
+                '--fetch-retry-maxtimeout=2000'
+            )
+        }
         Invoke-NpmInstallationCommand `
             -Executable ([string]$InstallSettings.NpmExecutable) `
-            -Arguments @('install', 'nodemailer', '--save', '--no-audit', '--no-fund') `
-            -Operation 'npm install nodemailer'
-    } -Argument ([pscustomobject]@{ WorkingFolder = $DeploymentFolder; NpmExecutable = $NpmExecutable })
-
-    $modulePath = Join-Path $DeploymentFolder 'node_modules\nodemailer'
-    if (-not (Test-Path -LiteralPath $modulePath -PathType Container)) {
-        throw "npm completed but nodemailer was not found at $modulePath."
+            -Arguments $installArguments `
+            -Operation ([string]$InstallSettings.Operation)
     }
+
+    Write-StreamingLog -Percent 35 -Step 'Node.js' -Description "Preparing Nodemailer $($Script:NodemailerPackageVersion) in $DeploymentFolder."
+    $onlineInstallError = ''
+    if (Test-SiteMonitoringNodemailerRegistry) {
+        try {
+            Invoke-InstallStepWithProgress `
+                -Step 'nodemailer' `
+                -Description "Installing approved Nodemailer $($Script:NodemailerPackageVersion) from npm" `
+                -StartPercent 40 `
+                -EndPercent 60 `
+                -TimeoutSeconds 45 `
+                -ScriptBlock $installScript `
+                -Argument ([pscustomobject]@{
+                    WorkingFolder = $DeploymentFolder
+                    NpmExecutable = $NpmExecutable
+                    InstallSource = "nodemailer@$($Script:NodemailerPackageVersion)"
+                    Offline       = $false
+                    Operation     = "npm install nodemailer@$($Script:NodemailerPackageVersion)"
+                })
+        }
+        catch {
+            $onlineInstallError = $_.Exception.Message
+            Write-Host "Online Nodemailer installation failed: $onlineInstallError" -ForegroundColor Yellow
+            Write-Host 'IT Tools will try the verified local package beside the main script.' -ForegroundColor Cyan
+        }
+    }
+    else {
+        $onlineInstallError = 'The npm registry could not be reached within 8 seconds.'
+        Write-Host $onlineInstallError -ForegroundColor Yellow
+        Write-Host 'IT Tools will use the verified local Nodemailer package.' -ForegroundColor Cyan
+    }
+
+    if (Test-SiteMonitoringNodemailerModule `
+            -ModulePath $modulePath `
+            -NodeExecutable $NodeExecutable `
+            -ExpectedVersion $Script:NodemailerPackageVersion) {
+        Write-StreamingLog -Percent 75 -Step 'nodemailer' -Description "Nodemailer $($Script:NodemailerPackageVersion) was installed from npm and loaded successfully."
+        return $modulePath
+    }
+
+    try {
+        Assert-SiteMonitoringNodemailerPackage -PackagePath $offlinePackagePath
+    }
+    catch {
+        $localPackageError = $_.Exception.Message
+        Write-Host "The local Nodemailer package cannot be used: $localPackageError" -ForegroundColor Red
+        Write-Host "Download the package manually from: $manualDownloadUrl" -ForegroundColor Cyan
+        Write-Host "IT Tools folder: $scriptFolder" -ForegroundColor Cyan
+        Write-Host "Place the file at: $offlinePackagePath" -ForegroundColor Cyan
+        throw "Nodemailer installation is unavailable. Online attempt: $onlineInstallError. Local package: $localPackageError. Manual download: $manualDownloadUrl. Place the file at: $offlinePackagePath"
+    }
+
+    Invoke-InstallStepWithProgress `
+        -Step 'nodemailer' `
+        -Description "Installing Nodemailer $($Script:NodemailerPackageVersion) from the verified local package" `
+        -StartPercent 60 `
+        -EndPercent 75 `
+        -TimeoutSeconds 60 `
+        -ScriptBlock $installScript `
+        -Argument ([pscustomobject]@{
+            WorkingFolder = $DeploymentFolder
+            NpmExecutable = $NpmExecutable
+            InstallSource = $offlinePackagePath
+            Offline       = $true
+            Operation     = "offline npm install $($Script:NodemailerPackageFileName)"
+        })
+
+    if (-not (Test-SiteMonitoringNodemailerModule `
+                -ModulePath $modulePath `
+                -NodeExecutable $NodeExecutable `
+                -ExpectedVersion $Script:NodemailerPackageVersion)) {
+        throw "npm completed, but Nodemailer $($Script:NodemailerPackageVersion) could not be loaded from $modulePath."
+    }
+    Write-Host "Installed Nodemailer $($Script:NodemailerPackageVersion) from the verified local package: $offlinePackagePath" -ForegroundColor Green
     return $modulePath
 }
 
@@ -3191,7 +3364,10 @@ function Show-AddSiteMonitoring {
             Pause-Screen
             return
         }
-        $nodemailerPath = Install-SiteMonitoringNodemailer -DeploymentFolder $deploymentFolder -NpmExecutable $nodeRuntime.NpmPath
+        $nodemailerPath = Install-SiteMonitoringNodemailer `
+            -DeploymentFolder $deploymentFolder `
+            -NpmExecutable $nodeRuntime.NpmPath `
+            -NodeExecutable $nodeRuntime.NodePath
 
         if ($resumeIncompleteDeployment) {
             Write-StreamingLog -Percent 78 -Step 'Repair' -Description 'Recording absolute Node.js and nodemailer paths in the preserved configuration.'

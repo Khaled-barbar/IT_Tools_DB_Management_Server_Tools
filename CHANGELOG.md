@@ -6,6 +6,13 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.12.2 / Monitoring 7.12.1 - 2026-10-30
+
+- Added the signed `nodemailer-9.1.1.tgz` release package for monitoring installation on servers without internet access. Version 9.1.1 is pinned for compatibility with existing Node.js installations.
+- Monitoring setup now reuses a healthy approved Nodemailer installation, performs an eight-second npm registry check, and applies finite online-install timeouts instead of waiting indefinitely.
+- When npm is unavailable, IT Tools verifies the local package SHA-256, installs it in offline mode, and confirms with Node.js that Nodemailer can be loaded.
+- Missing or corrupted local packages stop safely and display the GitHub download URL, IT Tools folder, and exact destination path.
+
 ## 7.12.1 / Monitoring 7.12.1 - 2026-10-30
 
 - Made the latest-release check optional for new monitoring installations and monitoring version updates when GitHub is unavailable.
