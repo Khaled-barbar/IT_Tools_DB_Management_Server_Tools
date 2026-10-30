@@ -22,6 +22,8 @@ The script offers to install these PowerShell modules for the current user when 
 - `SqlServer` for database tools;
 - `ImportExcel` for XLSX imports.
 
+For database tools on a server without PowerShell Gallery or NuGet access, keep `SqlServer.22.4.5.1.nupkg` beside the main IT Tools script. After you type `INSTALL`, IT Tools first attempts a bounded online installation and then automatically verifies and installs the local package into the current user's PowerShell module folder. Do not extract the package manually. If it is missing or modified, IT Tools displays the public GitHub download URL and exact destination path.
+
 ### Installation
 
 1. Download or clone the complete repository to `Desktop\IT Tools`, `Documents\IT Tools`, or another approved user-writable folder.
@@ -567,7 +569,7 @@ This read-only menu displays the ten newest lines from `C:\Users\edit_log.txt`. 
 - Verify server/instance, network path, username, and selected database.
 - Confirm SQL authentication is allowed for the account.
 - Let the tool use optional encryption and trusted-certificate compatibility.
-- If `Invoke-Sqlcmd` is missing, type `INSTALL` when offered.
+- If `Invoke-Sqlcmd` is missing, type `INSTALL` when offered. On an offline server, first place `SqlServer.22.4.5.1.nupkg` beside IT Tools; the package is validated and installed without PowerShellGet or NuGet.
 - Escalate repeated login or permission failures with the full daily error entry.
 
 ### An import shows no eligible rows

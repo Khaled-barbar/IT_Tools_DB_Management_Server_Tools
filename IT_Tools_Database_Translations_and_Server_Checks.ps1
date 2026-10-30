@@ -63,13 +63,17 @@ $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
 $Script:MonitoringOverlapWaitTimeoutSeconds = 900
-$Script:ToolVersion = [version]'7.12.3'
+$Script:ToolVersion = [version]'7.12.4'
 $Script:ToolReleaseDate = '2026-10-30'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
 $Script:ToolUpdateManifestFileName = 'update-manifest.json'
 $Script:ToolMainScriptFileName = 'IT_Tools_Database_Translations_and_Server_Checks.ps1'
+$Script:SqlServerModuleVersion = '22.4.5.1'
+$Script:SqlServerModulePackageFileName = 'SqlServer.22.4.5.1.nupkg'
+$Script:SqlServerModulePackageSha256 = 'FDEB189C9904C2A61F68FE63689B5DF74EB3BE86E7CD37F31CABA3A480ABC3E9'
+$Script:PowerShellGalleryServiceUrl = 'https://www.powershellgallery.com/api/v2/'
 $Script:NodemailerPackageVersion = '9.1.1'
 $Script:NodemailerPackageFileName = 'nodemailer-9.1.1.tgz'
 $Script:NodemailerPackageSha256 = 'E28557A9ACD1C1351F2779E85491F721404E5D6CB6EF0566BBC0F2036851A073'
@@ -1223,6 +1227,125 @@ function Get-DatabaseConnectionSettings {
     }
 }
 
+function Test-SqlServerModuleGalleryAvailable {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $response = Invoke-WebRequest `
+            -Uri $Script:PowerShellGalleryServiceUrl `
+            -Method Get `
+            -UseBasicParsing `
+            -TimeoutSec 8 `
+            -ErrorAction Stop
+        return ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 400)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-SqlServerModuleOfflinePackage {
+    param([Parameter(Mandatory = $true)][string]$PackagePath)
+
+    if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
+        throw "The offline SqlServer module package was not found: $PackagePath"
+    }
+    $package = Get-Item -LiteralPath $PackagePath -ErrorAction Stop
+    if ($package.Length -le 0) {
+        throw "The offline SqlServer module package is empty: $PackagePath"
+    }
+
+    $actualHash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+    if ($actualHash -ne $Script:SqlServerModulePackageSha256) {
+        throw "The offline SqlServer module package failed SHA-256 verification. Expected $($Script:SqlServerModulePackageSha256); received $actualHash."
+    }
+}
+
+function Install-SqlServerModuleFromOfflinePackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$PackagePath,
+        [string]$ModuleBasePath
+    )
+
+    Assert-SqlServerModuleOfflinePackage -PackagePath $PackagePath
+    if ([string]::IsNullOrWhiteSpace($ModuleBasePath)) {
+        $documentsFolder = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+        if ([string]::IsNullOrWhiteSpace($documentsFolder)) {
+            $documentsFolder = Join-Path $HOME 'Documents'
+        }
+        $powerShellFolder = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell' } else { 'WindowsPowerShell' }
+        $ModuleBasePath = Join-Path $documentsFolder "$powerShellFolder\Modules"
+    }
+
+    $moduleRoot = Join-Path $ModuleBasePath 'SqlServer'
+    $targetFolder = Join-Path $moduleRoot $Script:SqlServerModuleVersion
+    $targetManifest = Join-Path $targetFolder 'SqlServer.psd1'
+    if (Test-Path -LiteralPath $targetManifest -PathType Leaf) {
+        try {
+            $existingManifest = Test-ModuleManifest -Path $targetManifest -ErrorAction Stop
+            if ($existingManifest.Version.ToString() -eq $Script:SqlServerModuleVersion) {
+                Import-Module $targetManifest -Force -ErrorAction Stop
+                if (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue) {
+                    return $targetManifest
+                }
+            }
+        }
+        catch {
+            # Replace only this pinned version after a complete staging copy is validated.
+        }
+    }
+
+    [void](New-Item -ItemType Directory -Path $moduleRoot -Force -ErrorAction Stop)
+    $stagingFolder = Join-Path ([IO.Path]::GetTempPath()) ('ITSql-{0}' -f [guid]::NewGuid().ToString('N'))
+    $replacedFolder = $null
+    $installedTarget = $false
+    try {
+        [void](New-Item -ItemType Directory -Path $stagingFolder -Force -ErrorAction Stop)
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        [IO.Compression.ZipFile]::ExtractToDirectory($PackagePath, $stagingFolder)
+
+        $stagingManifest = Join-Path $stagingFolder 'SqlServer.psd1'
+        $moduleManifest = Test-ModuleManifest -Path $stagingManifest -ErrorAction Stop
+        if ($moduleManifest.Name -ne 'SqlServer' -or $moduleManifest.Version.ToString() -ne $Script:SqlServerModuleVersion) {
+            throw "The offline package contains SqlServer module version '$($moduleManifest.Version)' instead of '$($Script:SqlServerModuleVersion)'."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $stagingFolder 'SqlServer.psm1') -PathType Leaf)) {
+            throw 'The offline package does not contain SqlServer.psm1.'
+        }
+
+        if (Test-Path -LiteralPath $targetFolder -PathType Container) {
+            $replacedFolder = Join-Path $moduleRoot ('.replaced-{0}' -f [guid]::NewGuid().ToString('N'))
+            Move-Item -LiteralPath $targetFolder -Destination $replacedFolder -ErrorAction Stop
+        }
+        Move-Item -LiteralPath $stagingFolder -Destination $targetFolder -ErrorAction Stop
+        $installedTarget = $true
+
+        Import-Module $targetManifest -Force -ErrorAction Stop
+        if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
+            throw "SqlServer $($Script:SqlServerModuleVersion) was installed, but Invoke-Sqlcmd is unavailable."
+        }
+        if ($null -ne $replacedFolder -and (Test-Path -LiteralPath $replacedFolder -PathType Container)) {
+            Remove-Item -LiteralPath $replacedFolder -Recurse -Force -ErrorAction SilentlyContinue
+            $replacedFolder = $null
+        }
+        return $targetManifest
+    }
+    catch {
+        if ($installedTarget -and (Test-Path -LiteralPath $targetFolder -PathType Container)) {
+            Remove-Item -LiteralPath $targetFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $replacedFolder -and (Test-Path -LiteralPath $replacedFolder -PathType Container)) {
+            Move-Item -LiteralPath $replacedFolder -Destination $targetFolder -ErrorAction SilentlyContinue
+            $replacedFolder = $null
+        }
+        throw
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagingFolder -PathType Container) {
+            Remove-Item -LiteralPath $stagingFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-SqlCommandAvailable {
     if (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue) {
         return $true
@@ -1250,73 +1373,134 @@ function Test-SqlCommandAvailable {
         return $false
     }
 
-    try {
-        Show-SectionTitle "Installing SqlServer PowerShell Module"
-        Write-StreamingLog -Percent 5 -Step "Prepare" -Description "Preparing module installation for the current Windows user."
+    Show-SectionTitle "Installing SqlServer PowerShell Module"
+    Write-StreamingLog -Percent 5 -Step "Prepare" -Description "Preparing SqlServer $($Script:SqlServerModuleVersion) for the current Windows user."
+    $scriptFolder = Get-CurrentScriptFolder
+    $offlinePackagePath = Join-Path $scriptFolder $Script:SqlServerModulePackageFileName
+    $manualDownloadUrl = '{0}/{1}' -f $Script:ToolRepositoryRawRoot.TrimEnd('/'), $Script:SqlServerModulePackageFileName
+    $onlineInstallError = ''
 
-        $installModuleCommand = Get-Command Install-Module -ErrorAction SilentlyContinue
-        if (-not $installModuleCommand) {
-            throw "Install-Module is not available. Install or repair PowerShellGet, then run this tool again."
-        }
-
-        Write-StreamingLog -Percent 15 -Step "PowerShellGet" -Description "Install-Module command is available."
-        Write-StreamingLog -Percent 20 -Step "TLS" -Description "Enabling TLS 1.2 for PowerShell Gallery access."
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $installProviderCommand = Get-Command Install-PackageProvider -ErrorAction SilentlyContinue
-        if ($installProviderCommand) {
-            $providerParams = @{
-                Name           = 'NuGet'
-                MinimumVersion = '2.8.5.201'
-                Force          = $true
-                ErrorAction    = 'Stop'
-            }
-            if ($installProviderCommand.Parameters.ContainsKey('Scope')) {
-                $providerParams['Scope'] = 'CurrentUser'
+    if (Test-SqlServerModuleGalleryAvailable) {
+        try {
+            $installModuleCommand = Get-Command Install-Module -ErrorAction SilentlyContinue
+            if (-not $installModuleCommand) {
+                throw 'Install-Module is unavailable because PowerShellGet is missing or cannot be loaded.'
             }
 
-            Invoke-InstallStepWithProgress -Step "NuGet provider" -Description "Installing or updating the NuGet package provider." -StartPercent 25 -EndPercent 35 -ScriptBlock {
-                param([hashtable]$ProviderParams)
-                $ErrorActionPreference = 'Stop'
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                [void](Install-PackageProvider @ProviderParams)
-            } -Argument $providerParams
-        }
-        else {
-            Write-StreamingLog -Percent 35 -Step "NuGet provider" -Description "Install-PackageProvider command is not available; continuing with Install-Module."
-        }
-
-        $installModuleParams = @{
-            Name        = 'SqlServer'
-            Scope       = 'CurrentUser'
-            Force       = $true
-            ErrorAction = 'Stop'
-        }
-        if ($installModuleCommand.Parameters.ContainsKey('AllowClobber')) {
-            $installModuleParams['AllowClobber'] = $true
-        }
-
-        Invoke-InstallStepWithProgress -Step "SqlServer module" -Description "Installing the SqlServer module for the current Windows user." -StartPercent 40 -EndPercent 85 -ScriptBlock {
-            param([hashtable]$ModuleParams)
-            $ErrorActionPreference = 'Stop'
-            $ProgressPreference = 'SilentlyContinue'
+            Write-StreamingLog -Percent 15 -Step "PowerShellGet" -Description "PowerShell Gallery is reachable; attempting the normal online installation."
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Install-Module @ModuleParams
-        } -Argument $installModuleParams
+            $installProviderCommand = Get-Command Install-PackageProvider -ErrorAction SilentlyContinue
+            if ($installProviderCommand) {
+                $providerParams = @{
+                    Name           = 'NuGet'
+                    MinimumVersion = '2.8.5.201'
+                    Force          = $true
+                    ErrorAction    = 'Stop'
+                }
+                if ($installProviderCommand.Parameters.ContainsKey('Scope')) {
+                    $providerParams['Scope'] = 'CurrentUser'
+                }
+                Invoke-InstallStepWithProgress `
+                    -Step "NuGet provider" `
+                    -Description "Installing or updating the NuGet package provider" `
+                    -StartPercent 20 `
+                    -EndPercent 30 `
+                    -TimeoutSeconds 30 `
+                    -ScriptBlock {
+                        param([hashtable]$ProviderParams)
+                        $ErrorActionPreference = 'Stop'
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        [void](Install-PackageProvider @ProviderParams)
+                    } `
+                    -Argument $providerParams
+            }
 
-        Write-StreamingLog -Percent 90 -Step "Import module" -Description "Loading the SqlServer module in this PowerShell session."
-        Import-Module SqlServer -ErrorAction Stop
+            $installModuleParams = @{
+                Name            = 'SqlServer'
+                RequiredVersion = $Script:SqlServerModuleVersion
+                Scope           = 'CurrentUser'
+                Force           = $true
+                ErrorAction     = 'Stop'
+            }
+            if ($installModuleCommand.Parameters.ContainsKey('AllowClobber')) {
+                $installModuleParams['AllowClobber'] = $true
+            }
+            Invoke-InstallStepWithProgress `
+                -Step "SqlServer module" `
+                -Description "Installing SqlServer $($Script:SqlServerModuleVersion) from PowerShell Gallery" `
+                -StartPercent 35 `
+                -EndPercent 80 `
+                -TimeoutSeconds 120 `
+                -ScriptBlock {
+                    param([hashtable]$ModuleParams)
+                    $ErrorActionPreference = 'Stop'
+                    $ProgressPreference = 'SilentlyContinue'
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    Install-Module @ModuleParams
+                } `
+                -Argument $installModuleParams
 
-        if (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue) {
-            Write-StreamingLog -Percent 100 -Step "Done" -Description "SqlServer module installed and Invoke-Sqlcmd is available."
-            Write-Host "SqlServer PowerShell module installed and loaded successfully." -ForegroundColor Green
+            Import-Module SqlServer -RequiredVersion $Script:SqlServerModuleVersion -Force -ErrorAction Stop
+            if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
+                throw 'The online installation completed, but Invoke-Sqlcmd is unavailable.'
+            }
+            Write-StreamingLog -Percent 100 -Step "Done" -Description "SqlServer module installed online and Invoke-Sqlcmd is available."
+            Write-Host "SqlServer $($Script:SqlServerModuleVersion) installed and loaded successfully from PowerShell Gallery." -ForegroundColor Green
             Start-Sleep -Seconds 1
             return $true
         }
+        catch {
+            $onlineInstallError = $_.Exception.Message
+            Write-Host "Online SqlServer installation failed: $onlineInstallError" -ForegroundColor Yellow
+            Write-Host 'IT Tools will now try the verified offline package beside the script.' -ForegroundColor Cyan
+        }
+    }
+    else {
+        $onlineInstallError = 'PowerShell Gallery could not be reached within eight seconds.'
+        Write-Host $onlineInstallError -ForegroundColor Yellow
+        Write-Host 'IT Tools will use the verified offline package beside the script.' -ForegroundColor Cyan
+    }
 
-        throw "The SqlServer module was installed, but Invoke-Sqlcmd is still not available in this PowerShell session."
+    try {
+        if (Test-Path -LiteralPath $offlinePackagePath -PathType Leaf) {
+            try {
+                Assert-SqlServerModuleOfflinePackage -PackagePath $offlinePackagePath
+                Write-StreamingLog -Percent 45 -Step 'Offline package' -Description "Verified local package $($Script:SqlServerModulePackageFileName)."
+            }
+            catch {
+                Write-Host "The local package is invalid and will be refreshed if GitHub is reachable: $($_.Exception.Message)" -ForegroundColor Red
+                $offlinePackagePath = Get-RequiredScriptFolderFilePath `
+                    -FileName $Script:SqlServerModulePackageFileName `
+                    -DownloadUrl $manualDownloadUrl `
+                    -FeatureName 'offline SqlServer module installation' `
+                    -RefreshExisting `
+                    -MaximumDownloadAttempts 1
+            }
+        }
+        else {
+            $offlinePackagePath = Get-RequiredScriptFolderFilePath `
+                -FileName $Script:SqlServerModulePackageFileName `
+                -DownloadUrl $manualDownloadUrl `
+                -FeatureName 'offline SqlServer module installation' `
+                -MaximumDownloadAttempts 1
+        }
+
+        Assert-SqlServerModuleOfflinePackage -PackagePath $offlinePackagePath
+        Write-StreamingLog -Percent 55 -Step 'Offline install' -Description "Installing SqlServer $($Script:SqlServerModuleVersion) from the verified local package."
+        $installedManifest = Install-SqlServerModuleFromOfflinePackage -PackagePath $offlinePackagePath
+        Write-StreamingLog -Percent 100 -Step 'Done' -Description 'SqlServer module installed from the local package and Invoke-Sqlcmd is available.'
+        Write-Host "SqlServer $($Script:SqlServerModuleVersion) installed and loaded from: $offlinePackagePath" -ForegroundColor Green
+        Write-Host "Module manifest: $installedManifest" -ForegroundColor Gray
+        Start-Sleep -Seconds 1
+        return $true
     }
     catch {
-        Show-LoggedError -Prefix "Could not install the SqlServer PowerShell module" -Context "Install SqlServer PowerShell module" -ErrorRecord $_
+        $offlineInstallError = $_.Exception.Message
+        Write-Host "Offline SqlServer installation failed: $offlineInstallError" -ForegroundColor Red
+        Write-Host "Download the package manually from: $manualDownloadUrl" -ForegroundColor Cyan
+        Write-Host "Place it beside IT Tools at: $(Join-Path $scriptFolder $Script:SqlServerModulePackageFileName)" -ForegroundColor Cyan
+        $combinedError = "Online installation: $onlineInstallError Offline installation: $offlineInstallError"
+        Show-LoggedError -Prefix "Could not install the SqlServer PowerShell module" -Context "Install SqlServer PowerShell module" -ErrorRecord ([Management.Automation.ErrorRecord]::new([Exception]::new($combinedError), 'SqlServerModuleInstallFailed', [Management.Automation.ErrorCategory]::NotInstalled, $offlinePackagePath))
         Pause-Screen
         return $false
     }
@@ -5335,7 +5519,8 @@ function Get-RequiredScriptFolderFilePath {
         [Parameter(Mandatory = $true)][string]$FileName,
         [Parameter(Mandatory = $true)][string]$DownloadUrl,
         [Parameter(Mandatory = $true)][string]$FeatureName,
-        [switch]$RefreshExisting
+        [switch]$RefreshExisting,
+        [ValidateRange(1, 12)][int]$MaximumDownloadAttempts = 12
     )
 
     $scriptFolder = Get-CurrentScriptFolder
@@ -5390,6 +5575,7 @@ function Get-RequiredScriptFolderFilePath {
                 -ExpectedHash $expectedHash `
                 -DestinationPath $temporaryFilePath `
                 -ReleaseCommit $releaseCommit `
+                -MaximumAttempts $MaximumDownloadAttempts `
                 -ProgressPercent 25)
 
             Write-StreamingLog -Percent 70 -Step 'Verify' -Description "Verified the official file $FileName."

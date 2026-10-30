@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "version": "7.12.3",
+  "version": "7.12.4",
   "releaseDate": "2026-10-30",
   "monitoring": {
     "version": "7.12.1",
@@ -37,7 +37,7 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "629C895E84B2D55BE3CDFFCA1FF0593496C5C491FFC85558A3F646DDD564033D"
+      "sha256": "1DAF5F3B7E99C48DFA92F720E71E6202613D1A2B1311AB7CC0DF714DEAE5D2B4"
     },
     {
       "path": "Invoke-SmtpDiagnostic.ps1",
@@ -49,7 +49,7 @@
     },
     {
       "path": "version.txt",
-      "sha256": "86216D5EEADC91EF9AFD9705E1D9FE4C8CE669E96672F9A015DDBAD98EC0D6AD"
+      "sha256": "5B68369680A06EED6F0AA09C2596F04AA34A108B45EC021E0F1B568DF5142194"
     },
     {
       "path": "Test-DBConfigFile.ps1",
@@ -62,6 +62,10 @@
     {
       "path": "RoleAdminLuleburgaz-DanoneStandard-090426.sql",
       "sha256": "60B089596AC6F04A81EF67F0C8401E6F08A69A4FD513E3DE0D0B9A9EA73FDA36"
+    },
+    {
+      "path": "SqlServer.22.4.5.1.nupkg",
+      "sha256": "FDEB189C9904C2A61F68FE63689B5DF74EB3BE86E7CD37F31CABA3A480ABC3E9"
     }
   ]
 }

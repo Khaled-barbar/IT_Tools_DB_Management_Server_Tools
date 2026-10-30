@@ -6,6 +6,12 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.12.4 / Monitoring 7.12.1 - 2026-10-30
+
+- Added the official signed `SqlServer.22.4.5.1.nupkg` release package for database tools on servers where PowerShell Gallery or NuGet access is unavailable.
+- SqlServer installation now uses finite online checks and timeouts, then validates and installs the package beside IT Tools directly into the current user's module path without requiring PowerShellGet or the NuGet provider.
+- Offline installation verifies the pinned SHA-256, module name, module version, manifest, and `Invoke-Sqlcmd` command before reporting success. Missing or invalid packages display the public download URL and exact destination path.
+
 ## 7.12.3 / Monitoring 7.12.1 - 2026-10-30
 
 - Added **Execute SQL update folder (recursive)** to Database Tools for approved DBUpdate-style deployments against the currently selected database.
