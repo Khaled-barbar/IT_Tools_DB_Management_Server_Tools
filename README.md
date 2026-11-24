@@ -8,6 +8,7 @@ An interactive Windows PowerShell toolkit for repeatable database administration
 - 🏗️ **[Technical Design](docs/02-technical-design.md)** - Architecture, implementation, safety, and monitoring
 - 🛠️ **[User Guide](docs/03-user-guide.md)** - Installation, workflows, commands, and troubleshooting
 - ⚡ **[Level 1 Quick Guide](docs/04-level-1-quick-guide.md)** - Safe, concise steps for common support tasks
+- 🔄 **[Decide4Action 4.0 Monitoring Migration](docs/05-d4a-4.0-monitoring-migration.md)** - What changed for monitoring in D4A 4.0 and how the 4.0 monitor edition handles it
 - 📋 **[Changelog](CHANGELOG.md)** - Project evolution and significant release history
 
 Developer: Khaled Barbar
@@ -21,7 +22,7 @@ Developer: Khaled Barbar
 | Technologies | Windows PowerShell 5.1, SQL Server, Windows Server, Task Scheduler, GitHub |
 | Core areas | Database tools, local server and file tools, site monitoring, intervention logs |
 | Distribution | GitHub-hosted releases with automatic version and SHA-256 validation |
-| Current release | IT Tools 7.6.0, Monitoring 7.6.1 |
+| Current release | IT Tools 7.13.0; Monitoring 7.12.1 (Decide4Action 3.9.x) and 7.13.0 (Decide4Action 4.0 edition) |
 
 ## Why it exists
 
@@ -35,7 +36,7 @@ The goal is not simply to save commands. It is to reduce dependence on individua
 - Guided D4A and Danone configuration operations with previews, confirmations, and timestamped backups.
 - Local server health checks, full SSL/TLS diagnostics, file and log searches, disk analysis, SQL backup-folder permissions, and port tests.
 - A DBConfig.js diagnostic launcher that detects installed D4A configurations from Data Collector services, then validates syntax, declared settings, certificates, SMTP reachability, and approved database connectivity tests.
-- Scheduled site monitoring for application endpoints, APIs, configured D4A database connectivity, services, resources, Nginx, Windows events, and Watchdog evidence, with actionable alert thresholds, explicit recovery notifications, optional email delivery, and optional Discord delivery.
+- Scheduled site monitoring, in a Decide4Action 3.9.x edition and a 4.0 edition selected automatically during deployment, for application endpoints, APIs, configured D4A database connectivity, services, resources, Nginx, Windows events, and Watchdog evidence, with actionable alert thresholds, explicit recovery notifications, optional email delivery, and optional Discord delivery.
 - Operator-attributed database intervention and monitoring-change logging with selected non-sensitive variables and success or failure status.
 - Daily error logging, progress reporting, input validation, finite timeouts, and recoverable database changes.
 - Automatic updates for both IT Tools and the stand-alone monitor with HTTPS download, manifest validation, SHA-256 verification, and PowerShell syntax checks.
@@ -75,6 +76,7 @@ This toolkit supports operational work; it does not replace change-management ap
 | `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main interactive toolkit |
 | `D4A-ScheduledMonitor.ps1` | Canonical configuration-driven scheduled health monitor for new deployments |
 | `D4A-ScheduledMonitor-v5.ps1` | Legacy compatibility update bridge for existing versioned monitor installations; do not use for new deployments |
+| `D4A-ScheduledMonitor-4_0.ps1` | Decide4Action 4.0 edition of the scheduled monitor: installer layout, per-instance API ports, service-scoped database keys, and 4.0 Watchdog logs; updates from its own release channel |
 | `D4A-DiskSpaceAnalyzer.ps1` | Fast NTFS disk-usage analyzer with visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone timestamp-gap analyzer for text logs |
 | `Test-DBConfigFile.ps1` | On-demand DBConfig.js diagnostic companion, automatically updated after its first verified download |
@@ -85,11 +87,12 @@ This toolkit supports operational work; it does not replace change-management ap
 | `CHANGELOG.md` | Human-readable history of significant releases, features, and corrections |
 | `IT_Tools_Script_Maintenance_Conditions.md` | Standing safety, logging, validation, and release rules for future script changes |
 | `version.txt` | Public IT Tools release version used only by the IT Tools updater |
-| `monitor-version.txt` | Public Monitoring release version used only by deployed monitoring scripts |
+| `monitor-version.txt` | Public Monitoring release version used only by deployed 3.9 monitoring scripts |
+| `monitor-4_0-version.txt` | Public Monitoring release version used only by deployed Decide4Action 4.0 monitoring scripts |
 | `update-manifest.json` | File allowlist and SHA-256 hashes, plus the explicit Monitoring release definition |
 
 ## Versioning
 
-Patch releases are used for changes in the same release week, minor releases for a later release cycle, and major releases for substantial or breaking changes. IT Tools reads `version.txt`; deployed monitors read `monitor-version.txt` and their matching definition in `update-manifest.json`. New deployments use the `canonicalMonitoring` definition and `D4A-ScheduledMonitor.ps1`; existing versioned monitor files use the legacy `monitoring` definition so they can update safely without a task-path rename. The monitoring component has its own version because it can be updated while preserving each site's local configuration and Scheduled Tasks.
+Patch releases are used for changes in the same release week, minor releases for a later release cycle, and major releases for substantial or breaking changes. IT Tools reads `version.txt`; deployed monitors read `monitor-version.txt` and their matching definition in `update-manifest.json`. New 3.9 deployments use the `canonicalMonitoring` definition and `D4A-ScheduledMonitor.ps1`; existing versioned monitor files use the legacy `monitoring` definition so they can update safely without a task-path rename. Decide4Action 4.0 deployments use the `d4a40Monitoring` definition, `monitor-4_0-version.txt`, and `D4A-ScheduledMonitor-4_0.ps1`. The 4.0 edition selects its channel from its `D4A-Monitor-Channel` header rather than its filename. The monitoring component has its own version because it can be updated while preserving each site's local configuration and Scheduled Tasks.
 
 For stronger production assurance, signed GitHub releases or Authenticode signatures can be added in addition to the current HTTPS and SHA-256 controls.

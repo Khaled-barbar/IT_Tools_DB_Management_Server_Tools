@@ -35,13 +35,15 @@ flowchart TD
 | `IT_Tools_Database_Translations_and_Server_Checks.ps1` | Main menus, input collection, shared helpers, database workflows, intervention audit, server tools, monitor deployment, and updates |
 | `D4A-ScheduledMonitor.ps1` | Canonical unattended monitor for new deployments: verified updates, stateful alert evaluation, optional email and Discord delivery, logs, retention, and monitor management commands |
 | `D4A-ScheduledMonitor-v5.ps1` | Identical legacy compatibility payload used only to update already-installed versioned monitor filenames in place |
+| `D4A-ScheduledMonitor-4_0.ps1` | Decide4Action 4.0 edition of the monitor, with its own `d4a40` release channel |
 | `D4A-DiskSpaceAnalyzer.ps1` | Stand-alone or delegated disk scanning and visual reporting |
 | `Find-LogGaps.ps1` | Stand-alone log timestamp-gap analysis with read sharing |
 | Companion SQL files | Site-standard configuration data executed only by their selected feature |
 | `CHANGELOG.md` | Human-readable record of significant releases, features, and production corrections |
 | `IT_Tools_Script_Maintenance_Conditions.md` | Standing engineering constraints applied whenever the main script is changed |
 | `version.txt` | Public IT Tools version used only by the main-tool updater |
-| `monitor-version.txt` | Public Monitoring version used only by deployed monitors |
+| `monitor-version.txt` | Public Monitoring version used only by deployed 3.9 monitors |
+| `monitor-4_0-version.txt` | Public Monitoring version used only by deployed Decide4Action 4.0 monitors |
 | `update-manifest.json` | Allowlist and SHA-256 values for distributed files, including an explicit Monitoring release definition |
 
 At release 7.1.8, the main script contains approximately 9,600 lines and 249 PowerShell functions. The monitor contains approximately 4,300 lines and 102 functions. These counts describe implementation scope, not business impact.
@@ -155,6 +157,23 @@ The configuration records the absolute `node.exe` and nodemailer paths so tasks 
 
 Each frontend site has a friendly display name. The corresponding API health endpoint is derived automatically. Multiple site addresses and names remain aligned in configuration.
 
+### Decide4Action 4.0 edition
+
+Decide4Action 4.0 servers are deployed by the Decide4Action installer, which changed several facts the 3.9 monitor relied on. `D4A-ScheduledMonitor-4_0.ps1` handles them as follows:
+
+| 3.9 assumption | 4.0 reality | 4.0 edition behavior |
+|---|---|---|
+| `<root>\Services\API\dbconfig.js` | `<base>\<instance>\API\dbconfig.js`, several instances per server | Discovers instances from service paths, NSSM parameters, `D4AInstallRoot`, `D4ABaseFolder`, `D4A_HOME`, and `C:`/`D:`/`E:\Decide4Action`, and checks every instance database |
+| Machine-level `D4AKEY`/`D4AIV` | Set on the API service and at machine level only when a key already existed | Tries the process, machine, and user environment, then the API service environment, NSSM `AppEnvironmentExtra`, WinSW `<env>`, and `API\.env`; the email helper receives the matching keys |
+| API on port 32167 | Per-instance API port | Port discovered from the API service process tree; per-service listener checks; legacy local `32167` addresses are redirected for the run when not listening |
+| HTTP API | HTTP or HTTPS (`apiProtocol`) | Direct API protocol fallback with a log-only warning |
+| Services named `D4A*`/`Decide4Action*` | Installer per-instance names | Services inside a 4.0 instance folder and the machine-wide Watchdog are in scope |
+| PowerShell Watchdog in `Log\TaskSchedulerOutput` | Node Watchdog Windows service logging to `logs` | 4.0 Watchdog logs analyzed as log-only evidence; legacy analysis kept |
+| Watchdog logged Data Collector `LastEventTime` | Not logged by the Node Watchdog | Read-only `P4A_LineMonitoringStatus` freshness query, log-only by default |
+| nginx below the D4A root | Machine-wide nginx below `<base>` | Resolved from the nginx service path or `<base>` |
+
+The edition selects its update channel from its `D4A-Monitor-Channel` header, so a copy vendored or renamed by the installer still updates only from `d4a40Monitoring`. `AutomaticUpdateEnabled=false` pins an installer-managed copy. Discovery is read-only and cached per run, and on a server without a 4.0 instance the edition behaves like the 3.9 monitor.
+
 ### Configuration precedence
 
 ```text
@@ -247,7 +266,7 @@ sequenceDiagram
 
 The updater always includes the main script and refreshes companion files only when they already exist locally. If GitHub/CDN temporarily returns `version.txt` and `update-manifest.json` from different releases, the updater makes visible five-second retry attempts before rejecting the release as inconsistent. After copying the verified files, it rechecks the installed main-script hash and embedded version before displaying a summary. That summary remains open until the technician presses a key, after which the verified script is reloaded in the same PowerShell window; the original session does not continue to its old menu. If an official companion is missing, the selected feature downloads only that file, validates it against the manifest, and then saves it beside IT Tools. Before a monitoring deployment or version comparison, IT Tools also retrieves the current official monitor with cache-busting, verifies its manifest hash and parser result, and refreshes an outdated local template. Consequently, a stale companion can never make **Update monitoring script version** report that an older installed version is current. Site configuration, credentials, monitoring state, logs, and ignore rules are never release payloads.
 
-The monitoring script independently performs a cache-bypassed release check on every execution unless `-SkipAutomaticUpdate` is supplied. It reads `monitor-version.txt`, then requires the matching manifest definition, file entry, version, release date, script path, and SHA-256 to agree before it downloads any monitor code. New installations use the `canonicalMonitoring` definition and `D4A-ScheduledMonitor.ps1`; an installed versioned filename uses the legacy `monitoring` definition and payload, then replaces its own installed path without changing the Scheduled Task. Temporary GitHub/CDN disagreement is retried every five seconds with a finite limit. It then validates the monitor version and release-date headers, PowerShell syntax, and compatibility with the current JSON configuration. A file lock prevents recurring and daily Scheduled Tasks from racing to update the same deployment. Before replacing its own installed path, it backs up the current script, external JSON configuration, and matching Scheduled Task definitions. The installed filename and task settings remain unchanged, version metadata is written back to the JSON, and the verified code starts on the next execution. Update failure restores both the script and configuration, is logged, and does not prevent the health check from continuing.
+The monitoring script independently performs a cache-bypassed release check on every execution unless `-SkipAutomaticUpdate` is supplied. It reads `monitor-version.txt`, then requires the matching manifest definition, file entry, version, release date, script path, and SHA-256 to agree before it downloads any monitor code. New 3.9 installations use the `canonicalMonitoring` definition and `D4A-ScheduledMonitor.ps1`; the Decide4Action 4.0 edition always uses `d4a40Monitoring`, `monitor-4_0-version.txt`, and `D4A-ScheduledMonitor-4_0.ps1` whatever its filename; an installed versioned 3.9 filename uses the legacy `monitoring` definition and payload, then replaces its own installed path without changing the Scheduled Task. Temporary GitHub/CDN disagreement is retried every five seconds with a finite limit. It then validates the monitor version and release-date headers, PowerShell syntax, and compatibility with the current JSON configuration. A file lock prevents recurring and daily Scheduled Tasks from racing to update the same deployment. Before replacing its own installed path, it backs up the current script, external JSON configuration, and matching Scheduled Task definitions. The installed filename and task settings remain unchanged, version metadata is written back to the JSON, and the verified code starts on the next execution. Update failure restores both the script and configuration, is logged, and does not prevent the health check from continuing.
 
 For a manual version update, IT Tools checks the matching Scheduled Tasks after the operator confirms `UPDATE`. If a task is running, the tool polls it every five seconds and streams the task name, elapsed time, next check, and 15-minute limit. It proceeds immediately when the task becomes idle; the finite timeout converts a stuck execution into a logged, recoverable error.
 
@@ -327,11 +346,13 @@ IT_Tools_DB_Management_Server_Tools/
 |-- IT_Tools_Database_Translations_and_Server_Checks.ps1
 |-- D4A-ScheduledMonitor.ps1
 |-- D4A-ScheduledMonitor-v5.ps1 (legacy update bridge)
+|-- D4A-ScheduledMonitor-4_0.ps1 (Decide4Action 4.0 edition)
 |-- D4A-DiskSpaceAnalyzer.ps1
 |-- Find-LogGaps.ps1
 |-- AssemblyRules_Luleburgas.sql
 |-- RoleAdminLuleburgaz-DanoneStandard-090426.sql
 |-- monitor-version.txt
+|-- monitor-4_0-version.txt
 |-- update-manifest.json
 `-- version.txt
 ```

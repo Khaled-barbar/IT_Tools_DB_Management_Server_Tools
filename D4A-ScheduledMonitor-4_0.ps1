@@ -1,0 +1,8548 @@
+#requires -Version 5.1
+# D4A-Monitor-Version: 7.13.0
+# D4A-Monitor-Release-Date: 2026-11-24
+# D4A-Monitor-Channel: d4a40
+# D4A-Monitor-Platform: 4.0
+
+<#
+.SYNOPSIS
+    Monitors D4A application and Windows server health and sends D4A email and
+    optional Discord notifications.
+
+.DESCRIPTION
+    Runs application, service, database connectivity, database internal
+    data-file capacity, SQL Server service, resource, TLS, Nginx, and Windows
+    event checks.
+    Results are written to daily run_log and error_log files under monitor-logs.
+    Monitoring logs are retained for five days by default.
+
+    Site-specific settings are loaded from
+    monitor-logs\D4A-ScheduledMonitor.config.json. Command-line parameters take
+    precedence over the configuration file, which takes precedence over the
+    built-in defaults.
+
+    Ignore rules are stored in monitor-logs\ignore-rules.txt. Rules use the
+    format key|temporary|2h| or key|permanent||. A temporary rule is stamped
+    with its calculated end time on first use and commented out after expiry.
+
+    In normal mode, configured Discord notifications are sent when a new issue
+    is detected. Email delivery is disabled by default and can be enabled with
+    EnableEmailNotifications in the JSON configuration. The monitor automatically creates a 24-hour cooldown
+    rule after successful email or Discord delivery. Resolved issues have their automatic
+    cooldown removed so a recurrence is reported. Test and daily-summary modes
+    send the complete scan report even when healthy. Use -SendDiscordStatus for
+    a concise Discord-only health summary.
+    Use -ForceRecoveryTarget to verify one selected service, resource, or
+    application component and send a recovery only when its live result is OK.
+    MaintenanceWindows in the JSON configuration can suppress an entire scan
+    during a one-time, daily, weekly, or monthly planned maintenance interval.
+    Suppressed runs write an informational result and send nothing.
+    Use -DisableEmail -DisableDiscord to run all checks and write logs without
+    delivering an email or Discord webhook notification.
+
+    DECIDE4ACTION 4.0 EDITION
+    This edition targets servers deployed with the Decide4Action 4.0 installer
+    and remains compatible with 3.9.x layouts on the same server. It discovers
+    each installed D4A instance (default <base>\<instance>, for example
+    C:\Decide4Action\<name>) from its Windows services, D4AInstallRoot,
+    D4ABaseFolder, D4A_HOME, and the default bases, then reads:
+      - <instance>\API\dbconfig.js (4.0) or <root>\Services\API\dbconfig.js (3.9);
+      - D4AKEY/D4AIV from the process, machine, or user scope, or from the
+        Windows service environment of the instance API service, where the 4.0
+        installer stores them;
+      - the API port actually listened on by each instance API service, instead
+        of assuming port 32167, with an HTTP/HTTPS protocol fallback;
+      - installer-named instance services whose executables are below an
+        instance folder, even when their names do not start with D4A;
+      - the 4.0 Node Watchdog service logs under <instance>\logs or <base>\logs
+        as log-only evidence, while the legacy TaskSchedulerOutput analysis is
+        kept for servers that still run the PowerShell Watchdog;
+      - machine-wide nginx and the Node runtime under <base>.
+    It updates itself from its own release channel (d4a40Monitoring in
+    update-manifest.json and monitor-4_0-version.txt), whatever its local
+    filename, so it is never replaced by the 3.9 monitoring release. Set
+    AutomaticUpdateEnabled to false in the JSON configuration to pin a copy
+    managed by the Decide4Action installer.
+
+    Frontend and API endpoints alert only when unavailable. Responses above
+    4500 ms are recorded in error_log without an email alert. CPU and RAM alert
+    only after two consecutive monitor runs at 90% or more. NSSM server.log
+    rotation events, plus harmless pipe-ended output-read events, are excluded.
+    Service-related alerts also require two immediately consecutive failed
+    monitoring runs so a successful Watchdog restart can resolve the first run.
+
+    To change an automatic cooldown, use -SetIssueCooldown with
+    -IssueCooldownDuration. The command rewrites both the duration and its
+    calculated expiry timestamp; do not edit only one of those values manually.
+
+    Use -AddSiteAddress to persist one or more additional frontend sites in
+    the JSON configuration. ApiAddress stores one API endpoint for each
+    frontend; an omitted API address retains the default derived endpoint.
+    LocalApiAddress stores the local D4A API base URL used for direct API
+    performance checks. It defaults to http://127.0.0.1:32167/ and can be
+    adjusted in the JSON file when an installation uses another local host or port.
+
+    Every execution checks the official GitHub Monitoring release for a newer
+    version. monitor-version.txt, the monitoring release definition in
+    update-manifest.json, and the downloaded script metadata and SHA-256 must
+    agree before installation. Local configuration, logs, script filename, and
+    Scheduled Task definitions are preserved and backed up. Use
+    -SkipAutomaticUpdate only for a temporary troubleshooting run.
+
+.EXAMPLE
+.\D4A-ScheduledMonitor-4_0.ps1 -SiteAddress 'https://akbou.decide4action.com'
+
+.EXAMPLE
+    # Validate a 4.0 configuration and show the discovered D4A instances.
+.\D4A-ScheduledMonitor-4_0.ps1 -ShowConfiguration
+
+.EXAMPLE
+.\D4A-ScheduledMonitor.ps1 `
+        -SiteAddress 'https://akbou.decide4action.com' `
+        -SendTestResultsEmail
+
+.EXAMPLE
+    # Send the daily performance summary even when no issue is detected.
+.\D4A-ScheduledMonitor.ps1 -SendDailySummaryEmail
+
+.EXAMPLE
+    # Send a concise Discord status with endpoint, service, and resource results.
+.\D4A-ScheduledMonitor.ps1 -SendDiscordStatus
+
+.EXAMPLE
+    # Verify one component and force a recovery notification only when healthy.
+.\D4A-ScheduledMonitor.ps1 -ForceRecoveryTarget 'Memory'
+
+.EXAMPLE
+    # Add a site to the persistent JSON configuration, then view the result.
+.\D4A-ScheduledMonitor.ps1 -AddSiteAddress 'https://newsite.decide4action.com'
+.\D4A-ScheduledMonitor.ps1 -ShowConfiguration
+
+.EXAMPLE
+    # Change the automatic cooldown for one issue to 12 hours or 3 days.
+    # This recalculates the expiry timestamp from the current time.
+.\D4A-ScheduledMonitor.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '12h'
+.\D4A-ScheduledMonitor.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '3d'
+.\D4A-ScheduledMonitor.ps1 -ClearIssueCooldown 'server-cpu'
+
+.EXAMPLE
+    powershell.exe -NoProfile -ExecutionPolicy Bypass `
+-File .\D4A-ScheduledMonitor.ps1 `
+        -SiteAddress 'https://akbou.decide4action.com'
+#>
+
+[CmdletBinding()]
+param(
+    [string]$ConfigPath,
+
+    [switch]$SkipAutomaticUpdate,
+
+    [switch]$ValidateConfiguration,
+
+    # Show the effective configuration without running a health scan.
+    [switch]$ShowConfiguration,
+
+    # Add one or more comma-separated frontend sites to the persistent JSON
+    # configuration without running a health scan.
+    [string]$AddSiteAddress,
+
+    # Optional API addresses aligned with AddSiteAddress. Omitted values use
+    # the standard API derivation for each added frontend.
+    [string]$AddSiteApiAddress,
+
+    # Comma-separated frontend addresses. The corresponding D4A API is always
+    # checked for every configured frontend.
+    [string]$SiteAddress = 'hostname:1200',
+
+    # Optional comma-separated API addresses aligned with SiteAddress. When an
+    # item is omitted, the established D4A API derivation is retained.
+    [string]$ApiAddress = '',
+
+    # Local D4A API base address used for direct, on-server API performance
+    # checks. This is normally stored in the site-specific JSON configuration.
+    [string]$LocalApiAddress = 'http://127.0.0.1:32167/',
+
+    # Friendly identifier used in email subjects, for example "Akbou".
+    [string]$MonitoringName = 'D4A site',
+
+    # Comma-separated friendly names aligned with SiteAddress. This is normally
+    # maintained by IT Tools and lets each configured site be identified clearly.
+    [string]$SiteDisplayNames = '',
+
+    # Email delivery is opt-in. Set this to true in the site-specific JSON
+    # configuration; -DisableEmail remains a one-run override.
+    [bool]$EnableEmailNotifications = $false,
+
+    # Default email notification recipient. It is retained while email is
+    # disabled so delivery can be enabled later without re-entering recipients.
+    [string]$NotificationTo = 'techsupport@decide4action.com',
+
+    # Optional Discord webhook stored in the site-specific JSON configuration.
+    # Never place a webhook URL in the distributed script or Git repository.
+    [string]$DiscordWebhookUrl = '',
+
+    # Optional one-time, daily, weekly, or monthly maintenance definitions loaded from
+    # the JSON configuration. Active windows skip all checks and notifications.
+    [object[]]$MaintenanceWindows = @(),
+
+    [Alias('SendEmailResults')]
+    [switch]$SendTestResultsEmail,
+
+    [switch]$SendDailySummaryEmail,
+
+    # Sends a concise Discord-only health summary, including healthy runs.
+    [switch]$SendDiscordStatus,
+
+    # Sends a recovery only when the live result matching this target is healthy.
+    [string]$ForceRecoveryTarget,
+
+    # Use both switches for a full no-notification run; the checks and logs
+    # still run, but neither outbound delivery channel is used.
+    [switch]$DisableEmail,
+
+    [switch]$DisableDiscord,
+
+    [string]$LogDirectory,
+    [string]$WatchdogLogRoot,
+
+    [ValidateRange(1, 365)]
+    [int]$LogRetentionDays = 5,
+
+    [ValidateRange(50, 5000)]
+    [int]$WatchdogLogTailLines = 300,
+
+    [string]$D4AInstallRoot,
+
+    # Decide4Action 4.0 base folder that contains instance folders and the
+    # machine-wide Runtime, nginx, Node-RED, and Watchdog folders, for example
+    # C:\Decide4Action. Discovery also checks C:\ and D:\Decide4Action.
+    [string]$D4ABaseFolder,
+    [string]$NginxErrorLog,
+
+    [Alias('EmailDbConfigPath')]
+    [string]$DbConfigPath,
+
+    # Maximum connection and query duration for each discovered dbconfig.js
+    # database health probe and internal data-file capacity query.
+    [ValidateRange(1, 120)]
+    [int]$DatabaseConnectionTimeoutSeconds = 10,
+
+    [string]$NodeExecutable,
+    [string]$NodemailerModulePath,
+    [string]$FromAddress,
+
+    # SetIssueCooldown recalculates both duration and expiry from now, without
+    # running a full monitor scan. ClearIssueCooldown removes the automatic rule.
+    [string]$SetIssueCooldown,
+    [string]$ClearIssueCooldown,
+    [string]$IssueCooldownDuration = '24h',
+
+    [ValidateRange(5, 300)]
+    [int]$EmailTimeoutSeconds = 30,
+
+    [ValidateRange(5, 300)]
+    [int]$DiscordTimeoutSeconds = 30,
+
+    # Optional SMTP fallback. It is used only when SmtpServer is explicitly set.
+    [string]$SmtpServer = '',
+
+    [ValidateRange(1, 65535)]
+    [int]$SmtpPort = 25,
+
+    [switch]$SmtpUseSsl,
+    [string]$SmtpCredentialFile,
+
+    [ValidateRange(1, 300)]
+    [int]$HttpTimeoutSeconds = 15,
+
+    [ValidateRange(1, 10)]
+    [int]$ApplicationAttempts = 2,
+
+    # Retained for compatibility with existing configuration files. Endpoint
+    # latency is now logged only above 4500 ms and never sends an email.
+    [ValidateRange(1, 60000)]
+    [int]$ApplicationWarningMs = 2000,
+
+    [ValidateRange(1, 120000)]
+    [int]$ApplicationAlertMs = 5000,
+
+    # Retained for compatibility with existing configuration files. Endpoint
+    # latency no longer triggers an email notification.
+    [ValidateRange(1, 60000)]
+    [int]$ApiHealthWarningMs = 4000,
+
+    [ValidateRange(1, 5)]
+    [int]$ApiHealthFailureAttempts = 3,
+
+    [ValidateRange(1, 60)]
+    [int]$ApiHealthRetryIntervalSeconds = 5,
+
+    # Safe NSSM log-rotation events are excluded only when their message
+    # confirms that they concern an output-file rotation.
+    [string]$NssmExcludedLogRotationEventIds = '1063,1077',
+
+    [ValidateRange(1, 240)]
+    [int]$CpuSampleDurationSeconds = 60,
+
+    [ValidateRange(1, 30)]
+    [int]$CpuSampleIntervalSeconds = 5,
+
+    [ValidateRange(1, 60)]
+    [int]$LogLookbackMinutes = 5,
+
+    [ValidateRange(100, 50000)]
+    [int]$DiagnosticTailLines = 5000,
+
+    [ValidateRange(1, 10000)]
+    [int]$NginxErrorsPerMinuteThreshold = 20,
+
+    [ValidateRange(2, 60)]
+    [int]$NginxConsecutiveMinutes = 2,
+
+    [ValidateRange(1, 10)]
+    [int]$DataCollectorConsecutiveFailureThreshold = 3,
+
+    [ValidateRange(1, 120)]
+    [int]$DataCollectorLastHealthyWarningMinutes = 5,
+
+    [ValidateRange(2, 240)]
+    [int]$DataCollectorLastHealthyCriticalMinutes = 10,
+
+    [ValidateRange(1, 50)]
+    [int]$MaxRedirects = 10,
+
+    # Comma-separated API routes measured by the application performance check.
+    # HTTP 404 on a route is reported as log-only evidence because the API
+    # answered; it usually means the route differs in the installed D4A version.
+    [string]$ApplicationPerformanceEndpoints = '/Decide4ActionStartup/gettenantinfo,/api/getSystemsAvailable',
+
+    # Automatic self-update can be disabled in the JSON configuration when the
+    # monitor is vendored and updated by the Decide4Action 4.0 installer.
+    [bool]$AutomaticUpdateEnabled = $true,
+
+    # The 4.0 Node Watchdog does not record Data Collector LastEventTime
+    # evidence. The monitor reads it directly from P4A_LineMonitoringStatus
+    # when that table exists. Results are log-only unless this is true,
+    # because lines without production can legitimately be idle.
+    [bool]$DataCollectorSqlFreshnessAlerts = $false,
+
+    # A running 4.0 Watchdog service whose newest log is older than this is
+    # reported as log-only evidence.
+    [ValidateRange(5, 1440)]
+    [int]$WatchdogLogStaleMinutes = 30
+)
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+catch {
+    # The operating system TLS defaults remain in effect if this is unavailable.
+}
+
+$script:ScriptPath = [string]$MyInvocation.MyCommand.Path
+$script:MonitorVersion = '7.13.0'
+$script:MonitorReleaseDate = '2026-11-24'
+# The release channel is embedded in the script so the Decide4Action 4.0
+# edition keeps its own update track even when it is deployed or vendored
+# under another filename such as D4A-ScheduledMonitor.ps1.
+$script:MonitorReleaseChannel = 'd4a40'
+$script:MonitorTargetPlatform = '4.0'
+$script:DefaultLocalApiAddress = 'http://127.0.0.1:32167/'
+$script:LegacyApiPort = 32167
+$script:MonitorRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
+$script:MonitorGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
+$script:MonitorVersionFileName = 'monitor-4_0-version.txt'
+$script:MonitorUpdateManifestFileName = 'update-manifest.json'
+$script:CanonicalMonitorReleaseScriptFileName = 'D4A-ScheduledMonitor-4_0.ps1'
+$script:RunningMonitorFileName = [IO.Path]::GetFileName($script:ScriptPath)
+$script:IsCanonicalMonitorFileName = $script:RunningMonitorFileName -ieq $script:CanonicalMonitorReleaseScriptFileName
+# Unlike the 3.9 edition, the filename never selects the channel: every
+# deployed copy of this edition follows the d4a40Monitoring release.
+$script:MonitorReleaseScriptFileName = $script:CanonicalMonitorReleaseScriptFileName
+$script:MonitorManifestDefinitionName = 'd4a40Monitoring'
+$script:MonitorUpdateRequestId = '{0}-{1}' -f [DateTime]::UtcNow.Ticks, [guid]::NewGuid().ToString('N')
+$script:EndpointSlowLogMs = 4500
+$script:ResourceAlertPercent = 90
+$script:ResourceConsecutiveRunsRequired = 2
+$script:WatchdogSqlConnectivityConsecutiveRunsRequired = 2
+$script:ServiceAlertConsecutiveRunsRequired = 2
+$script:DiskCriticalFreeGb = 5
+$script:DiskCriticalUsedPercent = 95
+$script:DatabaseUnallocatedSpaceAlertMb = 500
+$script:CommandLineParameterNames = @($PSBoundParameters.Keys)
+$script:ResolvedConfigPath = $null
+$script:ConfigurationLoaded = $false
+$script:ScriptDirectory = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $PSScriptRoot
+}
+else {
+    Split-Path -Parent $script:ScriptPath
+}
+$script:RunStartedAt = Get-Date
+$script:Results = [System.Collections.Generic.List[object]]::new()
+$script:RunLogPath = $null
+$script:ErrorLogPath = $null
+$script:IgnoreRulesPath = $null
+$script:MonitorLogDirectory = $null
+$script:MonitorStatePath = $null
+$script:LoggingReady = $false
+$script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
+$script:D4AServiceInventoryCache = $null
+$script:D4AInstanceLayoutCache = $null
+$script:D4AApiEndpointCache = $null
+$script:D4ADiscoveryNotes = [System.Collections.Generic.List[string]]::new()
+$script:D4AKeySourceByConfigPath = @{}
+$script:D4AServiceCommandPathCache = @{}
+
+function Initialize-MonitorWebTls {
+    # Windows PowerShell can otherwise inherit obsolete protocol defaults on older servers.
+    $protocols = [Net.SecurityProtocolType]::Tls12
+    if ([Enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13') {
+        $protocols = $protocols -bor [Net.SecurityProtocolType]::Tls13
+    }
+    [Net.ServicePointManager]::SecurityProtocol = $protocols
+}
+
+function Get-MonitorReleaseCommit {
+    try {
+        Initialize-MonitorWebTls
+        $response = Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/$($script:MonitorGitHubRepository)/commits/main" `
+            -TimeoutSec 15 `
+            -Headers @{ 'User-Agent' = 'D4A-ScheduledMonitor'; 'Cache-Control' = 'no-cache' } `
+            -ErrorAction Stop
+        $commit = [string]$response.sha
+        if ($commit -notmatch '^[a-fA-F0-9]{40}$') { throw 'The GitHub API did not return a valid main-branch commit SHA.' }
+        return $commit
+    }
+    catch {
+        Write-RunLog -Category Update -Color DarkGray -Message 'GitHub commit lookup is unavailable; using the main release URL with verified retry protection.'
+        return ''
+    }
+}
+
+function Get-MonitorAutomaticUpdateUri {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string]$ReleaseCommit = ''
+    )
+
+    if ($RelativePath -match '(?i)(\.\.|^[\\/]|^[A-Za-z]:)') {
+        throw "Unsafe monitoring update path: $RelativePath"
+    }
+    $encodedPath = (@($RelativePath -split '[\\/]' | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/')
+    $releaseReference = if ([string]::IsNullOrWhiteSpace($ReleaseCommit)) { 'main' } else { $ReleaseCommit }
+    return "https://raw.githubusercontent.com/$($script:MonitorGitHubRepository)/$releaseReference/$encodedPath`?releaseCheck=$($script:MonitorUpdateRequestId)-$([DateTime]::UtcNow.Ticks)"
+}
+
+function Get-MonitorUpdateText {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [string]$ReleaseCommit = ''
+    )
+
+    Initialize-MonitorWebTls
+    $response = Invoke-WebRequest `
+        -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $RelativePath -ReleaseCommit $ReleaseCommit) `
+        -UseBasicParsing `
+        -TimeoutSec 15 `
+        -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } `
+        -ErrorAction Stop
+    return ([string]$response.Content).Trim()
+}
+
+function Get-MonitorRemoteReleaseDefinition {
+    param(
+        [int]$MaximumAttempts = 12,
+        [int]$RetrySeconds = 5
+    )
+
+    $lastIssue = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            $releaseCommit = Get-MonitorReleaseCommit
+            $remoteVersion = [version](Get-MonitorUpdateText -RelativePath $script:MonitorVersionFileName -ReleaseCommit $releaseCommit)
+            $manifest = (Get-MonitorUpdateText -RelativePath $script:MonitorUpdateManifestFileName -ReleaseCommit $releaseCommit) | ConvertFrom-Json -ErrorAction Stop
+            $monitoringProperty = $manifest.PSObject.Properties[$script:MonitorManifestDefinitionName]
+            $monitoring = if ($null -eq $monitoringProperty) { $null } else { $monitoringProperty.Value }
+            if ($null -eq $monitoring) {
+                throw "The update manifest does not define the $($script:MonitorManifestDefinitionName) monitoring release."
+            }
+            if ([string]$monitoring.version -ne $remoteVersion.ToString()) {
+                throw "Monitoring version '$($monitoring.version)' in the manifest does not match $($script:MonitorVersionFileName) '$remoteVersion'."
+            }
+            if ([string]$monitoring.scriptPath -ine $script:MonitorReleaseScriptFileName) {
+                throw "The monitoring manifest script path '$($monitoring.scriptPath)' is not '$($script:MonitorReleaseScriptFileName)'."
+            }
+            $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $script:MonitorReleaseScriptFileName })
+            if ($entries.Count -ne 1) {
+                throw "The release manifest does not contain one unique entry for $($script:MonitorReleaseScriptFileName)."
+            }
+            $expectedHash = ([string]$entries[0].sha256).Trim().ToUpperInvariant()
+            if ($expectedHash -notmatch '^[A-F0-9]{64}$') { throw 'The monitoring manifest SHA-256 value is invalid.' }
+            if ($expectedHash -ne ([string]$monitoring.sha256).Trim().ToUpperInvariant()) {
+                throw 'The monitoring release hash does not match the file entry in the manifest.'
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$monitoring.releaseDate)) {
+                throw 'The monitoring release date is missing from the manifest.'
+            }
+
+            return [pscustomobject]@{
+                Version = $remoteVersion
+                ReleaseDate = [string]$monitoring.releaseDate
+                ExpectedHash = $expectedHash
+                ReleaseCommit = $releaseCommit
+                ReleaseScriptPath = [string]$monitoring.scriptPath
+            }
+        }
+        catch {
+            $lastIssue = $_.Exception.Message
+        }
+
+        if ($attempt -lt $MaximumAttempts) {
+            Write-RunLog -Category Update -Color DarkGray -Message (
+                'GitHub monitoring release files are synchronizing (attempt {0}/{1}). Retrying in {2} second(s).' -f
+                    $attempt, $MaximumAttempts, $RetrySeconds
+            )
+            Start-Sleep -Seconds $RetrySeconds
+        }
+    }
+
+    throw "The GitHub monitoring release did not become consistent after $MaximumAttempts attempt(s). $lastIssue"
+}
+
+function Get-MonitorVerifiedReleaseScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedHash,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][string]$ReleaseScriptPath,
+        [string]$ReleaseCommit = '',
+        [int]$MaximumAttempts = 12,
+        [int]$RetrySeconds = 5
+    )
+
+    $lastIssue = $null
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+            Initialize-MonitorWebTls
+            Invoke-WebRequest `
+                -Uri (Get-MonitorAutomaticUpdateUri -RelativePath $ReleaseScriptPath -ReleaseCommit $ReleaseCommit) `
+                -OutFile $DestinationPath `
+                -UseBasicParsing `
+                -TimeoutSec 60 `
+                -Headers @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' } `
+                -ErrorAction Stop
+
+            $downloadedHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+            if ($downloadedHash -eq $ExpectedHash) { return $DestinationPath }
+            $lastIssue = "Received SHA-256 $downloadedHash, expected $ExpectedHash."
+        }
+        catch {
+            $lastIssue = $_.Exception.Message
+        }
+
+        Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue
+        if ($attempt -lt $MaximumAttempts) {
+            Write-RunLog -Category Update -Color DarkGray -Message (
+                'GitHub monitoring script is still synchronizing (attempt {0}/{1}). Retrying in {2} second(s).' -f
+                    $attempt, $MaximumAttempts, $RetrySeconds
+            )
+            Start-Sleep -Seconds $RetrySeconds
+        }
+    }
+
+    throw "The verified monitoring script could not be downloaded after $MaximumAttempts attempt(s). $lastIssue"
+}
+
+function Get-MonitorScriptReleaseMetadata {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $content = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    if ($content -notmatch '(?m)^# D4A-Monitor-Version:\s*([^\r\n]+)\s*$') {
+        throw "Monitoring version metadata is missing from $Path"
+    }
+    $version = [version]$matches[1].Trim()
+    if ($content -notmatch '(?m)^# D4A-Monitor-Release-Date:\s*([^\r\n]+)\s*$') {
+        throw "Monitoring release-date metadata is missing from $Path"
+    }
+    $releaseDate = $matches[1].Trim()
+    $channel = if ($content -match '(?m)^# D4A-Monitor-Channel:\s*([^\r\n]+)\s*$') { $matches[1].Trim() } else { '' }
+    if ($channel -ine $script:MonitorReleaseChannel) {
+        $channelText = if ([string]::IsNullOrWhiteSpace($channel)) { 'none (3.9 edition)' } else { $channel }
+        throw "Monitoring release channel '$channelText' in $Path does not match this edition's channel '$($script:MonitorReleaseChannel)'."
+    }
+
+    $tokens = $null
+    $parseErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) {
+        throw "Downloaded monitoring script failed PowerShell syntax validation: $($parseErrors[0].Message)"
+    }
+
+    return [pscustomobject]@{
+        Version     = $version
+        ReleaseDate = $releaseDate
+        Channel     = $channel
+    }
+}
+
+function Test-MonitorScriptFolderWritable {
+    $testPath = Join-Path $script:ScriptDirectory ('.monitor_update_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($testPath, 'monitor update permission check', $script:Utf8NoBom)
+        Remove-Item -LiteralPath $testPath -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Remove-Item -LiteralPath $testPath -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+
+function Get-MonitorRelatedScheduledTasks {
+    if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Export-ScheduledTask -ErrorAction SilentlyContinue)) {
+        throw 'Scheduled Task cmdlets are unavailable, so monitoring task definitions cannot be backed up safely.'
+    }
+
+    return @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $task = $_
+        @($task.Actions | Where-Object {
+            # Some Task Scheduler action types do not implement Arguments.
+            $argumentsProperty = $_.PSObject.Properties['Arguments']
+            $arguments = if ($null -eq $argumentsProperty) { '' } else { [string]$argumentsProperty.Value }
+            -not [string]::IsNullOrWhiteSpace($arguments) -and
+            $arguments.IndexOf($script:ScriptPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        }).Count -gt 0
+    })
+}
+
+function Remove-ExpiredMonitorAutomaticUpdateBackups {
+    param([ValidateRange(1, 20)][int]$Keep = 3)
+
+    try {
+        $backupRoot = Join-Path $script:MonitorLogDirectory 'monitor-update-backups'
+        if (-not (Test-Path -LiteralPath $backupRoot -PathType Container)) { return }
+
+        $backups = @(
+            Get-ChildItem -LiteralPath $backupRoot -Directory -ErrorAction Stop |
+                Sort-Object LastWriteTimeUtc -Descending
+        )
+        $expiredBackups = @($backups | Select-Object -Skip $Keep)
+        foreach ($backup in $expiredBackups) {
+            Remove-Item -LiteralPath $backup.FullName -Recurse -Force -ErrorAction Stop
+        }
+
+        if ($expiredBackups.Count -gt 0) {
+            Write-RunLog -Category Update -Color DarkGray -Message (
+                'Pruned {0} monitor update backup(s); retained the newest {1} folder(s) in {2}.' -f
+                    $expiredBackups.Count, $Keep, $backupRoot
+            )
+        }
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Update -Color Yellow -Message (
+            'Unable to apply monitor update backup retention: {0}' -f $_.Exception.Message
+        )
+    }
+}
+
+function New-MonitorAutomaticUpdateBackup {
+    param([Parameter(Mandatory = $true)][version]$TargetVersion)
+
+    $backupRoot = Join-Path $script:MonitorLogDirectory 'monitor-update-backups'
+    $backupFolder = Join-Path $backupRoot ('{0}_to_{1}' -f (Get-Date -Format 'yyyyMMddHHmmss'), $TargetVersion)
+    [void](New-Item -Path $backupFolder -ItemType Directory -Force -ErrorAction Stop)
+
+    try {
+        Copy-Item -LiteralPath $script:ScriptPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ScriptPath))) -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -and
+            (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+            Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination (Join-Path $backupFolder ([IO.Path]::GetFileName($script:ResolvedConfigPath))) -ErrorAction Stop
+        }
+
+        $relatedTasks = @(Get-MonitorRelatedScheduledTasks)
+        if ($relatedTasks.Count -eq 0) {
+            [IO.File]::WriteAllText((Join-Path $backupFolder 'scheduled-tasks.txt'), 'No related Scheduled Tasks were found.', $script:Utf8NoBom)
+        }
+        else {
+            foreach ($task in $relatedTasks) {
+                $safeTaskName = ('{0}{1}' -f $task.TaskPath.Trim('\').Replace('\', '_'), $task.TaskName) -replace '[^A-Za-z0-9_.-]', '_'
+                $taskXml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+                [IO.File]::WriteAllText((Join-Path $backupFolder ($safeTaskName + '.xml')), [string]$taskXml, $script:Utf8NoBom)
+            }
+        }
+
+        $metadata = @(
+            'BackupTime={0}' -f (Get-Date).ToString('o'),
+            'InstalledScript={0}' -f $script:ScriptPath,
+            'PreviousVersion={0}' -f $script:MonitorVersion,
+            'TargetVersion={0}' -f $TargetVersion,
+            'Configuration={0}' -f $script:ResolvedConfigPath,
+            'ScheduledTasks={0}' -f $relatedTasks.Count
+        ) -join [Environment]::NewLine
+        [IO.File]::WriteAllText((Join-Path $backupFolder 'update-details.txt'), $metadata, $script:Utf8NoBom)
+        return $backupFolder
+    }
+    catch {
+        # The update has not started: remove any incomplete rollback folder.
+        Remove-Item -LiteralPath $backupFolder -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Enter-MonitorAutomaticUpdateLock {
+    $lockPath = Join-Path $script:MonitorLogDirectory '.monitor-update.lock'
+    try {
+        return [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    }
+    catch [IO.IOException] {
+        return $null
+    }
+}
+
+function Test-MonitorDownloadedReleaseConfiguration {
+    param([Parameter(Mandatory = $true)][string]$DownloadedScriptPath)
+
+    if ([string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -or
+        -not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        return
+    }
+
+    $arguments = @(
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $DownloadedScriptPath,
+        '-ConfigPath', $script:ResolvedConfigPath,
+        '-SkipAutomaticUpdate',
+        '-ValidateConfiguration'
+    )
+    $validationOutput = @(& powershell.exe @arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $summary = (($validationOutput | ForEach-Object { [string]$_ }) -join ' ').Trim()
+        if ($summary.Length -gt 500) { $summary = $summary.Substring(0, 500) + '...' }
+        throw "Downloaded monitoring release rejected the current site configuration: $summary"
+    }
+}
+
+function Set-MonitorInstalledReleaseMetadata {
+    param(
+        [Parameter(Mandatory = $true)][version]$Version,
+        [Parameter(Mandatory = $true)][string]$ReleaseDate
+    )
+
+    if ([string]::IsNullOrWhiteSpace($script:ResolvedConfigPath) -or
+        -not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        return
+    }
+
+    $configuration = Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath
+    foreach ($property in @(
+            [pscustomobject]@{ Name = 'EnableEmailNotifications'; Value = $false },
+            [pscustomobject]@{ Name = 'DiscordWebhookUrl'; Value = 'your Discord webhook URL' },
+            [pscustomobject]@{ Name = 'DiscordWebhookUrlNote'; Value = 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.' },
+            [pscustomobject]@{ Name = 'MaintenanceWindows'; Value = @() },
+            [pscustomobject]@{ Name = 'MaintenanceWindowsNote'; Value = 'Optional: add Name, Schedule (Once, Daily, Weekly, or Monthly), Start, and End. Weekly entries require DaysOfWeek; monthly entries require DayOfMonth. Legacy DurationMinutes (1-3) entries remain supported. Times use the server local time.' },
+            [pscustomobject]@{ Name = 'InstalledMonitorVersion'; Value = $Version.ToString() },
+            [pscustomobject]@{ Name = 'InstalledMonitorReleaseDate'; Value = $ReleaseDate },
+            [pscustomobject]@{ Name = 'LastMonitorUpdate'; Value = (Get-Date).ToString('o') }
+        )) {
+        if ($null -eq $configuration.PSObject.Properties[$property.Name]) {
+            $configuration | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value
+        }
+        elseif ($property.Name -in @('EnableEmailNotifications', 'DiscordWebhookUrl', 'DiscordWebhookUrlNote', 'MaintenanceWindows', 'MaintenanceWindowsNote')) {
+            # Preserve configured notification settings; only add missing defaults.
+            continue
+        }
+        else {
+            $configuration.($property.Name) = $property.Value
+        }
+    }
+
+    $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText(
+            $temporaryConfigPath,
+            ($configuration | ConvertTo-Json -Depth 12) + [Environment]::NewLine,
+            $script:Utf8NoBom
+        )
+        Copy-Item -LiteralPath $temporaryConfigPath -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryConfigPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-MonitorAutomaticUpdate {
+    if ($SkipAutomaticUpdate.IsPresent) {
+        Write-RunLog -Category Update -Color DarkGray -Message 'Automatic monitoring update check was skipped for this run.'
+        return
+    }
+    if (-not $AutomaticUpdateEnabled) {
+        Write-RunLog -Category Update -Color DarkGray -Message (
+            'Automatic monitoring update is disabled by AutomaticUpdateEnabled=false (for example, a copy managed by the Decide4Action installer). Version={0}; channel={1}.' -f
+                $script:MonitorVersion, $script:MonitorReleaseChannel
+        )
+        return
+    }
+
+    $temporaryFolder = $null
+    $backupFolder = $null
+    $backupCreated = $false
+    $backupRestoreSucceeded = $false
+    $configurationRestoreSucceeded = $true
+    $scriptReplaced = $false
+    $updateLock = Enter-MonitorAutomaticUpdateLock
+    if ($null -eq $updateLock) {
+        Write-RunLog -Category Update -Color DarkGray -Message 'Another monitoring process is checking or installing an update; this run will continue without a duplicate update attempt.'
+        return
+    }
+    try {
+        Write-RunLog -Category Update -Color DarkGray -Message ('Checking GitHub for a monitoring update. Current version={0}; channel={1}; manifest definition={2}.' -f $script:MonitorVersion, $script:MonitorReleaseChannel, $script:MonitorManifestDefinitionName)
+        $release = Get-MonitorRemoteReleaseDefinition
+        $currentVersion = [version]$script:MonitorVersion
+        if ($release.Version -le $currentVersion) {
+            Remove-ExpiredMonitorAutomaticUpdateBackups -Keep 3
+            Write-RunLog -Category Update -Color DarkGray -Message ('Monitoring version {0} is current; no update was required.' -f $currentVersion)
+            return
+        }
+        $expectedHash = $release.ExpectedHash
+
+        $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorUpdate_{0}' -f [guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
+        $downloadedScript = Join-Path $temporaryFolder ([IO.Path]::GetFileName($release.ReleaseScriptPath))
+        [void](Get-MonitorVerifiedReleaseScript `
+                -ExpectedHash $expectedHash `
+                -DestinationPath $downloadedScript `
+                -ReleaseScriptPath $release.ReleaseScriptPath `
+                -ReleaseCommit $release.ReleaseCommit)
+        $remoteMetadata = Get-MonitorScriptReleaseMetadata -Path $downloadedScript
+        if ($remoteMetadata.Version -ne $release.Version -or $remoteMetadata.ReleaseDate -ne $release.ReleaseDate) {
+            throw 'The downloaded monitoring script metadata does not match the verified monitoring release definition.'
+        }
+        if (-not (Test-MonitorScriptFolderWritable)) {
+            throw "A newer monitoring version $($remoteMetadata.Version) is available, but the script folder is not writable: $($script:ScriptDirectory)"
+        }
+
+        Write-RunLog -Category Update -Color DarkGray -Message 'Validating the downloaded monitoring release against the current site configuration.'
+        Test-MonitorDownloadedReleaseConfiguration -DownloadedScriptPath $downloadedScript
+
+        # Create the rollback copy only after all download/configuration checks pass.
+        Write-RunLog -Category Update -Color Cyan -Message ('Verified monitoring update {0}, released {1}. Creating a rollback backup immediately before replacement.' -f $release.Version, $release.ReleaseDate)
+        $backupFolder = New-MonitorAutomaticUpdateBackup -TargetVersion $remoteMetadata.Version
+        $backupCreated = $true
+        $replacementPath = Join-Path $script:ScriptDirectory ('.monitor_verified_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        try {
+            Copy-Item -LiteralPath $downloadedScript -Destination $replacementPath -Force -ErrorAction Stop
+            Copy-Item -LiteralPath $replacementPath -Destination $script:ScriptPath -Force -ErrorAction Stop
+            $scriptReplaced = $true
+        }
+        finally {
+            Remove-Item -LiteralPath $replacementPath -Force -ErrorAction SilentlyContinue
+        }
+
+        $installedHash = (Get-FileHash -LiteralPath $script:ScriptPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        if ($installedHash -ne $expectedHash) { throw 'The installed monitoring script failed post-update integrity verification.' }
+        $installedMetadata = Get-MonitorScriptReleaseMetadata -Path $script:ScriptPath
+        if ($installedMetadata.Version -ne $remoteMetadata.Version -or $installedMetadata.ReleaseDate -ne $remoteMetadata.ReleaseDate) {
+            throw 'The installed monitoring script metadata does not match the verified release.'
+        }
+        Set-MonitorInstalledReleaseMetadata -Version $remoteMetadata.Version -ReleaseDate $remoteMetadata.ReleaseDate
+        Remove-ExpiredMonitorAutomaticUpdateBackups -Keep 3
+        Write-RunLog -Level OK -Category Update -Color Green -Message (
+            'Monitoring version {0} was installed successfully. Backup={1}. The current process will finish with version {2}; the new version starts on the next execution.' -f
+                $remoteMetadata.Version, $backupFolder, $script:MonitorVersion
+        )
+    }
+    catch {
+        $updateError = $_
+        if ($backupCreated -and -not [string]::IsNullOrWhiteSpace($backupFolder)) {
+            $backupScript = Join-Path $backupFolder ([IO.Path]::GetFileName($script:ScriptPath))
+            if (-not $scriptReplaced) {
+                $backupRestoreSucceeded = $true
+            }
+            elseif (Test-Path -LiteralPath $backupScript -PathType Leaf) {
+                try {
+                    Copy-Item -LiteralPath $backupScript -Destination $script:ScriptPath -Force -ErrorAction Stop
+                    $backupRestoreSucceeded = $true
+                }
+                catch { Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic update restore also failed: {0}' -f $_.Exception.Message) }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
+                $backupConfiguration = Join-Path $backupFolder ([IO.Path]::GetFileName($script:ResolvedConfigPath))
+                if (Test-Path -LiteralPath $backupConfiguration -PathType Leaf) {
+                    try { Copy-Item -LiteralPath $backupConfiguration -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop }
+                    catch {
+                        $configurationRestoreSucceeded = $false
+                        Write-RunLog -Level Error -Category Update -Color Red -Message ('Automatic configuration restore also failed: {0}' -f $_.Exception.Message)
+                    }
+                }
+            }
+
+            if ($backupRestoreSucceeded -and $configurationRestoreSucceeded) {
+                Remove-Item -LiteralPath $backupFolder -Recurse -Force -ErrorAction SilentlyContinue
+                Write-RunLog -Category Update -Color DarkGray -Message 'Removed the failed-update backup after the previous monitoring script was restored.'
+            }
+        }
+        Write-RunLog -Level Warning -Category Update -Color Yellow -Message (
+            'Automatic monitoring update was not applied; this monitoring run will continue with version {0}. Reason: {1}' -f
+                $script:MonitorVersion, $updateError.Exception.Message
+        )
+    }
+    finally {
+        if (-not [string]::IsNullOrWhiteSpace($temporaryFolder)) {
+            Remove-Item -LiteralPath $temporaryFolder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $updateLock) {
+            $updateLock.Dispose()
+        }
+    }
+}
+
+function Resolve-MonitorConfigurationPath {
+    if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+        return [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($ConfigPath))
+    }
+
+    return Join-Path (Join-Path $script:ScriptDirectory 'monitor-logs') 'D4A-ScheduledMonitor.config.json'
+}
+
+function Get-MonitorConfigurationProperty {
+    param(
+        [Parameter(Mandatory = $true)][object]$Configuration,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    return $Configuration.PSObject.Properties[$Name]
+}
+
+function Get-MonitorTextMojibakeScore {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return 0 }
+    $markers = @([char]0x00C2, [char]0x00C3, [char]0x00E2, [char]0x00F0)
+    $score = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($markers -contains $character) { $score++ }
+    }
+    return $score
+}
+
+function Repair-MonitorTextEncoding {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    $repairedValue = $Value
+    $legacyEncoding = [Text.Encoding]::GetEncoding(1252)
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    # Older configurations can have passed through more than one ANSI/UTF-8
+    # conversion. Continue only while each pass measurably reduces corruption.
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        $currentScore = Get-MonitorTextMojibakeScore -Value $repairedValue
+        if ($currentScore -eq 0) { break }
+        try {
+            $candidate = $strictUtf8.GetString($legacyEncoding.GetBytes($repairedValue))
+        }
+        catch {
+            break
+        }
+        if ($candidate -eq $repairedValue -or
+            (Get-MonitorTextMojibakeScore -Value $candidate) -ge $currentScore) {
+            break
+        }
+        $repairedValue = $candidate
+    }
+    return $repairedValue
+}
+
+function Repair-MonitorConfigurationTextProperties {
+    param([Parameter(Mandatory = $true)][object]$Configuration)
+
+    foreach ($propertyName in @('MonitoringName', 'SiteDisplayNames', 'FromAddress')) {
+        $property = $Configuration.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        if ($property.Value -is [Array]) {
+            $property.Value = @($property.Value | ForEach-Object { Repair-MonitorTextEncoding -Value ([string]$_) })
+        }
+        elseif ($property.Value -is [string]) {
+            $property.Value = Repair-MonitorTextEncoding -Value ([string]$property.Value)
+        }
+    }
+    return $Configuration
+}
+
+function Read-MonitorConfigurationFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    try {
+        $json = $strictUtf8.GetString($bytes)
+    }
+    catch {
+        # Support legacy ANSI configuration files while all new files remain UTF-8.
+        $json = [Text.Encoding]::Default.GetString($bytes)
+    }
+    $json = $json.TrimStart([char]0xFEFF)
+    $configuration = $json | ConvertFrom-Json -ErrorAction Stop
+    return (Repair-MonitorConfigurationTextProperties -Configuration $configuration)
+}
+
+function Convert-MonitorConfigurationValue {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][ValidateSet('String', 'StringList', 'ObjectList', 'Int', 'Bool', 'Path')][string]$Type,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    switch ($Type) {
+        'ObjectList' {
+            return ,@($Value)
+        }
+        'StringList' {
+            $items = @($Value | ForEach-Object { (Repair-MonitorTextEncoding -Value ([string]$_)).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($items.Count -eq 0) { throw "Configuration property '$Name' cannot be empty." }
+            return ($items -join ',')
+        }
+        'Int' {
+            $number = 0
+            if (-not [int]::TryParse(([string]$Value), [ref]$number)) {
+                throw "Configuration property '$Name' must be a whole number."
+            }
+            return $number
+        }
+        'Bool' {
+            if ($Value -is [bool]) { return [bool]$Value }
+            $boolean = $false
+            if (-not [bool]::TryParse(([string]$Value), [ref]$boolean)) {
+                throw "Configuration property '$Name' must be true or false."
+            }
+            return $boolean
+        }
+        'Path' {
+            $pathValue = ([string]$Value).Trim()
+            if ([string]::IsNullOrWhiteSpace($pathValue)) { return '' }
+            return [Environment]::ExpandEnvironmentVariables($pathValue)
+        }
+        default {
+            $textValue = (Repair-MonitorTextEncoding -Value ([string]$Value)).Trim()
+            if ($Name -eq 'DiscordWebhookUrl' -and $textValue -ieq 'your Discord webhook URL') {
+                # The generated JSON uses a visible placeholder that must not
+                # be treated as a configured credential.
+                return ''
+            }
+            return $textValue
+        }
+    }
+}
+
+function Test-DiscordWebhookUrl {
+    param([Parameter(Mandatory = $true)][string]$WebhookUrl)
+
+    $uri = $null
+    if (-not [Uri]::TryCreate($WebhookUrl.Trim(), [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne 'https' -or
+        $uri.Host -notin @('discord.com', 'discordapp.com') -or
+        $uri.Port -ne 443 -or
+        $uri.Query.Length -gt 0 -or
+        $uri.Fragment.Length -gt 0 -or
+        $uri.AbsolutePath -notmatch '^/api/webhooks/\d+/[^/]+$') {
+        throw 'DiscordWebhookUrl must be an HTTPS Discord webhook URL in the format https://discord.com/api/webhooks/<id>/<token>.'
+    }
+}
+
+function Get-DiscordDeliveryConfigurationStatus {
+    if ($DisableDiscord.IsPresent) { return 'Disabled' }
+    if ([string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) { return 'Not configured' }
+    return 'Configured'
+}
+
+function Get-EmailDeliveryConfigurationStatus {
+    if ($DisableEmail.IsPresent) { return 'Disabled for this run' }
+    if ($EnableEmailNotifications) { return 'Enabled' }
+    return 'Disabled by configuration'
+}
+
+function Ensure-MonitorConfigurationDefaults {
+    param([Parameter(Mandatory = $true)][object]$Configuration)
+
+    $changed = $false
+    $apiAddressAdded = $false
+    $localApiAddressAdded = $false
+    $emailNotificationSettingAdded = $false
+    $maintenanceWindowsAdded = $false
+    if ($null -eq $Configuration.PSObject.Properties['DatabaseConnectionTimeoutSeconds']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'DatabaseConnectionTimeoutSeconds' -Value 10
+        $changed = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['EnableEmailNotifications']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'EnableEmailNotifications' -Value $false
+        $changed = $true
+        $emailNotificationSettingAdded = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrl']) {
+        # JSON does not support comments. The visible placeholder keeps the
+        # setting easy to find while remaining safely disabled at runtime.
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'DiscordWebhookUrl' -Value 'your Discord webhook URL'
+        $changed = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['DiscordWebhookUrlNote']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'DiscordWebhookUrlNote' -Value 'Optional: replace DiscordWebhookUrl with the Discord webhook URL to enable Discord notifications.'
+        $changed = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['MaintenanceWindows']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'MaintenanceWindows' -Value @()
+        $changed = $true
+        $maintenanceWindowsAdded = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['MaintenanceWindowsNote']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'MaintenanceWindowsNote' -Value 'Optional: add Name, Schedule (Once, Daily, Weekly, or Monthly), Start, and End. Weekly entries require DaysOfWeek; monthly entries require DayOfMonth. Legacy DurationMinutes (1-3) entries remain supported. Times use the server local time.'
+        $changed = $true
+        $maintenanceWindowsAdded = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['ApiAddress']) {
+        $frontendAddresses = @($Configuration.SiteAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        $apiAddresses = @(Get-DefaultMonitorApiAddresses -FrontendAddresses $frontendAddresses)
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'ApiAddress' -Value $apiAddresses
+        $changed = $true
+        $apiAddressAdded = $true
+    }
+    if ($null -eq $Configuration.PSObject.Properties['LocalApiAddress']) {
+        $Configuration | Add-Member -MemberType NoteProperty -Name 'LocalApiAddress' -Value 'http://127.0.0.1:32167/'
+        $changed = $true
+        $localApiAddressAdded = $true
+    }
+
+    if ($changed -and -not [string]::IsNullOrWhiteSpace($script:ResolvedConfigPath)) {
+        $temporaryConfigPath = Join-Path (Split-Path -Parent $script:ResolvedConfigPath) ('.monitor_config_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        try {
+            if ($apiAddressAdded -or $localApiAddressAdded -or $emailNotificationSettingAdded -or $maintenanceWindowsAdded) {
+                $migrationBackupPath = '{0}.pre-configuration-migration-{1}.json' -f
+                    ([IO.Path]::Combine((Split-Path -Parent $script:ResolvedConfigPath), [IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath))),
+                    (Get-Date -Format 'yyyyMMddHHmmss')
+                Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination $migrationBackupPath -ErrorAction Stop
+            }
+            [IO.File]::WriteAllText($temporaryConfigPath, ($Configuration | ConvertTo-Json -Depth 12) + [Environment]::NewLine, $script:Utf8NoBom)
+            Copy-Item -LiteralPath $temporaryConfigPath -Destination $script:ResolvedConfigPath -Force -ErrorAction Stop
+        }
+        finally {
+            Remove-Item -LiteralPath $temporaryConfigPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $Configuration
+}
+
+function Import-MonitorConfiguration {
+    $script:ResolvedConfigPath = Resolve-MonitorConfigurationPath
+    if (-not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        if ($script:CommandLineParameterNames -contains 'ConfigPath') {
+            throw "Monitor configuration file not found: $($script:ResolvedConfigPath)"
+        }
+        return
+    }
+
+    try {
+        $configuration = Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath
+        $configuration = Ensure-MonitorConfigurationDefaults -Configuration $configuration
+    }
+    catch {
+        throw "Unable to read monitor configuration '$($script:ResolvedConfigPath)': $($_.Exception.Message)"
+    }
+
+    $configurationVersion = Get-MonitorConfigurationProperty -Configuration $configuration -Name 'ConfigurationVersion'
+    if ($null -eq $configurationVersion) {
+        throw "Monitor configuration is missing ConfigurationVersion: $($script:ResolvedConfigPath)"
+    }
+    if ([int]$configurationVersion.Value -ne 1) {
+        throw "Unsupported monitor ConfigurationVersion '$($configurationVersion.Value)'. Expected version 1."
+    }
+
+    $settingMap = [ordered]@{
+        SiteAddress                = 'StringList'
+        ApiAddress                 = 'StringList'
+        LocalApiAddress            = 'String'
+        SiteDisplayNames           = 'StringList'
+        MonitoringName             = 'String'
+        EnableEmailNotifications   = 'Bool'
+        NotificationTo             = 'StringList'
+        DiscordWebhookUrl          = 'String'
+        MaintenanceWindows         = 'ObjectList'
+        LogDirectory               = 'Path'
+        WatchdogLogRoot            = 'Path'
+        LogRetentionDays           = 'Int'
+        WatchdogLogTailLines       = 'Int'
+        D4AInstallRoot             = 'Path'
+        D4ABaseFolder              = 'Path'
+        NginxErrorLog              = 'Path'
+        DbConfigPath               = 'Path'
+        DatabaseConnectionTimeoutSeconds = 'Int'
+        NodeExecutable             = 'Path'
+        NodemailerModulePath       = 'Path'
+        FromAddress                = 'String'
+        EmailTimeoutSeconds        = 'Int'
+        DiscordTimeoutSeconds      = 'Int'
+        SmtpServer                 = 'String'
+        SmtpPort                   = 'Int'
+        SmtpUseSsl                 = 'Bool'
+        SmtpCredentialFile         = 'Path'
+        HttpTimeoutSeconds         = 'Int'
+        ApplicationAttempts        = 'Int'
+        ApplicationWarningMs       = 'Int'
+        ApplicationAlertMs         = 'Int'
+        ApiHealthWarningMs         = 'Int'
+        ApiHealthFailureAttempts   = 'Int'
+        ApiHealthRetryIntervalSeconds = 'Int'
+        NssmExcludedLogRotationEventIds = 'StringList'
+        CpuSampleDurationSeconds   = 'Int'
+        CpuSampleIntervalSeconds   = 'Int'
+        LogLookbackMinutes         = 'Int'
+        DiagnosticTailLines        = 'Int'
+        NginxErrorsPerMinuteThreshold = 'Int'
+        NginxConsecutiveMinutes       = 'Int'
+        DataCollectorConsecutiveFailureThreshold = 'Int'
+        DataCollectorLastHealthyWarningMinutes   = 'Int'
+        DataCollectorLastHealthyCriticalMinutes  = 'Int'
+        MaxRedirects               = 'Int'
+        ApplicationPerformanceEndpoints = 'StringList'
+        AutomaticUpdateEnabled     = 'Bool'
+        DataCollectorSqlFreshnessAlerts = 'Bool'
+        WatchdogLogStaleMinutes    = 'Int'
+    }
+
+    foreach ($settingName in $settingMap.Keys) {
+        if ($script:CommandLineParameterNames -contains $settingName) { continue }
+        if ($settingName -eq 'ApiAddress' -and
+            ($script:CommandLineParameterNames -contains 'SiteAddress') -and
+            -not ($script:CommandLineParameterNames -contains 'ApiAddress')) {
+            # A temporary frontend test must continue to derive its matching
+            # API instead of applying an unrelated saved site API list.
+            continue
+        }
+        $property = Get-MonitorConfigurationProperty -Configuration $configuration -Name $settingName
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+
+        $convertedValue = Convert-MonitorConfigurationValue -Value $property.Value -Type $settingMap[$settingName] -Name $settingName
+        Set-Variable -Name $settingName -Value $convertedValue -Scope Script
+    }
+
+    # Configuration defaults can trigger discovery before D4AInstallRoot,
+    # D4ABaseFolder, or DbConfigPath are applied; rediscover with final values.
+    Reset-D4ADiscoveryCache
+    $script:ConfigurationLoaded = $true
+}
+
+function ConvertTo-MonitorMaintenanceTimeOfDay {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$WindowName,
+        [string]$FieldName = 'Start'
+    )
+
+    $parsed = [timespan]::Zero
+    foreach ($format in @('hh\:mm', 'hh\:mm\:ss')) {
+        if ([timespan]::TryParseExact($Value.Trim(), $format, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+            return $parsed
+        }
+    }
+    throw "Maintenance window '$WindowName' $FieldName must use HH:mm or HH:mm:ss for recurring schedules."
+}
+
+function Get-ValidatedMonitorMaintenanceWindows {
+    $validated = [System.Collections.Generic.List[object]]::new()
+    $index = 0
+    foreach ($window in @($MaintenanceWindows)) {
+        $index++
+        if ($null -eq $window -or $window -is [string]) {
+            throw "MaintenanceWindows entry $index must be a JSON object."
+        }
+
+        $name = if ($null -ne $window.PSObject.Properties['Name'] -and
+            -not [string]::IsNullOrWhiteSpace([string]$window.Name)) {
+            (Repair-MonitorTextEncoding -Value ([string]$window.Name)).Trim()
+        }
+        else {
+            "Maintenance window $index"
+        }
+        $comment = if ($null -ne $window.PSObject.Properties['Comment']) {
+            (Repair-MonitorTextEncoding -Value ([string]$window.Comment)).Trim()
+        }
+        else { '' }
+        if ($comment.Length -gt 300 -or $comment -match '[\x00-\x08\x0B\x0C\x0E-\x1F]') {
+            throw "Maintenance window '$name' Comment must be 300 characters or fewer and cannot contain control characters."
+        }
+        $enabled = $true
+        if ($null -ne $window.PSObject.Properties['Enabled']) {
+            if ($window.Enabled -is [bool]) {
+                $enabled = [bool]$window.Enabled
+            }
+            else {
+                $parsedEnabled = $false
+                if (-not [bool]::TryParse([string]$window.Enabled, [ref]$parsedEnabled)) {
+                    throw "Maintenance window '$name' Enabled must be true or false."
+                }
+                $enabled = $parsedEnabled
+            }
+        }
+
+        $schedule = if ($null -ne $window.PSObject.Properties['Schedule']) { ([string]$window.Schedule).Trim() } else { '' }
+        if ($schedule -notin @('Once', 'Daily', 'Weekly', 'Monthly')) {
+            throw "Maintenance window '$name' Schedule must be Once, Daily, Weekly, or Monthly."
+        }
+        $startText = if ($null -ne $window.PSObject.Properties['Start']) { ([string]$window.Start).Trim() } else { '' }
+        if ([string]::IsNullOrWhiteSpace($startText)) {
+            throw "Maintenance window '$name' requires Start."
+        }
+
+        $endText = if ($null -ne $window.PSObject.Properties['End']) { ([string]$window.End).Trim() } else { '' }
+        $duration = $null
+        if ([string]::IsNullOrWhiteSpace($endText)) {
+            $durationMinutes = 3
+            if ($null -ne $window.PSObject.Properties['DurationMinutes']) {
+                if (-not [int]::TryParse([string]$window.DurationMinutes, [ref]$durationMinutes) -or
+                    $durationMinutes -lt 1 -or $durationMinutes -gt 3) {
+                    throw "Maintenance window '$name' DurationMinutes must be between 1 and 3."
+                }
+            }
+            $duration = [timespan]::FromMinutes($durationMinutes)
+        }
+
+        $startDateTime = $null
+        $startTimeOfDay = $null
+        $daysOfWeek = @()
+        $dayOfMonth = $null
+        if ($schedule -eq 'Once') {
+            $parsedStart = [datetime]::MinValue
+            if (-not [datetime]::TryParse(
+                    $startText,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::AllowWhiteSpaces,
+                    [ref]$parsedStart)) {
+                throw "Maintenance window '$name' Start must be an ISO local date/time, for example 2026-09-26T00:00:00."
+            }
+            $startDateTime = if ($parsedStart.Kind -eq [DateTimeKind]::Utc) { $parsedStart.ToLocalTime() } else { $parsedStart }
+            if (-not [string]::IsNullOrWhiteSpace($endText)) {
+                $parsedEnd = [datetime]::MinValue
+                if (-not [datetime]::TryParse(
+                        $endText,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::AllowWhiteSpaces,
+                        [ref]$parsedEnd)) {
+                    throw "Maintenance window '$name' End must be an ISO local date/time, for example 2026-10-10T02:00:00."
+                }
+                $endDateTime = if ($parsedEnd.Kind -eq [DateTimeKind]::Utc) { $parsedEnd.ToLocalTime() } else { $parsedEnd }
+                if ($endDateTime -le $startDateTime) {
+                    throw "Maintenance window '$name' End must be later than Start."
+                }
+                $duration = $endDateTime - $startDateTime
+            }
+        }
+        else {
+            $startTimeOfDay = ConvertTo-MonitorMaintenanceTimeOfDay -Value $startText -WindowName $name
+            if (-not [string]::IsNullOrWhiteSpace($endText)) {
+                $endTimeOfDay = ConvertTo-MonitorMaintenanceTimeOfDay -Value $endText -WindowName $name -FieldName 'End'
+                if ($endTimeOfDay -eq $startTimeOfDay) {
+                    throw "Maintenance window '$name' End must differ from Start."
+                }
+                if ($endTimeOfDay -lt $startTimeOfDay) {
+                    $endTimeOfDay = $endTimeOfDay.Add([timespan]::FromDays(1))
+                }
+                $duration = $endTimeOfDay - $startTimeOfDay
+            }
+            if ($schedule -eq 'Weekly') {
+                $configuredDays = @(if ($null -ne $window.PSObject.Properties['DaysOfWeek']) { $window.DaysOfWeek })
+                if ($configuredDays.Count -eq 0) {
+                    throw "Weekly maintenance window '$name' requires DaysOfWeek."
+                }
+                foreach ($day in $configuredDays) {
+                    try {
+                        $parsedDay = [DayOfWeek][Enum]::Parse([DayOfWeek], ([string]$day).Trim(), $true)
+                    }
+                    catch {
+                        throw "Maintenance window '$name' contains an invalid day '$day'."
+                    }
+                    $daysOfWeek += $parsedDay
+                }
+                $daysOfWeek = @($daysOfWeek | Select-Object -Unique)
+            }
+            elseif ($schedule -eq 'Monthly') {
+                $parsedDayOfMonth = 0
+                if ($null -eq $window.PSObject.Properties['DayOfMonth'] -or
+                    -not [int]::TryParse([string]$window.DayOfMonth, [ref]$parsedDayOfMonth) -or
+                    $parsedDayOfMonth -lt 1 -or $parsedDayOfMonth -gt 31) {
+                    throw "Monthly maintenance window '$name' requires DayOfMonth between 1 and 31."
+                }
+                $dayOfMonth = $parsedDayOfMonth
+            }
+        }
+
+        $validated.Add([pscustomobject]@{
+                Name            = $name
+                Comment         = $comment
+                Enabled         = $enabled
+                Schedule        = $schedule
+                StartDateTime   = $startDateTime
+                StartTimeOfDay  = $startTimeOfDay
+                DaysOfWeek      = $daysOfWeek
+                DayOfMonth      = $dayOfMonth
+                Duration        = $duration
+            }) | Out-Null
+    }
+    return $validated.ToArray()
+}
+
+function Get-ActiveMonitorMaintenanceWindow {
+    param([datetime]$Now = (Get-Date))
+
+    foreach ($window in @(Get-ValidatedMonitorMaintenanceWindows)) {
+        if (-not $window.Enabled) { continue }
+        $candidateStarts = [System.Collections.Generic.List[datetime]]::new()
+        if ($window.Schedule -eq 'Once') {
+            $candidateStarts.Add([datetime]$window.StartDateTime) | Out-Null
+        }
+        else {
+            foreach ($date in @($Now.Date, $Now.Date.AddDays(-1))) {
+                if ($window.Schedule -eq 'Weekly' -and $window.DaysOfWeek -notcontains $date.DayOfWeek) { continue }
+                if ($window.Schedule -eq 'Monthly' -and $date.Day -ne $window.DayOfMonth) { continue }
+                $candidateStarts.Add($date.Add([timespan]$window.StartTimeOfDay)) | Out-Null
+            }
+        }
+
+        foreach ($start in $candidateStarts) {
+            $end = $start.Add([timespan]$window.Duration)
+            if ($Now -ge $start -and $Now -lt $end) {
+                return [pscustomobject]@{
+                    Name     = $window.Name
+                    Comment  = $window.Comment
+                    Schedule = $window.Schedule
+                    Start    = $start
+                    End      = $end
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Test-MonitorConfigurationValues {
+    $ranges = [ordered]@{
+        LogRetentionDays         = @(1, 365)
+        WatchdogLogTailLines     = @(50, 5000)
+        EmailTimeoutSeconds      = @(5, 300)
+        DiscordTimeoutSeconds    = @(5, 300)
+        SmtpPort                 = @(1, 65535)
+        HttpTimeoutSeconds       = @(1, 300)
+        DatabaseConnectionTimeoutSeconds = @(1, 120)
+        ApplicationAttempts      = @(1, 10)
+        ApplicationWarningMs     = @(1, 60000)
+        ApplicationAlertMs       = @(1, 120000)
+        ApiHealthWarningMs       = @(1, 60000)
+        ApiHealthFailureAttempts = @(1, 5)
+        ApiHealthRetryIntervalSeconds = @(1, 60)
+        CpuSampleDurationSeconds = @(1, 240)
+        CpuSampleIntervalSeconds = @(1, 30)
+        LogLookbackMinutes       = @(1, 60)
+        DiagnosticTailLines      = @(100, 50000)
+        NginxErrorsPerMinuteThreshold = @(1, 10000)
+        NginxConsecutiveMinutes       = @(2, 60)
+        DataCollectorConsecutiveFailureThreshold = @(1, 10)
+        DataCollectorLastHealthyWarningMinutes   = @(1, 120)
+        DataCollectorLastHealthyCriticalMinutes  = @(2, 240)
+        MaxRedirects             = @(1, 50)
+        WatchdogLogStaleMinutes  = @(5, 1440)
+    }
+
+    foreach ($settingName in $ranges.Keys) {
+        $value = [int](Get-Variable -Name $settingName -Scope Script -ValueOnly)
+        $minimum = [int]$ranges[$settingName][0]
+        $maximum = [int]$ranges[$settingName][1]
+        if ($value -lt $minimum -or $value -gt $maximum) {
+            throw "Monitor setting '$settingName' must be between $minimum and $maximum. Current value: $value."
+        }
+    }
+
+    $null = Get-NssmExcludedLogRotationEventIds
+    if ($DataCollectorLastHealthyWarningMinutes -ge $DataCollectorLastHealthyCriticalMinutes) {
+        throw 'DataCollectorLastHealthyWarningMinutes must be lower than DataCollectorLastHealthyCriticalMinutes.'
+    }
+    if ([string]::IsNullOrWhiteSpace($MonitoringName)) {
+        throw 'MonitoringName cannot be empty.'
+    }
+    if ($EnableEmailNotifications -and -not $DisableEmail.IsPresent) {
+        if ([string]::IsNullOrWhiteSpace($NotificationTo)) {
+            throw 'NotificationTo cannot be empty when EnableEmailNotifications is true.'
+        }
+
+        foreach ($address in @($NotificationTo -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+            try {
+                $parsedAddress = [Net.Mail.MailAddress]::new($address)
+                if ($parsedAddress.Address -ine $address) { throw 'Address normalization mismatch.' }
+            }
+            catch {
+                throw "NotificationTo contains an invalid email address: $address"
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+        Test-DiscordWebhookUrl -WebhookUrl $DiscordWebhookUrl
+    }
+    [void](Get-ValidatedMonitorMaintenanceWindows)
+    if ($DisableEmail.IsPresent -and -not $DisableDiscord.IsPresent -and [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+        throw 'DisableEmail requires a configured DiscordWebhookUrl unless DisableDiscord is also specified for a no-notification run.'
+    }
+
+    $configuredUris = @(ConvertTo-HttpUris -Addresses $SiteAddress)
+    if (-not [string]::IsNullOrWhiteSpace($ApiAddress)) {
+        $configuredApiUris = @(ConvertTo-HttpUris -Addresses $ApiAddress)
+        if ($configuredApiUris.Count -ne $configuredUris.Count) {
+            throw 'ApiAddress must contain one API address for each SiteAddress entry.'
+        }
+    }
+    $localApiUris = @(ConvertTo-HttpUris -Addresses $LocalApiAddress)
+    if ($localApiUris.Count -ne 1) {
+        throw 'LocalApiAddress must contain exactly one HTTP or HTTPS base address.'
+    }
+    $performanceEndpoints = @(Get-MonitorApplicationPerformanceEndpoints)
+    if ($performanceEndpoints.Count -eq 0) {
+        throw 'ApplicationPerformanceEndpoints must contain at least one API route such as /api/getSystemsAvailable.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SiteDisplayNames)) {
+        $configuredNames = @($SiteDisplayNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($configuredNames.Count -ne $configuredUris.Count) {
+            throw 'SiteDisplayNames must contain one friendly name for each SiteAddress entry.'
+        }
+    }
+}
+
+function Get-UniqueMonitorSiteAddresses {
+    param([Parameter(Mandatory = $true)][string[]]$Addresses)
+
+    $uniqueAddresses = [System.Collections.Generic.List[string]]::new()
+    $seenAddresses = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $addressText = (@($Addresses | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
+    foreach ($uri in @(ConvertTo-HttpUris -Addresses $addressText)) {
+        $normalizedAddress = $uri.AbsoluteUri.TrimEnd('/')
+        if ($seenAddresses.Add($normalizedAddress)) {
+            $uniqueAddresses.Add($normalizedAddress) | Out-Null
+        }
+    }
+
+    return @($uniqueAddresses)
+}
+
+function Get-MonitorSiteDisplayNames {
+    param([Parameter(Mandatory = $true)][Uri[]]$FrontendUris)
+
+    $configuredNames = @($SiteDisplayNames -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $configuredUris = @(ConvertTo-HttpUris -Addresses $SiteAddress)
+    $isConfiguredSiteSet = $configuredNames.Count -eq $FrontendUris.Count -and $configuredUris.Count -eq $FrontendUris.Count
+    if ($isConfiguredSiteSet) {
+        for ($index = 0; $index -lt $FrontendUris.Count; $index++) {
+            if ($configuredUris[$index].AbsoluteUri.TrimEnd('/') -ine $FrontendUris[$index].AbsoluteUri.TrimEnd('/')) {
+                $isConfiguredSiteSet = $false
+                break
+            }
+        }
+    }
+    if ($isConfiguredSiteSet) {
+        return @($configuredNames)
+    }
+
+    return @($FrontendUris | ForEach-Object { Get-MonitorEndpointLabel -Uri $_ })
+}
+
+function Get-MonitorConfigurationForManagement {
+    if (-not $script:ConfigurationLoaded -or -not (Test-Path -LiteralPath $script:ResolvedConfigPath -PathType Leaf)) {
+        throw "A persistent monitoring configuration is required: $($script:ResolvedConfigPath)"
+    }
+
+    try {
+        return (Read-MonitorConfigurationFile -Path $script:ResolvedConfigPath)
+    }
+    catch {
+        throw "Unable to read monitoring configuration '$($script:ResolvedConfigPath)': $($_.Exception.Message)"
+    }
+}
+
+function Add-MonitorConfiguredSites {
+    param(
+        [Parameter(Mandatory = $true)][string]$Addresses,
+        [string]$ApiAddresses
+    )
+
+    $configuration = Get-MonitorConfigurationForManagement
+    $existingAddresses = @($configuration.SiteAddress | ForEach-Object { [string]$_ })
+    $requestedAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses @($Addresses -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }))
+    if ($requestedAddresses.Count -eq 0) {
+        throw 'Enter at least one frontend site address.'
+    }
+
+    $requestedFrontendUris = @(ConvertTo-HttpUris -Addresses ($requestedAddresses -join ','))
+    $requestedApiUris = @(Get-MonitorApiUris -FrontendUris $requestedFrontendUris -ConfiguredAddresses $ApiAddresses)
+
+    $allAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses @($existingAddresses + $requestedAddresses))
+    $existingNormalizedAddresses = @(Get-UniqueMonitorSiteAddresses -Addresses $existingAddresses)
+    $existingFrontendUris = @(ConvertTo-HttpUris -Addresses ($existingNormalizedAddresses -join ','))
+    $existingApiAddresses = if ($null -eq $configuration.PSObject.Properties['ApiAddress']) { '' } else { (@($configuration.ApiAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',') }
+    $existingApiUris = @(Get-MonitorApiUris -FrontendUris $existingFrontendUris -ConfiguredAddresses $existingApiAddresses)
+    $existingSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($address in $existingNormalizedAddresses) { $existingSet.Add($address) | Out-Null }
+    $addedAddresses = @($allAddresses | Where-Object { -not $existingSet.Contains($_) })
+
+    if ($addedAddresses.Count -eq 0) {
+        Write-Host 'All requested sites are already in the monitoring configuration. No file was changed.' -ForegroundColor Yellow
+        return
+    }
+
+    $configuration.SiteAddress = @($allAddresses)
+    $existingNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($existingNames.Count -ne $existingNormalizedAddresses.Count) {
+        $existingNames = @($existingNormalizedAddresses | ForEach-Object {
+            $frontendUri = (ConvertTo-HttpUris -Addresses $_ | Select-Object -First 1)
+            Get-MonitorEndpointLabel -Uri $frontendUri
+        })
+    }
+    $addedNames = @($addedAddresses | ForEach-Object {
+        $frontendUri = (ConvertTo-HttpUris -Addresses $_ | Select-Object -First 1)
+        Get-MonitorEndpointLabel -Uri $frontendUri
+    })
+    if ($null -eq $configuration.PSObject.Properties['SiteDisplayNames']) {
+        $configuration | Add-Member -MemberType NoteProperty -Name SiteDisplayNames -Value @($existingNames + $addedNames)
+    }
+    else {
+        $configuration.SiteDisplayNames = @($existingNames + $addedNames)
+    }
+    $requestedApiByFrontend = @{}
+    for ($index = 0; $index -lt $requestedAddresses.Count; $index++) {
+        $requestedApiByFrontend[$requestedAddresses[$index].TrimEnd('/')] = $requestedApiUris[$index].AbsoluteUri
+    }
+    $addedApiAddresses = @($addedAddresses | ForEach-Object { $requestedApiByFrontend[$_.TrimEnd('/')] })
+    if ($null -eq $configuration.PSObject.Properties['ApiAddress']) {
+        $configuration | Add-Member -MemberType NoteProperty -Name ApiAddress -Value @($existingApiUris | ForEach-Object { $_.AbsoluteUri })
+    }
+    $configuration.ApiAddress = @(@($existingApiUris | ForEach-Object { $_.AbsoluteUri }) + $addedApiAddresses)
+    $configuration.MonitoringName = (@($configuration.SiteDisplayNames) -join ', ')
+    $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
+    $configurationDirectory = Split-Path -Parent $script:ResolvedConfigPath
+    $backupPath = Join-Path $configurationDirectory ('{0}_{1}.bak.json' -f ([IO.Path]::GetFileNameWithoutExtension($script:ResolvedConfigPath)), $timestamp)
+    Copy-Item -LiteralPath $script:ResolvedConfigPath -Destination $backupPath -ErrorAction Stop
+    $json = $configuration | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($script:ResolvedConfigPath, $json + [Environment]::NewLine, $script:Utf8NoBom)
+
+    Write-Host "Added site(s): $($addedAddresses -join ', ')" -ForegroundColor Green
+    foreach ($address in $addedAddresses) {
+        Write-Host "API health check for ${address}: $($requestedApiByFrontend[$address.TrimEnd('/')])" -ForegroundColor Green
+    }
+    Write-Host "Configuration updated: $($script:ResolvedConfigPath)" -ForegroundColor Green
+    Write-Host "Configuration backup: $backupPath" -ForegroundColor Yellow
+}
+
+function Show-MonitorConfiguration {
+    $configuration = Get-MonitorConfigurationForManagement
+    $configuredSites = @(Get-UniqueMonitorSiteAddresses -Addresses @($configuration.SiteAddress | ForEach-Object { [string]$_ }))
+    $configuredNames = @($configuration.SiteDisplayNames | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($configuredNames.Count -ne $configuredSites.Count) {
+        $configuredNames = @($configuredSites | ForEach-Object { $_ })
+    }
+    $frontendUris = @(ConvertTo-HttpUris -Addresses ($configuredSites -join ','))
+    $configuredApiAddresses = if ($null -eq $configuration.PSObject.Properties['ApiAddress']) { '' } else { (@($configuration.ApiAddress | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',') }
+    $apiSites = @(Get-MonitorApiUris -FrontendUris $frontendUris -ConfiguredAddresses $configuredApiAddresses | ForEach-Object { $_.AbsoluteUri })
+    $schedule = $configuration.TaskScheduler
+    $frequency = if ($null -ne $schedule -and $null -ne $schedule.FrequencyMinutes) { "$($schedule.FrequencyMinutes) minute(s)" } else { 'Not recorded in configuration' }
+    $dailySummary = if ($null -ne $schedule -and $schedule.DailySummaryEnabled) { "Enabled at $($schedule.DailySummaryTime)" } else { 'Not enabled' }
+
+    Write-Host ''
+    Write-Host 'Current Monitoring Configuration' -ForegroundColor Cyan
+    [pscustomobject]@{
+        MonitorVersion       = $script:MonitorVersion
+        ReleaseDate          = $script:MonitorReleaseDate
+        ConfigurationFile    = $script:ResolvedConfigPath
+        SiteNames            = (@(for ($index = 0; $index -lt $configuredSites.Count; $index++) { '{0} = {1}' -f $configuredSites[$index], $configuredNames[$index] }) -join '; ')
+        FrontendSites        = ($configuredSites -join ', ')
+        ApiSites             = ($apiSites -join ', ')
+        LocalApiAddress      = $LocalApiAddress
+        NotificationAddresses = $NotificationTo
+        EmailNotifications     = (Get-EmailDeliveryConfigurationStatus)
+        DiscordNotifications = (Get-DiscordDeliveryConfigurationStatus)
+        MaintenanceWindows   = if (@($MaintenanceWindows).Count -eq 0) { 'None' } else { @($MaintenanceWindows | ForEach-Object { $_.Name }) -join ', ' }
+        ScheduledFrequency   = $frequency
+        DailySummary         = $dailySummary
+        LogDirectory         = $LogDirectory
+        LogRetentionDays     = $LogRetentionDays
+        WatchdogLogRoot      = $WatchdogLogRoot
+        MonitorEdition       = ('Decide4Action {0} edition; release channel={1}' -f $script:MonitorTargetPlatform, $script:MonitorReleaseChannel)
+        AutomaticUpdate      = if ($AutomaticUpdateEnabled) { 'Enabled' } else { 'Disabled by AutomaticUpdateEnabled=false' }
+        D4ABaseFolder        = $D4ABaseFolder
+        EffectiveLocalApi    = (@(Get-MonitorEffectiveLocalApiTargets | ForEach-Object { '{0}={1} ({2})' -f $_.Name, $_.BaseUri.AbsoluteUri, $_.Source }) -join '; ')
+        PerformanceEndpoints = (@(Get-MonitorApplicationPerformanceEndpoints) -join ', ')
+    } | Format-List
+
+    Write-Host 'Discovered D4A instances' -ForegroundColor Cyan
+    $discoveredLayouts = @(Get-D4AInstanceLayouts)
+    if ($discoveredLayouts.Count -eq 0) {
+        Write-Host '  None discovered. Set D4AInstallRoot, D4ABaseFolder, or DbConfigPath in the JSON configuration.' -ForegroundColor Yellow
+    }
+    else {
+        $discoveredLayouts | ForEach-Object {
+            [pscustomobject]@{
+                Platform = $_.Platform
+                Root     = $_.Root
+                DbConfig = $_.DbConfigPath
+                Services = (@($_.Services | ForEach-Object { [string]$_.Name }) -join ', ')
+            }
+        } | Format-Table -AutoSize -Wrap
+    }
+    foreach ($endpoint in @(Get-D4ADiscoveredApiEndpoints)) {
+        Write-Host ('  API service {0}: instance={1}; state={2}; ports={3}' -f $endpoint.ServiceName, $endpoint.InstanceName, $endpoint.State, $(if (@($endpoint.Ports).Count -gt 0) { @($endpoint.Ports) -join ', ' } else { 'none' })) -ForegroundColor Gray
+    }
+
+    Write-Host 'Important thresholds' -ForegroundColor Cyan
+    [pscustomobject]@{
+        HttpTimeoutSeconds                  = $HttpTimeoutSeconds
+        EndpointSlowLogMs                   = $script:EndpointSlowLogMs
+        ResourceAlertPercent                = $script:ResourceAlertPercent
+        ResourceConsecutiveRunsRequired     = $script:ResourceConsecutiveRunsRequired
+        DiskCriticalFreeGb                  = $script:DiskCriticalFreeGb
+        DiskCriticalUsedPercent             = $script:DiskCriticalUsedPercent
+        ApiHealthFailureAttempts            = $ApiHealthFailureAttempts
+        DatabaseConnectionTimeoutSeconds    = $DatabaseConnectionTimeoutSeconds
+        DatabaseUnallocatedSpaceAlertMb     = $script:DatabaseUnallocatedSpaceAlertMb
+        NginxErrorsPerMinuteThreshold       = $NginxErrorsPerMinuteThreshold
+        NginxConsecutiveMinutes             = $NginxConsecutiveMinutes
+        DataCollectorFailureAlertThreshold  = $DataCollectorConsecutiveFailureThreshold
+        DataCollectorLastHealthyWarningMins = $DataCollectorLastHealthyWarningMinutes
+        DataCollectorLastHealthyCriticalMins = $DataCollectorLastHealthyCriticalMinutes
+    } | Format-List
+}
+
+function Get-IgnoreRulesDescriptionHeader {
+    return @'
+# ==============================================================================
+# DESCRIPTION - AUTOMATIC COOLDOWN COMMANDS
+# ==============================================================================
+# Automatic rules limit duplicate notifications for the same issue. Use these
+# commands from the folder containing D4A-ScheduledMonitor.ps1 instead of
+# manually changing only one part of an automatic rule.
+#
+# Change an automatic cooldown and recalculate BOTH duration and expiry from now:
+# .\D4A-ScheduledMonitor.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '12h'
+# .\D4A-ScheduledMonitor.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '3d'
+#
+# Remove the automatic cooldown immediately:
+# .\D4A-ScheduledMonitor.ps1 -ClearIssueCooldown 'server-cpu'
+#
+# Valid durations include 30m, 2h, 3d, and 1w. The rule key is displayed in
+# monitoring emails and daily monitoring logs, for example [rule-key=server-cpu].
+# ==============================================================================
+
+'@
+}
+
+function Get-IgnoreRulesTemplate {
+    return @'
+# D4A Scheduled Monitor ignore rules
+# Format: rule-key|temporary|duration|ignore-until
+#         rule-key|permanent||
+#         rule-key|automatic|duration|ignore-until
+#
+# Temporary durations: 30m, 2h, 3d, or 1w. Leave ignore-until empty when
+# adding a temporary rule. The monitor calculates and writes the end time.
+# Automatic rules are created after a notification and removed when that
+# specific issue is no longer detected. Expired temporary rules are commented
+# out automatically.
+#
+# On the 3rd, 13th, and 23rd of each month the current file is archived and a
+# clean file is created with only active rules. The three newest archives are
+# retained.
+#
+# Examples:
+# application-frontend-availability|temporary|2h|
+# server-api-listener|permanent||
+'@
+}
+
+function Get-MonitorLogsReadme {
+    return @'
+D4A SCHEDULED MONITOR - MONITOR LOGS README
+===========================================
+
+Purpose
+-------
+D4A-ScheduledMonitor.ps1 checks D4A site availability and server health.
+It can check one or more frontend site addresses, configured API health
+    endpoints, TLS certificates, configured D4A database connectivity, local D4A
+  Windows services, the local API listener, CPU, memory, disk space, Nginx errors, relevant Windows events, and local
+  Decide4Action, Data Collector, MDC, PLC, Mosquitto/MQTT, Node-RED, Nginx,
+  reverse proxy, IIS, and SQL Server Database Engine services. SQL Server
+  Agent, Browser, CEIP, and VSS Writer services are optional and ignored.
+
+Notification behavior
+---------------------
+Normal scheduled runs send email and, when configured, a Discord notification
+for a notification-eligible issue. Discord webhook addresses remain only in
+the local JSON configuration and are never displayed in logs or reports.
+Messages use the display name D4A Monitoring and preserve the configured sender
+email address. Friendly site names are read as UTF-8 so accents are retained in
+email subjects and Discord messages.
+After a successful notification, an automatic 24-hour cooldown is added for
+that specific issue. When a later scan explicitly confirms the check is healthy,
+the monitor sends a recovery through the enabled channels and removes the
+automatic cooldown. Test and daily-summary runs report even when the server is healthy.
+
+External configuration
+----------------------
+D4A-ScheduledMonitor.config.json is stored in monitor-logs. It contains the
+site name, frontend addresses, API addresses aligned to each frontend, email
+recipients, optional Discord webhook, installation paths, log retention, and
+optional thresholds. Scheduled Task
+frequency is recorded there as deployment metadata but remains controlled by
+Windows Task Scheduler.
+Command-line parameters override JSON values for temporary manual tests.
+Endpoint latency is logged only above 4500 ms and never triggers an email.
+ApiHealthFailureAttempts (default 3), ApiHealthRetryIntervalSeconds (default
+5), and NssmExcludedLogRotationEventIds (default 1063,1077) remain available
+through the configuration file.
+Database connectivity discovers dbconfig.js from active Data Collector service
+paths, decrypts its configured password only in memory, and runs SELECT 1 for
+each complete dbConfig object. The same connection checks non-log ROWS files in
+sys.database_files and alerts only when unallocated internal space is below
+500 MB and file autogrowth is disabled.
+DatabaseConnectionTimeoutSeconds defaults to 10.
+
+Automatic updates
+-----------------
+Each execution checks the official GitHub release. A newer monitor is installed
+only after update-manifest.json, SHA-256, and PowerShell syntax validation.
+After the downloaded release and local configuration validate, the current
+script, JSON configuration, and related Scheduled Task definitions are saved
+under monitor-update-backups immediately before replacement. Only successful
+updates retain a backup, and the newest three backup folders are kept. The
+local script filename and all site settings remain unchanged. The installed
+update takes effect on the next execution. Use -SkipAutomaticUpdate only for
+a temporary troubleshooting run.
+
+DAILY LOG FILES AND WATCHDOG EVIDENCE
+=====================================
+run_log_yyyyMMdd.txt
+  One daily execution log containing monitor start/end records, configuration,
+  checks, successful results, warnings, email activity, and diagnostics. Each
+  entry keeps its component category, such as Application, Server, Diagnostics,
+  Email, or Ignore.
+
+error_log_yyyyMMdd.txt
+  One daily error log containing warnings, alerts, errors, and their component
+  category. This is the primary file to review when an alert email is received.
+
+ignore-rules.txt
+  The single persistent file for notification suppression and automatic
+  cooldowns. On the 3rd, 13th, and 23rd of each month, active rules are kept
+  in a fresh file and the previous file is archived. Only three archives are
+  retained.
+
+Watchdog evidence
+  Recent Watchdog TaskSchedulerOutput service logs are read only and added to
+  the monitor results when they help explain an issue. The monitor never
+  restarts services or changes Watchdog state.
+
+RELIABILITY ALERT POLICY
+========================
+Data Collector LastEventTime SQL timeouts are retryable while the D4A Data
+Collector Windows service is Running. The first failure is logged only, the
+second logs diagnostics, and the third consecutive failure alerts. The runtime
+state file D4A-ScheduledMonitor.state.json stores this counter and LastHealthy
+timestamp. It also stores the rule keys and component labels of successfully
+delivered issues so one recovery notification can be sent after an explicit OK.
+It is state data, not a component log.
+
+When the service is Running, LastHealthy older than 5 minutes is a warning and
+older than 10 minutes is critical. If the Windows service is not Running, the
+existing immediate Windows-service alert applies.
+
+Nginx upstream errors notify only when the rate is more than 20 matching errors
+per minute for two consecutive minutes. Lower or isolated bursts are recorded
+without an email alert.
+
+Frontend and API endpoints notify only when they are unreachable. Slow
+responses over 4500 ms are retained in error_log without an email alert. CPU
+and memory readings are also retained in error_log; they alert only after two
+consecutive monitor runs at 90% or higher. A recovered API retry is included
+in daily results but does not send a normal notification. NSSM output-file
+rotation events 1063 and 1077, and the known harmless "Failed to read output"
+pipe-ended event, are excluded. Windows-event warnings and errors are written
+to error_log and appear in daily results, but never trigger an immediate email;
+service availability is evaluated independently. Watchdog evidence that a
+service was successfully restarted is also daily-only; unresolved Watchdog
+failures still notify immediately. Disk space has no warning email: it alerts
+only at 5 GB free or less, or when used space reaches 95 percent.
+
+Repeated Watchdog messages caused by the same SQL Server connectivity loss are
+grouped under one database incident. The first newly observed failure batch is
+logged without a notification. A notification becomes eligible only after a
+second newly timestamped Watchdog failure batch is detected on a consecutive
+monitoring run. Rereading the same log entries does not increase the counter.
+
+NOTIFICATION AND RECOVERY POLICY
+================================
+Relevant Windows event warnings and errors are always retained in error_log and
+daily/test reports, but they do not cause immediate email. D4A, SQL Server,
+and Mosquitto service checks independently alert when a Windows service is not
+Running. Service alerts notify only after the same rule fails on two immediately
+consecutive monitoring runs. A healthy or missing result resets the pending count.
+
+Disk usage does not generate warning emails. A critical alert is sent when a
+fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
+first.
+
+After an alert is delivered through email or Discord, its rule key and component
+are retained in D4A-ScheduledMonitor.state.json. A later scan sends one recovery
+notification only when
+the same check explicitly returns OK. Recovery is not inferred from a missing or
+failed check. Single-issue subjects identify the component and level; multiple
+simultaneous issues use "Multiple Alerts detected".
+
+All dated .txt monitoring logs are retained for the current day plus the prior
+four days. README.txt and ignore-rules.txt are not removed by log retention.
+
+ignore-rules.txt
+  Controls notification suppression. Each active rule is one line:
+    rule-key|temporary|duration|ignore-until
+    rule-key|permanent||
+    rule-key|automatic|duration|ignore-until
+  Automatic rules are maintained by the monitor. Temporary and permanent rules
+  may be maintained manually. Comments begin with # and are ignored. On the
+  3rd, 13th, and 23rd the monitor archives the current file (for example,
+  ignore-rules-aug13.txt), rebuilds ignore-rules.txt with active rules only,
+  and retains no more than three archives.
+
+README.txt
+  This guide. The monitor creates it only when it is missing, so local notes in
+  this file are preserved.
+
+Temporary email helper files
+----------------------------
+  While an email is being sent, temporary d4a_monitor_email_*.js and .json files
+  can briefly appear under monitor-logs. They are removed after the send attempt. If
+  a process is interrupted, they may remain and can be deleted after review.
+
+Watchdog log evidence
+---------------------
+If the Watchdog uses <D4A install root>\Log\TaskSchedulerOutput, the monitor
+checks recent per-service Watchdog entries for errors, stale data, timeouts,
+crashes, or restart activity. Evidence that Watchdog successfully restarted a
+service is included in daily and test reports only. Unresolved failures and
+failed restarts still cause an immediate alert. These entries do not cause any
+service restart. Set -WatchdogLogRoot to another
+TaskSchedulerOutput folder when a nonstandard path is used.
+
+SQL Server connection errors repeated by API, workflow, KPI, and scheduler
+checks are combined into one Watchdog SQL connectivity result. The first fresh
+failure batch is log-only; the second consecutive fresh batch can notify.
+
+Manual run examples
+-------------------
+Add one or more sites permanently to the JSON configuration. An omitted API
+address uses the matching derived endpoint; provide AddSiteApiAddress to save
+a custom API endpoint:
+.\D4A-ScheduledMonitor.ps1 -AddSiteAddress 'hostname:1200,akbou.decide4action.com'
+.\D4A-ScheduledMonitor.ps1 -AddSiteAddress 'https://site.example.com' -AddSiteApiAddress 'https://api.example.net/health'
+
+Show the effective configuration without running a health check:
+.\D4A-ScheduledMonitor.ps1 -ShowConfiguration
+
+Run the monitor with its configured sites and normal alert behavior:
+.\D4A-ScheduledMonitor.ps1
+
+Run a test and send a complete email even when there are no issues:
+.\D4A-ScheduledMonitor.ps1 -SendTestResultsEmail
+
+Run a daily-style complete report manually:
+.\D4A-ScheduledMonitor.ps1 -SendDailySummaryEmail
+
+Run a concise Discord-only status report, including healthy endpoint, service,
+CPU, memory, and disk results:
+.\D4A-ScheduledMonitor.ps1 -SendDiscordStatus
+
+Test one site temporarily without changing the configured default:
+.\D4A-ScheduledMonitor.ps1 -SiteAddress 'https://akbou.decide4action.com' -SendTestResultsEmail
+
+Test multiple frontend sites. Separate them with commas; each matching API is
+added automatically:
+.\D4A-ScheduledMonitor.ps1 -SiteAddress 'hostname:1200,akbou.decide4action.com' -SendTestResultsEmail
+
+Increase CPU sampling during a manual performance test:
+.\D4A-ScheduledMonitor.ps1 -CpuSampleDurationSeconds 120 -SendTestResultsEmail
+
+Ignore rule examples
+--------------------
+The rule key is included in run_log and notification emails, for example:
+  [rule-key=server-cpu]
+
+Recommended: change an automatic cooldown. This recalculates both duration and
+expiry timestamp from the current time; do not edit only the duration column:
+.\D4A-ScheduledMonitor.ps1 -SetIssueCooldown 'server-cpu' -IssueCooldownDuration '3d'
+
+Remove an automatic cooldown so a currently recurring issue can notify again:
+.\D4A-ScheduledMonitor.ps1 -ClearIssueCooldown 'server-cpu'
+
+Manually add a temporary ignore rule. Leave the last field empty; the monitor
+calculates the expiry on its next run:
+  application-frontend-availability|temporary|2h|
+
+Manually add a permanent ignore rule. Use this only for an accepted permanent
+condition, because it has no expiry:
+  server-api-listener|permanent||
+
+To stop ignoring a manually added rule, delete or comment out its line by adding
+# at the beginning, then save ignore-rules.txt.
+'@
+}
+
+function Get-MonitorLogsReadmeUpdate {
+    return @'
+
+DAILY LOG FILES AND WATCHDOG EVIDENCE
+=====================================
+The monitor uses one daily run log and one daily error log:
+  run_log_yyyyMMdd.txt - all execution activity, with a component category.
+  error_log_yyyyMMdd.txt - warnings, alerts, and errors, with a category.
+  ignore-rules.txt - the single persistent ignore and cooldown rules file.
+
+Only the current day and the prior four days are retained. README.txt and
+ignore-rules.txt remain untouched by daily log retention, but ignore rules are
+rotated on the 3rd, 13th, and 23rd of each month. The monitor reads Watchdog
+TaskSchedulerOutput logs when available to provide root-cause evidence, but it
+does not restart services or change the Watchdog state.
+
+RELIABILITY ALERT POLICY
+========================
+Data Collector LastEventTime SQL timeouts are retried while the Windows service
+is Running: log only on failure 1, diagnostics on failure 2, and alert on
+failure 3. LastHealthy older than 5 minutes is a warning; older than 10 minutes
+is critical. Nginx alerts require more than 20 matching errors per minute for
+two consecutive minutes. Frontend and API endpoints notify only when
+unreachable; responses over 4500 ms are logged without a notification. CPU and RAM
+notify only after two consecutive monitor runs at 90% or higher. NSSM
+server.log rotation events 1063 and 1077, and the harmless pipe-ended output
+read event, are excluded. All relevant Windows events are log-only because
+service availability is checked separately. Disk space alerts only at 5 GB
+free or less, or 95 percent used. Service alerts require two immediately consecutive
+failed monitoring runs; a healthy or missing result resets the pending count. A
+successfully delivered issue produces one recovery notification after a later check
+explicitly confirms that it is healthy.
+'@
+}
+
+function Get-MonitorLogsReadmeNotificationPolicy {
+    return @'
+
+NOTIFICATION AND RECOVERY POLICY
+================================
+Relevant Windows event warnings and errors are always retained in error_log and
+daily/test reports, but they do not cause an immediate notification. D4A, SQL Server,
+and Mosquitto service checks independently alert when a Windows service is not Running.
+Service alerts notify only after the same rule fails on two immediately consecutive
+monitoring runs. A healthy or missing result resets the pending count.
+
+Disk usage does not generate warning emails. A critical alert is sent when a
+fixed disk has 5 GB free or less, or reaches 95 percent used, whichever occurs
+first.
+
+After an alert is delivered through email or Discord, its rule key and component
+are retained in D4A-ScheduledMonitor.state.json. A later scan sends one recovery
+notification only when
+the same check explicitly returns OK. Recovery is not inferred from a missing or
+failed check. Single-issue subjects identify the component and level; multiple
+simultaneous issues use "Multiple Alerts detected".
+'@
+}
+
+function Get-MonitorLogsReadmeDiscordNotifications {
+    return @'
+
+DISCORD NOTIFICATIONS
+=====================
+Email notifications are disabled by default. To enable them, edit the local
+D4A-ScheduledMonitor.config.json file and set:
+
+  "EnableEmailNotifications": true
+
+NotificationTo continues to define the email recipients. To send monitoring
+notifications to a Discord channel, configure DiscordWebhookUrl in the same file:
+
+  "DiscordWebhookUrl": "https://discord.com/api/webhooks/<id>/<token>"
+
+The webhook is a channel credential. Keep it only in the local configuration;
+do not place it in the monitoring script, shared logs, screenshots, or source
+repository. The monitor validates the URL format but never displays the URL.
+
+Discord notifications use a compact native embed with the site, notification
+type, affected component, server, timestamp, check details, rule key, and the
+daily error-log location. Up to five affected checks are displayed directly;
+additional checks remain available in the monitoring logs.
+
+Use -DisableDiscord for a one-off run without Discord. Use -DisableEmail as a
+one-run override when email is enabled, or use -DisableEmail -DisableDiscord to
+run the health checks and logs without any outbound notification delivery.
+'@
+}
+
+function Get-MonitorLogsReadmeAutomaticUpdate {
+    return @'
+
+AUTOMATIC MONITOR UPDATES
+========================
+Every execution checks the official GitHub release for a newer monitor. The
+downloaded script must match update-manifest.json, pass SHA-256 verification,
+and parse successfully as PowerShell before it can replace the installed file.
+After the downloaded release and local configuration validate, the current
+script, JSON configuration, and related Scheduled Task definitions are backed
+up under monitor-update-backups immediately before replacement. Only successful
+updates retain a backup, and the newest three folders are kept. Site settings,
+logs, task schedules, and the installed script filename are preserved. The new
+code runs on the next execution. Use -SkipAutomaticUpdate only for a temporary
+troubleshooting run.
+'@
+}
+
+function Get-MonitorLogsReadmeAutomaticUpdateReliability {
+    return @'
+
+AUTOMATIC UPDATE RELIABILITY
+============================
+Release requests bypass web caches. The downloaded monitor is also validated
+against the current JSON configuration before replacement. A cross-process
+lock prevents recurring and daily Scheduled Tasks from installing the same
+release simultaneously. After installation, the JSON records the installed
+version and release date. If installation fails after backup, both the prior
+script and prior configuration are restored and the health check continues.
+'@
+}
+
+function Get-MonitorLogsReadmeDecide4Action40 {
+    return @'
+
+DECIDE4ACTION 4.0 EDITION
+=========================
+This monitor is the Decide4Action 4.0 edition (release channel d4a40). It
+updates only from the d4a40Monitoring release and is never replaced by the
+3.9 monitoring release, whatever its local filename.
+
+What it discovers on a 4.0 server:
+- Instances below <base>\<instance> (default C:\Decide4Action\<name>) from
+  their Windows services, D4AInstallRoot, D4ABaseFolder, and D4A_HOME.
+- <instance>\API\dbconfig.js for database and email settings.
+- D4AKEY/D4AIV from the machine environment, or from the API service
+  environment where the 4.0 installer stores them. Values are never logged.
+- The real port of each instance API service. LocalApiAddress is used as
+  configured when it is changed from http://127.0.0.1:32167/.
+- Installer-named instance services, the machine-wide 4.0 Watchdog service,
+  nginx, and the Node runtime below <base>.
+
+Log-only evidence (daily summary, no immediate notification):
+- 4.0 Watchdog restarts, failures, and inactivity from its logs folder.
+- Data Collector SQL freshness from P4A_LineMonitoringStatus. Set
+  DataCollectorSqlFreshnessAlerts to true to notify at the critical threshold.
+- HTTP 404 on API health or performance routes: the API answered, but the
+  route differs. Adjust ApiAddress or ApplicationPerformanceEndpoints.
+
+Useful JSON settings: D4ABaseFolder, ApplicationPerformanceEndpoints,
+AutomaticUpdateEnabled (false for a copy managed by the D4A installer),
+DataCollectorSqlFreshnessAlerts, WatchdogLogStaleMinutes.
+Run -ShowConfiguration to see the discovered instances and API ports.
+'@
+}
+
+function Ensure-MonitorLogDocumentation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$IgnoreRulesPath
+    )
+
+    $descriptionHeader = Get-IgnoreRulesDescriptionHeader
+    $isNewIgnoreRulesFile = -not (Test-Path -LiteralPath $IgnoreRulesPath -PathType Leaf)
+    if ($isNewIgnoreRulesFile) {
+        [IO.File]::WriteAllText($IgnoreRulesPath, $descriptionHeader, $script:Utf8NoBom)
+    }
+    else {
+        $existingRules = [IO.File]::ReadAllText($IgnoreRulesPath)
+        if ($existingRules -notmatch '(?m)^# DESCRIPTION - AUTOMATIC COOLDOWN COMMANDS$') {
+            [IO.File]::WriteAllText($IgnoreRulesPath, $descriptionHeader + $existingRules, $script:Utf8NoBom)
+        }
+    }
+
+    $readmePath = Join-Path $Directory 'README.txt'
+    if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) {
+        $readmeContent = (Get-MonitorLogsReadme) +
+            (Get-MonitorLogsReadmeUpdate) +
+            (Get-MonitorLogsReadmeAutomaticUpdate) +
+            (Get-MonitorLogsReadmeNotificationPolicy) +
+            (Get-MonitorLogsReadmeDiscordNotifications) +
+            (Get-MonitorLogsReadmeAutomaticUpdateReliability) +
+            (Get-MonitorLogsReadmeDecide4Action40)
+        [IO.File]::WriteAllText($readmePath, $readmeContent, $script:Utf8NoBom)
+    }
+    else {
+        $existingReadme = [IO.File]::ReadAllText($readmePath)
+        if ($existingReadme -notmatch '(?m)^RELIABILITY ALERT POLICY$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeUpdate), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^AUTOMATIC MONITOR UPDATES$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeAutomaticUpdate), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^NOTIFICATION AND RECOVERY POLICY$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeNotificationPolicy), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^DISCORD NOTIFICATIONS$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeDiscordNotifications), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^AUTOMATIC UPDATE RELIABILITY$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeAutomaticUpdateReliability), $script:Utf8NoBom)
+            $existingReadme = [IO.File]::ReadAllText($readmePath)
+        }
+        if ($existingReadme -notmatch '(?m)^DECIDE4ACTION 4\.0 EDITION$') {
+            [IO.File]::AppendAllText($readmePath, (Get-MonitorLogsReadmeDecide4Action40), $script:Utf8NoBom)
+        }
+    }
+
+    return $isNewIgnoreRulesFile
+}
+
+function Get-DailyMonitorLogPath {
+    param([Parameter(Mandatory = $true)][ValidateSet('Run', 'Error')][string]$Type)
+
+    if ([string]::IsNullOrWhiteSpace($script:MonitorLogDirectory)) {
+        throw 'The monitor log directory has not been initialized.'
+    }
+
+    $prefix = if ($Type -eq 'Run') { 'run_log' } else { 'error_log' }
+    return (Join-Path $script:MonitorLogDirectory ('{0}_{1}.txt' -f $prefix, $script:RunStartedAt.ToString('yyyyMMdd')))
+}
+
+function Remove-ExpiredMonitorLogs {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    $cutoffDate = (Get-Date).Date.AddDays(-($LogRetentionDays - 1))
+    $datePattern = '^(?:run_log_|error_log_)?(?<Date>\d{8})\.txt$'
+    foreach ($file in @(Get-ChildItem -LiteralPath $Directory -File -Filter '*.txt' -ErrorAction SilentlyContinue)) {
+        if ($file.Name -notmatch $datePattern) { continue }
+
+        $fileDate = [DateTime]::MinValue
+        if (-not [DateTime]::TryParseExact($matches.Date, 'yyyyMMdd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$fileDate)) {
+            continue
+        }
+        if ($fileDate -lt $cutoffDate) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Initialize-MonitorLogging {
+    $directory = if ([string]::IsNullOrWhiteSpace($LogDirectory)) {
+        Join-Path $script:ScriptDirectory 'monitor-logs'
+    }
+    else {
+        [Environment]::ExpandEnvironmentVariables($LogDirectory)
+    }
+
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        New-Item -ItemType Directory -Path $directory -Force -ErrorAction Stop | Out-Null
+    }
+
+    $directory = (Get-Item -LiteralPath $directory -ErrorAction Stop).FullName
+    $script:MonitorLogDirectory = $directory
+    Remove-ExpiredMonitorLogs -Directory $directory
+    $script:RunLogPath = Get-DailyMonitorLogPath -Type Run
+    $script:ErrorLogPath = Get-DailyMonitorLogPath -Type Error
+    $script:IgnoreRulesPath = Join-Path $directory 'ignore-rules.txt'
+    $script:MonitorStatePath = Join-Path $directory 'D4A-ScheduledMonitor.state.json'
+
+    if (-not (Test-Path -LiteralPath $script:RunLogPath -PathType Leaf)) {
+        [IO.File]::WriteAllText($script:RunLogPath, '', $script:Utf8NoBom)
+    }
+    if (-not (Test-Path -LiteralPath $script:ErrorLogPath -PathType Leaf)) {
+        [IO.File]::WriteAllText($script:ErrorLogPath, '', $script:Utf8NoBom)
+    }
+
+    $isNewIgnoreRulesFile = Ensure-MonitorLogDocumentation -Directory $directory -IgnoreRulesPath $script:IgnoreRulesPath
+
+    if ($isNewIgnoreRulesFile) {
+        [IO.File]::AppendAllText($script:IgnoreRulesPath, (Get-IgnoreRulesTemplate), $script:Utf8NoBom)
+    }
+
+    $script:LoggingReady = $true
+    Rotate-IgnoreRulesIfDue
+}
+
+function Get-MonitorRuntimeState {
+    $defaultState = [pscustomobject]@{
+        StateVersion = 7
+        DataCollectorLastEvent = [pscustomobject]@{
+            ConsecutiveFailures = 0
+            LastHealthy         = $null
+            LastProcessedFailureId = $null
+            LastDiagnosticsFailureId = $null
+        }
+        ResourceUtilization = [pscustomobject]@{
+            CpuConsecutiveHigh    = 0
+            MemoryConsecutiveHigh = 0
+        }
+        WatchdogSqlConnectivity = [pscustomobject]@{
+            ConsecutiveFailures    = 0
+            LastProcessedEvidence = $null
+            LastDetectedAt         = $null
+        }
+        ServiceAlertConfirmations = @()
+        NotifiedIssues = @()
+    }
+    if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath) -or -not (Test-Path -LiteralPath $script:MonitorStatePath -PathType Leaf)) {
+        return $defaultState
+    }
+
+    try {
+        $state = Get-Content -LiteralPath $script:MonitorStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $state.DataCollectorLastEvent) {
+            $state | Add-Member -MemberType NoteProperty -Name DataCollectorLastEvent -Value $defaultState.DataCollectorLastEvent
+        }
+        foreach ($propertyName in @('ConsecutiveFailures', 'LastHealthy', 'LastProcessedFailureId', 'LastDiagnosticsFailureId')) {
+            if ($null -eq $state.DataCollectorLastEvent.PSObject.Properties[$propertyName]) {
+                $state.DataCollectorLastEvent | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.DataCollectorLastEvent.$propertyName
+            }
+        }
+        if ($null -eq $state.ResourceUtilization) {
+            $state | Add-Member -MemberType NoteProperty -Name ResourceUtilization -Value $defaultState.ResourceUtilization
+        }
+        foreach ($propertyName in @('CpuConsecutiveHigh', 'MemoryConsecutiveHigh')) {
+            if ($null -eq $state.ResourceUtilization.PSObject.Properties[$propertyName]) {
+                $state.ResourceUtilization | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.ResourceUtilization.$propertyName
+            }
+        }
+        if ($null -eq $state.PSObject.Properties['WatchdogSqlConnectivity'] -or $null -eq $state.WatchdogSqlConnectivity) {
+            $state | Add-Member -MemberType NoteProperty -Name WatchdogSqlConnectivity -Value $defaultState.WatchdogSqlConnectivity
+        }
+        foreach ($propertyName in @('ConsecutiveFailures', 'LastProcessedEvidence', 'LastDetectedAt')) {
+            if ($null -eq $state.WatchdogSqlConnectivity.PSObject.Properties[$propertyName]) {
+                $state.WatchdogSqlConnectivity | Add-Member -MemberType NoteProperty -Name $propertyName -Value $defaultState.WatchdogSqlConnectivity.$propertyName
+            }
+        }
+        if ($null -eq $state.PSObject.Properties['ServiceAlertConfirmations']) {
+            $state | Add-Member -MemberType NoteProperty -Name ServiceAlertConfirmations -Value @()
+        }
+        else {
+            $state.ServiceAlertConfirmations = @($state.ServiceAlertConfirmations)
+        }
+        if ($null -eq $state.PSObject.Properties['NotifiedIssues']) {
+            $state | Add-Member -MemberType NoteProperty -Name NotifiedIssues -Value @()
+        }
+        else {
+            $state.NotifiedIssues = @($state.NotifiedIssues)
+        }
+        foreach ($notifiedIssue in @($state.NotifiedIssues)) {
+            if ($null -ne $notifiedIssue -and $null -eq $notifiedIssue.PSObject.Properties['LastMessage']) {
+                $notifiedIssue | Add-Member -MemberType NoteProperty -Name LastMessage -Value ''
+            }
+            if ($null -ne $notifiedIssue -and $null -eq $notifiedIssue.PSObject.Properties['NotificationReference']) {
+                $notifiedIssue | Add-Member -MemberType NoteProperty -Name NotificationReference -Value ''
+            }
+        }
+        if ($null -eq $state.PSObject.Properties['StateVersion']) {
+            $state | Add-Member -MemberType NoteProperty -Name StateVersion -Value 7
+        }
+        else {
+            $state.StateVersion = 7
+        }
+        return $state
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+            'Unable to read monitor state. Consecutive-run tracking will restart: {0}' -f $_.Exception.Message
+        )
+        return $defaultState
+    }
+}
+
+function Save-MonitorRuntimeState {
+    param(
+        [Parameter(Mandatory = $true)][object]$State,
+        [switch]$ThrowOnFailure
+    )
+
+    if ([string]::IsNullOrWhiteSpace($script:MonitorStatePath)) { return }
+    $temporaryPath = '{0}.{1}.tmp' -f $script:MonitorStatePath, [guid]::NewGuid().ToString('N')
+    try {
+        [IO.File]::WriteAllText($temporaryPath, ($State | ConvertTo-Json -Depth 6), $script:Utf8NoBom)
+        Move-Item -LiteralPath $temporaryPath -Destination $script:MonitorStatePath -Force -ErrorAction Stop
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+            'Unable to save monitor state: {0}' -f $_.Exception.Message
+        )
+        if ($ThrowOnFailure.IsPresent) { throw }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Add-TextToFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+
+    [IO.File]::AppendAllText(
+        $Path,
+        $Text + [Environment]::NewLine,
+        $script:Utf8NoBom
+    )
+}
+
+function Write-RunLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Level = 'INFO',
+        [string]$Category = 'Monitor',
+        [ConsoleColor]$Color = [ConsoleColor]::Gray,
+        [switch]$NoConsole
+    )
+
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff zzz')
+    $line = '[{0}] [{1}] [{2}] {3}' -f $timestamp, $Level.ToUpperInvariant(), $Category, $Message
+
+    if ($script:LoggingReady) {
+        try {
+            Add-TextToFile -Path $script:RunLogPath -Text $line
+        }
+        catch {
+            Write-Host ('[LOG ERROR] Unable to write run log: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        }
+    }
+
+    if (-not $NoConsole.IsPresent) {
+        # Console color follows the log level consistently, while run_log files
+        # retain the exact same text for support collection and parsing.
+        $displayColor = switch ($Level.ToUpperInvariant()) {
+            'INFO' { [ConsoleColor]::Blue; break }
+            'OK' { [ConsoleColor]::Green; break }
+            'WARNING' { [ConsoleColor]::Yellow; break }
+            'ALERT' { [ConsoleColor]::Red; break }
+            'ERROR' { [ConsoleColor]::Red; break }
+            default { $Color; break }
+        }
+        Write-Host $line -ForegroundColor $displayColor
+    }
+}
+
+function Write-ErrorLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Level = 'ERROR',
+        [string]$Category = 'Monitor'
+    )
+
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff zzz')
+    $line = '[{0}] [{1}] [{2}] {3}' -f $timestamp, $Level.ToUpperInvariant(), $Category, $Message
+
+    if ($script:LoggingReady) {
+        try {
+            Add-TextToFile -Path $script:ErrorLogPath -Text $line
+        }
+        catch {
+            Write-Host ('[LOG ERROR] Unable to write error log: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        }
+    }
+}
+
+function ConvertTo-IgnoreRuleKey {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $key = $Value.Trim().ToLowerInvariant() -replace '[^a-z0-9]+', '-'
+    $key = $key.Trim('-')
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        throw 'An ignore-rule key cannot be empty.'
+    }
+    return $key
+}
+
+function New-MonitorNotificationReference {
+    $bytes = New-Object byte[] 6
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    }
+    finally {
+        $generator.Dispose()
+    }
+    return 'D4A-{0}' -f (($bytes | ForEach-Object { $_.ToString('X2') }) -join '')
+}
+
+function Add-MonitorResult {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('OK', 'Warning', 'Alert', 'Error')]
+        [string]$Severity,
+
+        [Parameter(Mandatory = $true)][string]$Category,
+        [Parameter(Mandatory = $true)][string]$Check,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Key,
+        [bool]$NotificationEligible = $true
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Key)) {
+        $Key = ConvertTo-IgnoreRuleKey -Value ('{0}-{1}' -f $Category, $Check)
+    }
+    else {
+        $Key = ConvertTo-IgnoreRuleKey -Value $Key
+    }
+
+    $result = [pscustomobject]@{
+        Time     = Get-Date
+        Severity = $Severity
+        Category = $Category
+        Check    = $Check
+        Message  = $Message
+        Key      = $Key
+        IgnoreActive = $false
+        IgnoreMode = $null
+        IgnoreUntil = $null
+        NotificationEligible = $NotificationEligible
+    }
+    $script:Results.Add($result) | Out-Null
+
+    $color = switch ($Severity) {
+        'OK' { [ConsoleColor]::Green }
+        'Warning' { [ConsoleColor]::Yellow }
+        'Alert' { [ConsoleColor]::Red }
+        'Error' { [ConsoleColor]::Magenta }
+    }
+
+    Write-RunLog -Level $Severity -Category $Category -Color $color -Message (
+        '{0} [rule-key={1}]: {2}' -f $Check, $Key, $Message
+    )
+    if ($Severity -ne 'OK') {
+        Write-ErrorLog -Level $Severity -Category $Category -Message (
+            '{0} [rule-key={1}]: {2}' -f $Check, $Key, $Message
+        )
+    }
+}
+
+function ConvertTo-IgnoreDuration {
+    param([Parameter(Mandatory = $true)][string]$Duration)
+
+    $value = $Duration.Trim().ToLowerInvariant()
+    if ($value -notmatch '^(?<Amount>[1-9]\d*)\s*(?<Unit>m|mins?|minutes?|h|hrs?|hours?|d|days?|w|weeks?)$') {
+        throw ('Invalid temporary ignore duration "{0}". Use values such as 30m, 2h, 3d, or 1w.' -f $Duration)
+    }
+
+    $amount = [int]$matches.Amount
+    switch -Regex ($matches.Unit) {
+        '^m' { return [TimeSpan]::FromMinutes($amount) }
+        '^h' { return [TimeSpan]::FromHours($amount) }
+        '^d' { return [TimeSpan]::FromDays($amount) }
+        '^w' { return [TimeSpan]::FromDays($amount * 7) }
+    }
+}
+
+function Get-ActiveIgnoreRules {
+    if (-not (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf)) {
+        throw ('Ignore-rules file not found: {0}' -f $script:IgnoreRulesPath)
+    }
+
+    $now = Get-Date
+    $activeRules = [System.Collections.Generic.List[object]]::new()
+    $updatedLines = [System.Collections.Generic.List[string]]::new()
+    $changed = $false
+    $lineNumber = 0
+
+    foreach ($originalLine in @(Get-Content -LiteralPath $script:IgnoreRulesPath -ErrorAction Stop)) {
+        $lineNumber++
+        $trimmedLine = $originalLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmedLine) -or $trimmedLine.StartsWith('#')) {
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $parts = @($originalLine -split '\|', 4)
+        if ($parts.Count -lt 2) {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+                'Invalid ignore rule at line {0}; expected key|temporary|duration|ignore-until or key|permanent||.' -f $lineNumber
+            )
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore rule at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        try {
+            $key = ConvertTo-IgnoreRuleKey -Value $parts[0]
+        }
+        catch {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message ('Invalid ignore-rule key at line {0}: {1}' -f $lineNumber, $_.Exception.Message)
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore-rule key at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $mode = $parts[1].Trim().ToLowerInvariant()
+        $duration = if ($parts.Count -ge 3) { $parts[2].Trim() } else { '' }
+        $untilText = if ($parts.Count -ge 4) { $parts[3].Trim() } else { '' }
+
+        if ($mode -eq 'permanent') {
+            $normalizedLine = '{0}|permanent||' -f $key
+            if ($originalLine -ne $normalizedLine) { $changed = $true }
+            $updatedLines.Add($normalizedLine) | Out-Null
+            $activeRules.Add([pscustomobject]@{
+                Key         = $key
+                Mode        = 'permanent'
+                Duration    = $null
+                IgnoreUntil = $null
+            }) | Out-Null
+            continue
+        }
+
+        if ($mode -notin @('temporary', 'automatic')) {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+                'Invalid ignore-rule mode at line {0}: {1}. Use temporary, automatic, or permanent.' -f $lineNumber, $mode
+            )
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore-rule mode at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        try {
+            $durationSpan = ConvertTo-IgnoreDuration -Duration $duration
+        }
+        catch {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message ('Invalid temporary rule at line {0}: {1}' -f $lineNumber, $_.Exception.Message)
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid temporary rule at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $ignoreUntil = [DateTimeOffset]::MinValue
+        if ([string]::IsNullOrWhiteSpace($untilText)) {
+            $ignoreUntil = [DateTimeOffset]::new($now.Add($durationSpan))
+            $changed = $true
+            Write-RunLog -Category Ignore -Color Cyan -Message (
+                'Temporary rule {0} activated until {1}.' -f $key, $ignoreUntil.ToString('o')
+            )
+        }
+        elseif (-not [DateTimeOffset]::TryParse($untilText, [ref]$ignoreUntil)) {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message ('Invalid ignore-until date at line {0}: {1}' -f $lineNumber, $untilText)
+            Write-ErrorLog -Level Warning -Category Ignore -Message ('Invalid ignore-until date at line {0}: {1}' -f $lineNumber, $originalLine)
+            $updatedLines.Add($originalLine) | Out-Null
+            continue
+        }
+
+        $normalizedTemporaryLine = '{0}|{1}|{2}|{3}' -f $key, $mode, $duration, $ignoreUntil.ToString('o')
+        if ($ignoreUntil.LocalDateTime -le $now) {
+            $expiredLine = '# EXPIRED {0} | {1}' -f $now.ToString('o'), $normalizedTemporaryLine
+            $updatedLines.Add($expiredLine) | Out-Null
+            $changed = $true
+            Write-RunLog -Category Ignore -Color DarkGray -Message ('Expired temporary rule commented out: {0}' -f $key)
+            continue
+        }
+
+        if ($originalLine -ne $normalizedTemporaryLine) { $changed = $true }
+        $updatedLines.Add($normalizedTemporaryLine) | Out-Null
+        $activeRules.Add([pscustomobject]@{
+            Key         = $key
+            Mode        = $mode
+            Duration    = $duration
+            IgnoreUntil = $ignoreUntil
+        }) | Out-Null
+    }
+
+    if ($changed) {
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $updatedLines.ToArray(), $script:Utf8NoBom)
+    }
+
+    return @($activeRules.ToArray())
+}
+
+function ConvertTo-ActiveIgnoreRuleLine {
+    param([Parameter(Mandatory = $true)][object]$Rule)
+
+    if ([string]$Rule.Mode -eq 'permanent') {
+        return ('{0}|permanent||' -f $Rule.Key)
+    }
+    return ('{0}|{1}|{2}|{3}' -f $Rule.Key, $Rule.Mode, $Rule.Duration, $Rule.IgnoreUntil.ToString('o'))
+}
+
+function Rotate-IgnoreRulesIfDue {
+    if ([string]::IsNullOrWhiteSpace($script:IgnoreRulesPath) -or -not (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf)) {
+        return
+    }
+
+    $now = Get-Date
+    if ($now.Day -notin @(3, 13, 23)) { return }
+
+    $month = $now.ToString('MMM', [Globalization.CultureInfo]::InvariantCulture).ToLowerInvariant()
+    $archivePath = Join-Path (Split-Path -Parent $script:IgnoreRulesPath) ('ignore-rules-{0}{1}.txt' -f $month, $now.Day)
+    if (Test-Path -LiteralPath $archivePath -PathType Leaf) { return }
+
+    try {
+        # Normalize expired entries before archiving, then keep only active rules
+        # in the fresh file so comments and historical entries cannot accumulate.
+        $activeRules = @(Get-ActiveIgnoreRules)
+        Copy-Item -LiteralPath $script:IgnoreRulesPath -Destination $archivePath -ErrorAction Stop
+
+        $freshLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in @((Get-IgnoreRulesDescriptionHeader) -split "\r?\n")) {
+            $freshLines.Add($line) | Out-Null
+        }
+        foreach ($line in @((Get-IgnoreRulesTemplate) -split "\r?\n")) {
+            $freshLines.Add($line) | Out-Null
+        }
+        foreach ($rule in $activeRules) {
+            $freshLines.Add((ConvertTo-ActiveIgnoreRuleLine -Rule $rule)) | Out-Null
+        }
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $freshLines.ToArray(), $script:Utf8NoBom)
+
+        $archives = @(Get-ChildItem -LiteralPath (Split-Path -Parent $script:IgnoreRulesPath) -File -Filter 'ignore-rules-*.txt' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^ignore-rules-[a-z]{3}\d{1,2}\.txt$' } |
+                Sort-Object -Property LastWriteTime -Descending)
+        foreach ($oldArchive in @($archives | Select-Object -Skip 3)) {
+            Remove-Item -LiteralPath $oldArchive.FullName -Force -ErrorAction Stop
+        }
+
+        Write-RunLog -Category Ignore -Color Cyan -Message (
+            'Ignore rules rotated to {0}; active rules retained={1}; archives retained={2}.' -f
+                $archivePath, $activeRules.Count, [Math]::Min($archives.Count, 3)
+        )
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+            'Unable to rotate ignore rules: {0}' -f $_.Exception.Message
+        )
+        Write-ErrorLog -Level Warning -Category Ignore -Message (
+            'Unable to rotate ignore rules: {0}' -f $_.Exception.Message
+        )
+    }
+}
+
+function Update-MonitorResourceConsecutiveHigh {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Cpu', 'Memory')][string]$Resource,
+        [Parameter(Mandatory = $true)][bool]$IsHigh
+    )
+
+    $state = Get-MonitorRuntimeState
+    $propertyName = '{0}ConsecutiveHigh' -f $Resource
+    $property = $state.ResourceUtilization.PSObject.Properties[$propertyName]
+    if ($null -eq $property) {
+        throw "Monitor state does not contain $propertyName."
+    }
+
+    $property.Value = if ($IsHigh) { [int]$property.Value + 1 } else { 0 }
+    Save-MonitorRuntimeState -State $state
+    return [int]$property.Value
+}
+
+function Test-IsServiceAlertConfirmationKey {
+    param([Parameter(Mandatory = $true)][string]$Key)
+
+    $normalizedKey = ConvertTo-IgnoreRuleKey -Value $Key
+    return (
+        $normalizedKey -match '^server-windows-service-' -or
+        $normalizedKey -eq 'server-d4a-windows-services' -or
+        $normalizedKey -eq 'server-sql-services' -or
+        $normalizedKey -match '^server-mosquitto-mqtt-service(?:-|$)' -or
+        $normalizedKey -match '^server-web-infrastructure-service(?:s|-)' -or
+        $normalizedKey -match '^server-api-listener(?:-|$)' -or
+        ($normalizedKey -match '^diagnostics-watchdog-' -and
+            $normalizedKey -ne 'diagnostics-watchdog-sql-connectivity')
+    )
+}
+
+function Apply-ServiceAlertConfirmationPolicy {
+    $state = Get-MonitorRuntimeState
+    $previousByKey = @{}
+    foreach ($entry in @($state.ServiceAlertConfirmations)) {
+        if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.Key)) { continue }
+        $previousByKey[(ConvertTo-IgnoreRuleKey -Value ([string]$entry.Key))] = $entry
+    }
+
+    $currentServiceResults = @($script:Results | Where-Object {
+            Test-IsServiceAlertConfirmationKey -Key ([string]$_.Key)
+        })
+    $nextConfirmations = [System.Collections.Generic.List[object]]::new()
+    $deferredResults = [System.Collections.Generic.List[object]]::new()
+    $deferredKeys = [System.Collections.Generic.List[string]]::new()
+    $confirmedKeys = [System.Collections.Generic.List[string]]::new()
+    foreach ($group in @($currentServiceResults | Group-Object -Property Key)) {
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$group.Name)
+        $alertResults = @($group.Group | Where-Object {
+                [string]$_.Severity -eq 'Alert' -and [bool]$_.NotificationEligible
+            })
+        if ($alertResults.Count -eq 0) { continue }
+
+        $previousCount = 0
+        if ($previousByKey.ContainsKey($key)) {
+            $previousCount = [int]$previousByKey[$key].ConsecutiveFailures
+        }
+        $consecutiveFailures = $previousCount + 1
+        $latestAlert = $alertResults | Select-Object -Last 1
+        $nextConfirmations.Add([pscustomobject]@{
+                Key                 = $key
+                ConsecutiveFailures = $consecutiveFailures
+                LastFailedAt        = (Get-Date).ToString('o')
+                LastMessage         = [string]$latestAlert.Message
+            }) | Out-Null
+
+        if ($consecutiveFailures -lt $script:ServiceAlertConsecutiveRunsRequired) {
+            foreach ($result in $alertResults) {
+                $deferredResults.Add($result) | Out-Null
+            }
+            $deferredKeys.Add($key) | Out-Null
+        }
+        else {
+            $confirmedKeys.Add(('{0}|{1}' -f $key, $consecutiveFailures)) | Out-Null
+        }
+    }
+
+    $state.ServiceAlertConfirmations = @($nextConfirmations.ToArray())
+    try {
+        Save-MonitorRuntimeState -State $state -ThrowOnFailure
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Notification -Color Yellow -Message (
+            'Service alert confirmation state could not be saved. Current service alerts remain notification-eligible: {0}' -f $_.Exception.Message
+        )
+        return
+    }
+
+    foreach ($result in $deferredResults) {
+        $result.NotificationEligible = $false
+    }
+    foreach ($key in $deferredKeys) {
+        Write-RunLog -Level Warning -Category Notification -Color Yellow -Message (
+            'Service alert {0} failed for the first consecutive monitoring run (1/{1}). Notification was deferred so Watchdog recovery can complete.' -f
+                $key, $script:ServiceAlertConsecutiveRunsRequired
+        )
+    }
+    foreach ($entry in $confirmedKeys) {
+        $parts = $entry -split '\|', 2
+        Write-RunLog -Level Alert -Category Notification -Color Red -Message (
+            'Service alert {0} persisted for {1} consecutive monitoring runs and is notification-eligible.' -f
+                $parts[0], $parts[1]
+        )
+    }
+}
+
+function Apply-IgnoreRulesToResults {
+    param([object[]]$ActiveRules)
+
+    $rulesByKey = @{}
+    foreach ($rule in @($ActiveRules)) {
+        if (-not $rulesByKey.ContainsKey($rule.Key)) {
+            $rulesByKey[$rule.Key] = $rule
+        }
+        else {
+            Write-RunLog -Level Warning -Category Ignore -Color Yellow -Message (
+                'Duplicate active ignore rule found for {0}; the first rule is used.' -f $rule.Key
+            )
+        }
+    }
+
+    foreach ($result in $script:Results) {
+        $rule = $null
+        if ($result.Severity -ne 'OK' -and $rulesByKey.ContainsKey($result.Key)) {
+            $rule = $rulesByKey[$result.Key]
+        }
+
+        $result.IgnoreActive = ($null -ne $rule)
+        $result.IgnoreMode = if ($null -ne $rule) { $rule.Mode } else { $null }
+        $result.IgnoreUntil = if ($null -ne $rule) { $rule.IgnoreUntil } else { $null }
+    }
+}
+
+function Get-IgnoreRuleEntries {
+    param([object[]]$Results)
+
+    $keys = @($Results | Where-Object {
+        $_.Severity -ne 'OK' -and $_.NotificationEligible -and -not $_.IgnoreActive
+    } |
+        Select-Object -ExpandProperty Key -Unique | Sort-Object)
+    return @(
+        foreach ($key in $keys) {
+            [pscustomobject]@{
+                Key       = $key
+                Temporary = '{0}|temporary|2h|' -f $key
+                Permanent = '{0}|permanent||' -f $key
+            }
+        }
+    )
+}
+
+function Set-AutomaticIssueCooldown {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [string]$Duration = '24h',
+        [switch]$Remove
+    )
+
+    $normalizedKey = ConvertTo-IgnoreRuleKey -Value $Key
+    $durationSpan = $null
+    if (-not $Remove.IsPresent) {
+        $durationSpan = ConvertTo-IgnoreDuration -Duration $Duration
+    }
+
+    $existingLines = if (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf) {
+        @(Get-Content -LiteralPath $script:IgnoreRulesPath -ErrorAction Stop)
+    }
+    else {
+        @()
+    }
+
+    $updatedLines = [System.Collections.Generic.List[string]]::new()
+    $changed = $false
+    foreach ($line in $existingLines) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+
+        $parts = @($line -split '\|', 4)
+        try {
+            $lineKey = if ($parts.Count -ge 1) { ConvertTo-IgnoreRuleKey -Value $parts[0] } else { '' }
+        }
+        catch {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+        $lineMode = if ($parts.Count -ge 2) { $parts[1].Trim().ToLowerInvariant() } else { '' }
+        if ($lineKey -eq $normalizedKey -and $lineMode -eq 'automatic') {
+            $changed = $true
+            continue
+        }
+
+        $updatedLines.Add($line) | Out-Null
+    }
+
+    if (-not $Remove.IsPresent) {
+        $ignoreUntil = [DateTimeOffset]::new((Get-Date).Add($durationSpan))
+        $updatedLines.Add(('{0}|automatic|{1}|{2}' -f $normalizedKey, $Duration, $ignoreUntil.ToString('o'))) | Out-Null
+        $changed = $true
+        Write-RunLog -Category Ignore -Color Cyan -Message (
+            'Automatic cooldown set for {0} until {1}.' -f $normalizedKey, $ignoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz')
+        )
+    }
+    elseif ($changed) {
+        Write-RunLog -Category Ignore -Color Green -Message ('Automatic cooldown removed for {0}.' -f $normalizedKey)
+    }
+
+    if ($changed) {
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $updatedLines.ToArray(), $script:Utf8NoBom)
+    }
+}
+
+function Remove-ExplicitlyResolvedAutomaticIssueCooldowns {
+    param([string[]]$ResolvedIssueKeys)
+
+    $resolvedKeys = @{}
+    foreach ($key in @($ResolvedIssueKeys)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$key)) {
+            $resolvedKeys[(ConvertTo-IgnoreRuleKey -Value $key)] = $true
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $script:IgnoreRulesPath -PathType Leaf)) {
+        return
+    }
+
+    $updatedLines = [System.Collections.Generic.List[string]]::new()
+    $changed = $false
+    foreach ($line in @(Get-Content -LiteralPath $script:IgnoreRulesPath -ErrorAction Stop)) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+
+        $parts = @($line -split '\|', 4)
+        try {
+            $lineKey = if ($parts.Count -ge 1) { ConvertTo-IgnoreRuleKey -Value $parts[0] } else { '' }
+        }
+        catch {
+            $updatedLines.Add($line) | Out-Null
+            continue
+        }
+        $lineMode = if ($parts.Count -ge 2) { $parts[1].Trim().ToLowerInvariant() } else { '' }
+        # A missing result is inconclusive, particularly for short watchdog log
+        # lookback windows. Remove a cooldown only after this scan explicitly
+        # produced an OK result for the same rule key.
+        if ($lineMode -eq 'automatic' -and $resolvedKeys.ContainsKey($lineKey)) {
+            $changed = $true
+            Write-RunLog -Category Ignore -Color Green -Message ('Explicitly resolved issue removed from automatic cooldown: {0}.' -f $lineKey)
+            continue
+        }
+
+        $updatedLines.Add($line) | Out-Null
+    }
+
+    if ($changed) {
+        [IO.File]::WriteAllLines($script:IgnoreRulesPath, $updatedLines.ToArray(), $script:Utf8NoBom)
+    }
+}
+
+function Get-RecoveredNotifiedIssues {
+    $state = Get-MonitorRuntimeState
+    $healthyResultsByKey = @{}
+    foreach ($result in @($script:Results | Where-Object { $_.Severity -eq 'OK' })) {
+        $healthyResultsByKey[(ConvertTo-IgnoreRuleKey -Value $result.Key)] = $result
+    }
+
+    $recovered = [System.Collections.Generic.List[object]]::new()
+    foreach ($notifiedIssue in @($state.NotifiedIssues)) {
+        if ($null -eq $notifiedIssue -or [string]::IsNullOrWhiteSpace([string]$notifiedIssue.Key)) { continue }
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$notifiedIssue.Key)
+        if (-not $healthyResultsByKey.ContainsKey($key)) { continue }
+
+        $lastNotified = if ([string]::IsNullOrWhiteSpace([string]$notifiedIssue.LastNotifiedAt)) {
+            'unknown time'
+        }
+        else {
+            [string]$notifiedIssue.LastNotifiedAt
+        }
+        $previousValue = if ($null -eq $notifiedIssue.PSObject.Properties['LastMessage'] -or
+            [string]::IsNullOrWhiteSpace([string]$notifiedIssue.LastMessage)) {
+            'Not available: this alert was sent before recovery measurements were stored.'
+        }
+        else {
+            Repair-MonitorTextEncoding -Value ([string]$notifiedIssue.LastMessage)
+        }
+        $currentValue = Repair-MonitorTextEncoding -Value ([string]$healthyResultsByKey[$key].Message)
+        $recovered.Add([pscustomobject]@{
+                Time                 = Get-Date
+                Severity             = 'OK'
+                Category             = Repair-MonitorTextEncoding -Value ([string]$notifiedIssue.Category)
+                Check                = Repair-MonitorTextEncoding -Value ([string]$notifiedIssue.Check)
+                Message              = ('Recovery confirmed after a previous {0} notification sent at {1}.' -f $notifiedIssue.Severity, $lastNotified)
+                PreviousValue        = $previousValue
+                CurrentValue         = $currentValue
+                Key                  = $key
+                IgnoreActive         = $false
+                IgnoreMode           = $null
+                IgnoreUntil          = $null
+                NotificationEligible = $true
+                IsRecovery           = $true
+                NotificationReference = if ($null -ne $notifiedIssue.PSObject.Properties['NotificationReference']) { [string]$notifiedIssue.NotificationReference } else { '' }
+            }) | Out-Null
+        Write-RunLog -Level OK -Category Recovery -Color Green -Message (
+            'Previously notified issue is healthy: {0}; component={1}; check={2}.' -f $key, $notifiedIssue.Category, $notifiedIssue.Check
+        )
+    }
+    return $recovered.ToArray()
+}
+
+function Get-ForcedRecoveryResults {
+    param([Parameter(Mandatory = $true)][string]$Target)
+
+    $searchText = $Target.Trim()
+    if ([string]::IsNullOrWhiteSpace($searchText)) {
+        throw 'A recovery target is required.'
+    }
+
+    $state = Get-MonitorRuntimeState
+    $storedIssues = @($state.NotifiedIssues)
+    $storedTargetIssues = @($storedIssues | Where-Object {
+            $null -ne $_ -and
+            $null -ne $_.PSObject.Properties['NotificationReference'] -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.NotificationReference) -and
+            [string]$_.NotificationReference -ieq $searchText
+        })
+    $matchedByReference = $storedTargetIssues.Count -gt 0
+
+    $allResults = @($script:Results | Where-Object {
+            $_.Category -notin @('Configuration', 'Email', 'Discord', 'Ignore', 'Recovery')
+        })
+    $matchingResults = @()
+    if ($matchedByReference) {
+        $resolvedResults = [System.Collections.Generic.List[object]]::new()
+        foreach ($storedIssue in $storedTargetIssues) {
+            $storedKey = ConvertTo-IgnoreRuleKey -Value ([string]$storedIssue.Key)
+            $currentForKey = @($allResults | Where-Object {
+                    (ConvertTo-IgnoreRuleKey -Value ([string]$_.Key)) -eq $storedKey
+                })
+            if ($currentForKey.Count -eq 0 -and $storedKey -eq 'diagnostics-watchdog-api') {
+                $apiHealth = Get-WatchdogApiLiveHealthSummary
+                if ($apiHealth.HasEvidence) {
+                    $resolvedResults.Add([pscustomobject]@{
+                            Severity = if ($apiHealth.IsHealthy) { 'OK' } else { 'Alert' }
+                            Category = 'Diagnostics'
+                            Check    = 'Watchdog service logs'
+                            Message  = 'Live API recovery verification: {0}' -f $apiHealth.Message
+                            Key      = $storedKey
+                        }) | Out-Null
+                    continue
+                }
+            }
+            if ($currentForKey.Count -eq 0) {
+                throw ('Notification reference {0} matched {1}, but this run produced no conclusive result for rule {2}. The original alert remains active: {3}' -f
+                    $searchText, $storedIssue.Check, $storedKey, $storedIssue.LastMessage)
+            }
+            foreach ($currentResult in $currentForKey) { $resolvedResults.Add($currentResult) | Out-Null }
+        }
+        $matchingResults = @($resolvedResults.ToArray())
+    }
+    else {
+        $storedNameMatches = @($storedIssues | Where-Object {
+                [string]$_.Key -ieq $searchText -or
+                [string]$_.Check -ieq $searchText -or
+                [string]$_.Category -ieq $searchText
+            })
+        if ($storedNameMatches.Count -eq 1) {
+            $storedTargetIssues = $storedNameMatches
+            $storedKey = ConvertTo-IgnoreRuleKey -Value ([string]$storedNameMatches[0].Key)
+            $matchingResults = @($allResults | Where-Object {
+                    (ConvertTo-IgnoreRuleKey -Value ([string]$_.Key)) -eq $storedKey
+                })
+            if ($matchingResults.Count -eq 0 -and $storedKey -eq 'diagnostics-watchdog-api') {
+                $apiHealth = Get-WatchdogApiLiveHealthSummary
+                if ($apiHealth.HasEvidence) {
+                    $matchingResults = @([pscustomobject]@{
+                            Severity = if ($apiHealth.IsHealthy) { 'OK' } else { 'Alert' }
+                            Category = 'Diagnostics'
+                            Check    = 'Watchdog service logs'
+                            Message  = 'Live API recovery verification: {0}' -f $apiHealth.Message
+                            Key      = $storedKey
+                        })
+                }
+            }
+        }
+        elseif ($storedNameMatches.Count -gt 1 -and
+            @($storedNameMatches | Where-Object { [string]$_.Check -ieq $searchText }).Count -gt 1) {
+            $matchedKeys = @($storedNameMatches | Select-Object -ExpandProperty Key -Unique) -join ', '
+            throw ('Several active alerts match "{0}": {1}. Paste a notification reference or enter one exact rule key.' -f
+                $searchText, $matchedKeys)
+        }
+        else {
+            $matchingResults = @($allResults | Where-Object {
+                    [string]$_.Key -ieq $searchText -or
+                    [string]$_.Check -ieq $searchText -or
+                    [string]$_.Category -ieq $searchText
+                })
+        }
+        if ($matchingResults.Count -eq 0) {
+            $matchingResults = @($allResults | Where-Object {
+                    foreach ($value in @([string]$_.Key, [string]$_.Check, [string]$_.Category, [string]$_.Message)) {
+                        if (-not [string]::IsNullOrWhiteSpace($value) -and
+                            $value.IndexOf($searchText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            return $true
+                        }
+                    }
+                    return $false
+                })
+        }
+        if ($matchingResults.Count -eq 0) {
+            $storedTargetIssues = @($storedIssues | Where-Object {
+                    foreach ($value in @([string]$_.Key, [string]$_.Check, [string]$_.Category)) {
+                        if (-not [string]::IsNullOrWhiteSpace($value) -and
+                            $value.IndexOf($searchText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            return $true
+                        }
+                    }
+                    return $false
+                })
+            if ($storedTargetIssues.Count -eq 1 -and
+                (ConvertTo-IgnoreRuleKey -Value ([string]$storedTargetIssues[0].Key)) -eq 'diagnostics-watchdog-api') {
+                $apiHealth = Get-WatchdogApiLiveHealthSummary
+                if ($apiHealth.HasEvidence) {
+                    $matchingResults = @([pscustomobject]@{
+                            Severity = if ($apiHealth.IsHealthy) { 'OK' } else { 'Alert' }
+                            Category = 'Diagnostics'
+                            Check    = 'Watchdog service logs'
+                            Message  = 'Live API recovery verification: {0}' -f $apiHealth.Message
+                            Key      = 'diagnostics-watchdog-api'
+                        })
+                }
+            }
+        }
+    }
+
+    if ($matchingResults.Count -eq 0) {
+        $service = @(Get-Service -ErrorAction SilentlyContinue | Where-Object {
+                [string]$_.Name -ieq $searchText -or [string]$_.DisplayName -ieq $searchText
+            } | Select-Object -First 1)
+        if ($service.Count -eq 0) {
+            throw ('No monitoring result or Windows service matched "{0}".' -f $searchText)
+        }
+        if ([string]$service[0].Status -ne 'Running') {
+            throw ('Windows service {0} [{1}] is not healthy; current status={2}.' -f
+                $service[0].DisplayName, $service[0].Name, $service[0].Status)
+        }
+        $matchingResults = @([pscustomobject]@{
+                Severity = 'OK'
+                Category = 'Server'
+                Check    = 'Windows service'
+                Message  = '{0} [{1}]; Status=Running' -f $service[0].DisplayName, $service[0].Name
+                Key      = ConvertTo-IgnoreRuleKey -Value ('server-windows-service-{0}' -f $service[0].Name)
+            })
+    }
+
+    $unhealthyResults = @($matchingResults | Where-Object { [string]$_.Severity -ne 'OK' })
+    if ($unhealthyResults.Count -gt 0) {
+        $summary = @($unhealthyResults | Select-Object -First 4 | ForEach-Object {
+                '{0}: {1}' -f $_.Check, $_.Message
+            }) -join ' | '
+        $originalSummary = if ($storedTargetIssues.Count -gt 0) {
+            @($storedTargetIssues | Select-Object -First 4 | ForEach-Object { '{0}: {1}' -f $_.Check, $_.LastMessage }) -join ' | '
+        }
+        else { 'No stored alert message was matched.' }
+        throw ('Recovery notification was not sent because "{0}" is still not healthy. Original alert: {1} | Current result: {2}' -f
+            $searchText, $originalSummary, $summary)
+    }
+
+    $previousByKey = @{}
+    foreach ($notifiedIssue in @($state.NotifiedIssues)) {
+        if ($null -eq $notifiedIssue -or [string]::IsNullOrWhiteSpace([string]$notifiedIssue.Key)) { continue }
+        $previousByKey[(ConvertTo-IgnoreRuleKey -Value ([string]$notifiedIssue.Key))] = $notifiedIssue
+    }
+
+    $recoveries = [System.Collections.Generic.List[object]]::new()
+    foreach ($result in @($matchingResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })) {
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$result.Key)
+        $previousValue = if ($previousByKey.ContainsKey($key) -and
+            -not [string]::IsNullOrWhiteSpace([string]$previousByKey[$key].LastMessage)) {
+            Repair-MonitorTextEncoding -Value ([string]$previousByKey[$key].LastMessage)
+        }
+        else {
+            'Manual recovery verification requested; no previous alert value was stored.'
+        }
+        $recoveries.Add([pscustomobject]@{
+                Time                 = Get-Date
+                Severity             = 'OK'
+                Category             = Repair-MonitorTextEncoding -Value ([string]$result.Category)
+                Check                = Repair-MonitorTextEncoding -Value ([string]$result.Check)
+                Message              = ('Forced recovery verification succeeded for target "{0}".' -f $searchText)
+                PreviousValue        = $previousValue
+                CurrentValue         = Repair-MonitorTextEncoding -Value ([string]$result.Message)
+                Key                  = $key
+                IgnoreActive         = $false
+                IgnoreMode           = $null
+                IgnoreUntil          = $null
+                NotificationEligible = $true
+                IsRecovery           = $true
+                NotificationReference = if ($previousByKey.ContainsKey($key) -and
+                    $null -ne $previousByKey[$key].PSObject.Properties['NotificationReference']) {
+                    [string]$previousByKey[$key].NotificationReference
+                }
+                else { '' }
+            }) | Out-Null
+    }
+    return $recoveries.ToArray()
+}
+
+function Update-NotifiedIssueStateAfterDelivery {
+    param(
+        [object[]]$NewlyNotifiedIssues,
+        [object[]]$RecoveredIssues,
+        [string]$NotificationReference
+    )
+
+    $state = Get-MonitorRuntimeState
+    $issuesByKey = @{}
+    foreach ($issue in @($state.NotifiedIssues)) {
+        if ($null -eq $issue -or [string]::IsNullOrWhiteSpace([string]$issue.Key)) { continue }
+        $issuesByKey[(ConvertTo-IgnoreRuleKey -Value ([string]$issue.Key))] = $issue
+    }
+
+    foreach ($recoveredIssue in @($RecoveredIssues)) {
+        if ($null -eq $recoveredIssue -or [string]::IsNullOrWhiteSpace([string]$recoveredIssue.Key)) { continue }
+        [void]$issuesByKey.Remove((ConvertTo-IgnoreRuleKey -Value ([string]$recoveredIssue.Key)))
+    }
+
+    foreach ($issue in @($NewlyNotifiedIssues)) {
+        if ($null -eq $issue -or [string]::IsNullOrWhiteSpace([string]$issue.Key)) { continue }
+        $key = ConvertTo-IgnoreRuleKey -Value ([string]$issue.Key)
+        $issuesByKey[$key] = [pscustomobject]@{
+            Key            = $key
+            Category       = [string]$issue.Category
+            Check          = [string]$issue.Check
+            Severity       = [string]$issue.Severity
+            LastNotifiedAt = (Get-Date).ToString('o')
+            LastMessage    = [string]$issue.Message
+            NotificationReference = [string]$NotificationReference
+        }
+    }
+
+    $state.NotifiedIssues = @($issuesByKey.Values | Sort-Object -Property Key)
+    Save-MonitorRuntimeState -State $state -ThrowOnFailure
+}
+
+function Invoke-SafeMonitorCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$Category,
+        [Parameter(Mandatory = $true)][string]$Check,
+        [Parameter(Mandatory = $true)][scriptblock]$Action
+    )
+
+    try {
+        & $Action
+    }
+    catch {
+        $detail = $_.Exception.Message
+        if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) {
+            $detail = '{0} | Stack: {1}' -f $detail, (($_.ScriptStackTrace -replace '[\r\n]+', ' ').Trim())
+        }
+        Add-MonitorResult -Severity Error -Category $Category -Check $Check -Message $detail
+    }
+}
+
+function ConvertTo-HttpUri {
+    param([Parameter(Mandatory = $true)][string]$Address)
+
+    $value = $Address.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw 'SiteAddress is required.'
+    }
+
+    if ($value -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://') {
+        $localAddress = $value -match '(?i)^(localhost|hostname|127\.0\.0\.1|\[::1\])(?=[:/]|$)'
+        $localPort = $value -match ':1200(?=/|$)'
+        $scheme = if ($localAddress -or $localPort) { 'http' } else { 'https' }
+        $value = '{0}://{1}' -f $scheme, $value
+    }
+
+    $uri = $null
+    if (-not [Uri]::TryCreate($value, [UriKind]::Absolute, [ref]$uri)) {
+        throw ('Invalid site address: {0}' -f $Address)
+    }
+    if ($uri.Scheme -notin @('http', 'https')) {
+        throw ('Only HTTP and HTTPS site addresses are supported: {0}' -f $Address)
+    }
+
+    return $uri
+}
+
+function ConvertTo-HttpUris {
+    param([AllowNull()][string]$Addresses)
+
+    $value = if ([string]::IsNullOrWhiteSpace($Addresses)) { 'hostname:1200' } else { $Addresses }
+    $uris = [System.Collections.Generic.List[Uri]]::new()
+    foreach ($address in @($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $uri = ConvertTo-HttpUri -Address $address
+        if (@($uris | Where-Object { $_.AbsoluteUri.TrimEnd('/') -ieq $uri.AbsoluteUri.TrimEnd('/') }).Count -eq 0) {
+            $uris.Add($uri) | Out-Null
+        }
+    }
+
+    if ($uris.Count -eq 0) {
+        throw 'At least one D4A site address is required.'
+    }
+    return @($uris.ToArray())
+}
+
+function Get-MonitorEndpointLabel {
+    param([Parameter(Mandatory = $true)][Uri]$Uri)
+
+    if ($Uri.IsDefaultPort) { return $Uri.DnsSafeHost }
+    return ('{0}:{1}' -f $Uri.DnsSafeHost, $Uri.Port)
+}
+
+function Test-IsIpAddress {
+    param([Parameter(Mandatory = $true)][string]$HostName)
+
+    $parsed = $null
+    return [Net.IPAddress]::TryParse($HostName, [ref]$parsed)
+}
+
+function Get-D4AApiUri {
+    param([Parameter(Mandatory = $true)][Uri]$FrontendUri)
+
+    $hostName = $FrontendUri.DnsSafeHost
+    $isLocalName = $hostName -notmatch '\.'
+    if ($FrontendUri.Port -eq 1200 -or (Test-IsIpAddress -HostName $hostName) -or $isLocalName) {
+        # 3.9 used port 32167; a 4.0 instance can listen on another API port.
+        return [UriBuilder]::new($FrontendUri.Scheme, $hostName, (Get-D4ALocalApiPortForLegacyAddress), '/health').Uri
+    }
+
+    $labels = $hostName.Split('.')
+    if ($labels[0] -notmatch '(?i)-api$') {
+        $labels[0] = '{0}-api' -f $labels[0]
+    }
+
+    $builder = [UriBuilder]::new($FrontendUri.Scheme, ($labels -join '.'))
+    $builder.Port = -1
+    $builder.Path = '/health'
+    $builder.Query = ''
+    $builder.Fragment = ''
+    return $builder.Uri
+}
+
+function Get-D4AApiHealthUri {
+    param([Parameter(Mandatory = $true)][Uri]$ApiUri)
+
+    # An API hostname is enough for the wizard; preserve an explicit custom
+    # path, but use the standard health endpoint when no path was supplied.
+    if ([string]::IsNullOrWhiteSpace($ApiUri.AbsolutePath) -or $ApiUri.AbsolutePath -eq '/') {
+        $builder = [UriBuilder]::new($ApiUri)
+        $builder.Path = '/health'
+        $builder.Query = ''
+        $builder.Fragment = ''
+        return $builder.Uri
+    }
+    return $ApiUri
+}
+
+function Get-DefaultMonitorApiAddresses {
+    param([Parameter(Mandatory = $true)][string[]]$FrontendAddresses)
+
+    $frontendText = (@($FrontendAddresses | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ }) -join ',')
+    if ([string]::IsNullOrWhiteSpace($frontendText)) { return @() }
+    return @(
+        ConvertTo-HttpUris -Addresses $frontendText |
+            ForEach-Object { (Get-D4AApiUri -FrontendUri $_).AbsoluteUri }
+    )
+}
+
+function Get-MonitorApiUris {
+    param(
+        [Parameter(Mandatory = $true)][Uri[]]$FrontendUris,
+        [string]$ConfiguredAddresses = $ApiAddress
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ConfiguredAddresses)) {
+        return @($FrontendUris | ForEach-Object { Get-D4AApiUri -FrontendUri $_ })
+    }
+
+    $apiUris = @(ConvertTo-HttpUris -Addresses $ConfiguredAddresses | ForEach-Object { Resolve-D4ALegacyLocalApiUri -ApiUri (Get-D4AApiHealthUri -ApiUri $_) })
+    if ($apiUris.Count -ne $FrontendUris.Count) {
+        throw 'ApiAddress must contain one API address for each SiteAddress entry.'
+    }
+    return @($apiUris)
+}
+
+function Get-AuthorityBaseUri {
+    param([Parameter(Mandatory = $true)][Uri]$Uri)
+
+    $builder = [UriBuilder]::new($Uri.Scheme, $Uri.DnsSafeHost, $Uri.Port, '/')
+    if ($Uri.IsDefaultPort) {
+        $builder.Port = -1
+    }
+    return $builder.Uri
+}
+
+function Invoke-HttpProbe {
+    param(
+        [Parameter(Mandatory = $true)][Uri]$Uri,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $response = $null
+    try {
+        $request = [Net.HttpWebRequest]::Create($Uri)
+        $request.Method = 'GET'
+        $request.UserAgent = 'D4A-ScheduledMonitor/{0} (D4A {1})' -f $script:MonitorVersion, $script:MonitorTargetPlatform
+        $request.AllowAutoRedirect = $true
+        $request.MaximumAutomaticRedirections = $MaxRedirects
+        $request.Timeout = $TimeoutSeconds * 1000
+        $request.ReadWriteTimeout = $TimeoutSeconds * 1000
+        $request.AutomaticDecompression = [Net.DecompressionMethods]::GZip -bor [Net.DecompressionMethods]::Deflate
+        $response = [Net.HttpWebResponse]$request.GetResponse()
+
+        return [pscustomobject]@{
+            Uri        = $Uri
+            FinalUri   = $response.ResponseUri
+            StatusCode = [int]$response.StatusCode
+            StatusText = [string]$response.StatusDescription
+            Millis     = $stopwatch.ElapsedMilliseconds
+            Error      = $null
+        }
+    }
+    catch [Net.WebException] {
+        $webResponse = $_.Exception.Response
+        $statusCode = $null
+        $statusText = $null
+        $finalUri = $Uri
+        if ($null -ne $webResponse) {
+            try {
+                $statusCode = [int]$webResponse.StatusCode
+                $statusText = [string]$webResponse.StatusDescription
+                $finalUri = $webResponse.ResponseUri
+            }
+            catch {
+                # Keep the original WebException details when response parsing fails.
+            }
+        }
+
+        return [pscustomobject]@{
+            Uri        = $Uri
+            FinalUri   = $finalUri
+            StatusCode = $statusCode
+            StatusText = $statusText
+            Millis     = $stopwatch.ElapsedMilliseconds
+            Error      = $_.Exception.Message
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Uri        = $Uri
+            FinalUri   = $Uri
+            StatusCode = $null
+            StatusText = $null
+            Millis     = $stopwatch.ElapsedMilliseconds
+            Error      = $_.Exception.Message
+        }
+    }
+    finally {
+        $stopwatch.Stop()
+        if ($null -ne $response) {
+            $response.Dispose()
+        }
+    }
+}
+
+function Test-HttpProbeSucceeded {
+    param([Parameter(Mandatory = $true)][psobject]$Result)
+
+    return $null -ne $Result.StatusCode -and $Result.StatusCode -ge 200 -and $Result.StatusCode -lt 400
+}
+
+function Get-HttpProbeFailureDetail {
+    param([Parameter(Mandatory = $true)][psobject]$Result)
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Result.Error)) {
+        return [string]$Result.Error
+    }
+    if ($null -ne $Result.StatusCode) {
+        return 'HTTP {0} {1}' -f $Result.StatusCode, $Result.StatusText
+    }
+    return 'No HTTP response was received.'
+}
+
+function Test-WebEndpoint {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][Uri]$Uri,
+        [ValidateRange(1, 5)][int]$FailureAttempts = 1,
+        [ValidateRange(0, 60)][int]$FailureRetryIntervalSeconds = 0,
+        # An HTTP 404 proves the API process answered; the health route may
+        # differ in the installed D4A version. It is logged without an alert.
+        [switch]$TreatNotFoundAsReachable
+    )
+
+    $attemptResults = [System.Collections.Generic.List[object]]::new()
+    $attemptResults.Add((Invoke-HttpProbe -Uri $Uri -TimeoutSeconds $HttpTimeoutSeconds)) | Out-Null
+
+    # Retry only after an availability failure. A healthy first response never
+    # creates extra traffic, and a recovery stops the sequence immediately.
+    while (-not (Test-HttpProbeSucceeded -Result ($attemptResults | Select-Object -Last 1)) -and
+        -not ($TreatNotFoundAsReachable.IsPresent -and ($attemptResults | Select-Object -Last 1).StatusCode -eq 404) -and
+        $attemptResults.Count -lt $FailureAttempts) {
+        if ($FailureRetryIntervalSeconds -gt 0) {
+            Write-RunLog -Category Application -Color DarkGray -Message (
+                '{0}: availability attempt {1}/{2} failed; retrying in {3} second(s).' -f
+                    $Name, $attemptResults.Count, $FailureAttempts, $FailureRetryIntervalSeconds
+            )
+            Start-Sleep -Seconds $FailureRetryIntervalSeconds
+        }
+        $attemptResults.Add((Invoke-HttpProbe -Uri $Uri -TimeoutSeconds $HttpTimeoutSeconds)) | Out-Null
+    }
+
+    $result = $attemptResults | Select-Object -Last 1
+    $successful = Test-HttpProbeSucceeded -Result $result
+    if (-not $successful -and $TreatNotFoundAsReachable.IsPresent -and $result.StatusCode -eq 404) {
+        Add-MonitorResult -Severity Warning -Category Application -Check $Name -Message (
+            'HTTP 404 on {0}; elapsed={1} ms. A server answered, but this health route does not exist in the installed D4A version. Set ApiAddress to the correct health URL. Public API availability is still alerted by the application performance checks, which do not tolerate HTTP 404.' -f
+                $Uri.AbsoluteUri, $result.Millis
+        ) -NotificationEligible:$false
+        return
+    }
+    if (-not $successful) {
+        Add-MonitorResult -Severity Alert -Category Application -Check $Name -Message (
+            '{0}; URL={1}; elapsed={2} ms; {3} consecutive availability attempt(s) failed.' -f
+                (Get-HttpProbeFailureDetail -Result $result),
+                $Uri.AbsoluteUri,
+                $result.Millis,
+                $attemptResults.Count
+        )
+        return
+    }
+
+    $message = 'HTTP {0} {1}; URL={2}; final={3}; elapsed={4} ms' -f
+        $result.StatusCode,
+        $result.StatusText,
+        $Uri.AbsoluteUri,
+        $result.FinalUri.AbsoluteUri,
+        $result.Millis
+
+    if ($attemptResults.Count -gt 1) {
+        $firstFailure = Get-HttpProbeFailureDetail -Result ($attemptResults | Select-Object -First 1)
+        Add-MonitorResult -Severity Warning -Category Application -Check $Name -Message (
+            'Initial availability attempt failed ({0}) but recovered on attempt {1}/{2}. {3}' -f
+                $firstFailure, $attemptResults.Count, $FailureAttempts, $message
+        ) -NotificationEligible:$false
+        return
+    }
+
+    if ($result.Millis -gt $script:EndpointSlowLogMs) {
+        Add-MonitorResult -Severity Warning -Category Application -Check $Name -Message (
+            '{0}; response time exceeded the log-only threshold of {1} ms; no email notification is sent for latency.' -f $message, $script:EndpointSlowLogMs
+        ) -NotificationEligible:$false
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Application -Check $Name -Message $message
+    }
+}
+
+function Get-D4AAlternateSchemeUri {
+    param([Parameter(Mandatory = $true)][Uri]$Uri)
+
+    $builder = [UriBuilder]::new($Uri)
+    $builder.Scheme = if ($Uri.Scheme -eq 'https') { 'http' } else { 'https' }
+    $builder.Port = $Uri.Port
+    return $builder.Uri
+}
+
+function Resolve-D4ADirectApiBaseUri {
+    param(
+        [Parameter(Mandatory = $true)][Uri]$BaseUri,
+        [Parameter(Mandatory = $true)][string]$TargetName
+    )
+
+    # Decide4Action APIs can listen with HTTP or HTTPS on the same port
+    # (apiProtocol in the Watchdog configuration). Any HTTP status proves the
+    # protocol is right; only a connection-level failure triggers the fallback.
+    $probe = Invoke-HttpProbe -Uri $BaseUri -TimeoutSeconds $HttpTimeoutSeconds
+    if ($null -ne $probe.StatusCode) { return $BaseUri }
+
+    $alternateUri = Get-D4AAlternateSchemeUri -Uri $BaseUri
+    $alternateProbe = Invoke-HttpProbe -Uri $alternateUri -TimeoutSeconds $HttpTimeoutSeconds
+    # A certificate name or trust failure on 127.0.0.1 still proves that the
+    # endpoint speaks TLS; the trust finding is reported, never bypassed.
+    $tlsAnswered = $alternateUri.Scheme -eq 'https' -and [string]$alternateProbe.Error -match '(?i)trust relationship|certificate|SSL/TLS secure channel|remote certificate'
+    if ($null -eq $alternateProbe.StatusCode -and -not $tlsAnswered) { return $BaseUri }
+
+    $answerText = if ($null -ne $alternateProbe.StatusCode) { 'answered with HTTP {0}' -f $alternateProbe.StatusCode } else { 'completed a TLS handshake but failed certificate validation ({0})' -f $alternateProbe.Error }
+    Add-MonitorResult -Severity Warning -Category 'Application performance' -Check ('{0} protocol' -f $TargetName) -Message (
+        '{0} did not answer ({1}) but {2} {3}. This run uses {2}; set LocalApiAddress to {2} in the JSON configuration (the API protocol differs from the configured one).' -f
+            $BaseUri.AbsoluteUri, (Get-HttpProbeFailureDetail -Result $probe), $alternateUri.AbsoluteUri, $answerText
+    ) -NotificationEligible:$false
+    return $alternateUri
+}
+
+function Test-ApplicationPerformance {
+    param(
+        [Parameter(Mandatory = $true)][Uri]$PublicApiBaseUri,
+        [Parameter(Mandatory = $true)][string]$TargetLabel,
+        [switch]$IncludeDirectApi
+    )
+
+    $targets = [System.Collections.Generic.List[object]]::new()
+    if ($IncludeDirectApi.IsPresent) {
+        foreach ($directTarget in @(Get-MonitorEffectiveLocalApiTargets)) {
+            $targets.Add([pscustomobject]@{
+                    Name    = $directTarget.Name
+                    BaseUri = (Resolve-D4ADirectApiBaseUri -BaseUri $directTarget.BaseUri -TargetName $directTarget.Name)
+                    # Discovered targets are unconfirmed: their failures are
+                    # log-only until LocalApiAddress is set explicitly.
+                    LogOnlyFailures = [bool]$directTarget.Discovered
+                    # The local 4.0 API answered, so 404 means an unknown route.
+                    TolerateNotFound = Test-D4AHas40Instance
+                }) | Out-Null
+        }
+    }
+    # Public API 404s usually come from nginx/IIS routing and always alert.
+    $targets.Add([pscustomobject]@{ Name = 'Public API'; BaseUri = $PublicApiBaseUri; LogOnlyFailures = $false; TolerateNotFound = $false }) | Out-Null
+    $endpoints = @(Get-MonitorApplicationPerformanceEndpoints)
+
+    foreach ($target in $targets) {
+        foreach ($endpoint in $endpoints) {
+            $uri = [Uri]::new($target.BaseUri, $endpoint.TrimStart('/'))
+            $attemptResults = [System.Collections.Generic.List[object]]::new()
+            for ($attempt = 1; $attempt -le $ApplicationAttempts; $attempt++) {
+                $attemptResults.Add((Invoke-HttpProbe -Uri $uri -TimeoutSeconds $HttpTimeoutSeconds)) | Out-Null
+            }
+
+            $successful = @($attemptResults | Where-Object {
+                $null -ne $_.StatusCode -and $_.StatusCode -ge 200 -and $_.StatusCode -lt 400
+            })
+            $failedCount = $attemptResults.Count - $successful.Count
+            $checkName = '{0} {1} ({2})' -f $target.Name, $endpoint, $TargetLabel
+
+            if ($successful.Count -eq 0) {
+                $last = $attemptResults | Select-Object -Last 1
+                $notFoundCount = @($attemptResults | Where-Object { $_.StatusCode -eq 404 }).Count
+                if ($target.TolerateNotFound -and $notFoundCount -eq $attemptResults.Count) {
+                    Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
+                        'HTTP 404 on all {0} attempt(s); URL={1}. The API answered, so it is reachable, but this route does not exist in the installed D4A version. Adjust ApplicationPerformanceEndpoints in the JSON configuration.' -f
+                            $attemptResults.Count, $uri.AbsoluteUri
+                    ) -NotificationEligible:$false
+                    continue
+                }
+                $detail = if (-not [string]::IsNullOrWhiteSpace([string]$last.Error)) {
+                    $last.Error
+                }
+                elseif ($null -ne $last.StatusCode) {
+                    'HTTP {0} {1}' -f $last.StatusCode, $last.StatusText
+                }
+                else {
+                    'No valid response.'
+                }
+                if ($target.LogOnlyFailures) {
+                    Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
+                        'All {0} attempt(s) failed on the discovered local API address; URL={1}; last result={2}. Log-only: set LocalApiAddress in the JSON configuration to confirm this address and enable alerts. Public API and API health checks still alert.' -f
+                            $attemptResults.Count, $uri.AbsoluteUri, $detail
+                    ) -NotificationEligible:$false
+                    continue
+                }
+                Add-MonitorResult -Severity Alert -Category 'Application performance' -Check $checkName -Message (
+                    'All {0} attempt(s) failed; URL={1}; last result={2}' -f $attemptResults.Count, $uri.AbsoluteUri, $detail
+                )
+                continue
+            }
+
+            $averageMs = [Math]::Round((($successful | Measure-Object -Property Millis -Average).Average), 0)
+            $maximumMs = [int](($successful | Measure-Object -Property Millis -Maximum).Maximum)
+            $message = 'URL={0}; successful={1}/{2}; average={3} ms; maximum={4} ms' -f
+                $uri.AbsoluteUri, $successful.Count, $attemptResults.Count, $averageMs, $maximumMs
+
+            if ($failedCount -gt 0) {
+                Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
+                    '{0}; partial availability failure recorded without an email because at least one request reached the endpoint.' -f $message
+                ) -NotificationEligible:$false
+            }
+            elseif ($maximumMs -gt $script:EndpointSlowLogMs) {
+                Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
+                    '{0}; response time exceeded the log-only threshold of {1} ms; no email notification is sent for latency.' -f $message, $script:EndpointSlowLogMs
+                ) -NotificationEligible:$false
+            }
+            else {
+                Add-MonitorResult -Severity OK -Category 'Application performance' -Check $checkName -Message $message
+            }
+        }
+    }
+}
+
+function Get-MonitorTlsExceptionDetail {
+    param([Parameter(Mandatory = $true)][System.Exception]$Exception)
+
+    $messages = [System.Collections.Generic.List[string]]::new()
+    $current = $Exception
+    while ($null -ne $current) {
+        if (-not [string]::IsNullOrWhiteSpace($current.Message)) { $messages.Add($current.Message) | Out-Null }
+        $current = $current.InnerException
+    }
+    return (($messages | Select-Object -Unique) -join ' -> ')
+}
+
+function Test-TlsCertificate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][Uri]$Uri
+    )
+
+    if ($Uri.Scheme -ne 'https') {
+        Add-MonitorResult -Severity OK -Category TLS -Check $Name -Message 'Skipped because the endpoint uses HTTP.'
+        return
+    }
+
+    $tcpClient = [Net.Sockets.TcpClient]::new()
+    $sslStream = $null
+    $certificate = $null
+    try {
+        $port = if ($Uri.IsDefaultPort) { 443 } else { $Uri.Port }
+        $connect = $tcpClient.BeginConnect($Uri.DnsSafeHost, $port, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne($HttpTimeoutSeconds * 1000)) {
+            throw ('Timed out connecting to {0}:{1}.' -f $Uri.DnsSafeHost, $port)
+        }
+        $tcpClient.EndConnect($connect)
+        $tcpClient.ReceiveTimeout = $HttpTimeoutSeconds * 1000
+        $tcpClient.SendTimeout = $HttpTimeoutSeconds * 1000
+
+        $acceptCertificate = [Net.Security.RemoteCertificateValidationCallback]{
+            param($Sender, $RemoteCertificate, $Chain, $PolicyErrors)
+            return $true
+        }
+        $sslStream = [Net.Security.SslStream]::new($tcpClient.GetStream(), $false, $acceptCertificate)
+        $sslStream.ReadTimeout = $HttpTimeoutSeconds * 1000
+        $sslStream.WriteTimeout = $HttpTimeoutSeconds * 1000
+        $certificates = [Security.Cryptography.X509Certificates.X509CertificateCollection]::new()
+        # Explicit TLS 1.2 avoids inheriting legacy SChannel defaults for SslStream.
+        $sslStream.AuthenticateAsClient(
+            $Uri.DnsSafeHost,
+            $certificates,
+            [Security.Authentication.SslProtocols]::Tls12,
+            $false
+        )
+        if ($null -eq $sslStream.RemoteCertificate) {
+            throw 'The remote server did not provide a TLS certificate.'
+        }
+
+        $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($sslStream.RemoteCertificate)
+        $daysRemaining = [Math]::Floor(($certificate.NotAfter.ToUniversalTime() - [DateTime]::UtcNow).TotalDays)
+        $message = 'Subject={0}; issuer={1}; expires={2}; days remaining={3}' -f
+            $certificate.Subject,
+            $certificate.Issuer,
+            $certificate.NotAfter.ToString('yyyy-MM-dd HH:mm:ss'),
+            $daysRemaining
+
+        if ($daysRemaining -lt 0) {
+            Add-MonitorResult -Severity Alert -Category TLS -Check $Name -Message ('Certificate has expired. {0}' -f $message)
+        }
+        elseif ($daysRemaining -le 7) {
+            Add-MonitorResult -Severity Alert -Category TLS -Check $Name -Message ('Certificate expires within 7 days. {0}' -f $message)
+        }
+        elseif ($daysRemaining -le 30) {
+            Add-MonitorResult -Severity Warning -Category TLS -Check $Name -Message ('Certificate expires within 30 days. {0}' -f $message)
+        }
+        else {
+            Add-MonitorResult -Severity OK -Category TLS -Check $Name -Message $message
+        }
+    }
+    catch {
+        $detail = Get-MonitorTlsExceptionDetail -Exception $_.Exception
+        if ($detail -match '(?i)\bSSPI\b|SslProtocolType|SSL/TLS secure channel') {
+            Add-MonitorResult -Severity Warning -Category TLS -Check $Name -Message (
+                'Local TLS inspection could not complete for {0}: {1}. Endpoint availability is checked separately; no email notification is sent for this local TLS compatibility warning.' -f $Uri.AbsoluteUri, $detail
+            ) -NotificationEligible:$false
+        }
+        else {
+            Add-MonitorResult -Severity Error -Category TLS -Check $Name -Message (
+                'Unable to inspect certificate for {0}: {1}' -f $Uri.AbsoluteUri, $detail
+            )
+        }
+    }
+    finally {
+        if ($null -ne $certificate) { $certificate.Dispose() }
+        if ($null -ne $sslStream) { $sslStream.Dispose() }
+        $tcpClient.Dispose()
+    }
+}
+
+function Get-SystemClassInstance {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClassName,
+        [string]$Filter
+    )
+
+    if ($null -ne (Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue)) {
+        try {
+            if ([string]::IsNullOrWhiteSpace($Filter)) {
+                return Get-CimInstance -ClassName $ClassName -ErrorAction Stop
+            }
+            return Get-CimInstance -ClassName $ClassName -Filter $Filter -ErrorAction Stop
+        }
+        catch {
+            # WMI is retained as a compatibility fallback for older servers.
+        }
+    }
+
+    if ($null -eq (Get-Command -Name Get-WmiObject -ErrorAction SilentlyContinue)) {
+        throw ('Neither CIM nor WMI can query {0}.' -f $ClassName)
+    }
+    if ([string]::IsNullOrWhiteSpace($Filter)) {
+        return Get-WmiObject -Class $ClassName -ErrorAction Stop
+    }
+    return Get-WmiObject -Class $ClassName -Filter $Filter -ErrorAction Stop
+}
+
+function Get-D4AWindowsServiceFamily {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    $serviceText = '{0} {1}' -f [string]$Service.Name, [string]$Service.DisplayName
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])(?:d4a[\s_-]*)?mdc(?:service)?(?:$|[^a-z0-9])') {
+        return 'MDC'
+    }
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])(?:d4a[\s_-]*)?plc(?:service)?(?:$|[^a-z0-9])') {
+        return 'PLC'
+    }
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])(?:mosquitto|mqtt)(?:$|[^a-z0-9])') {
+        return 'Mosquitto/MQTT'
+    }
+    if ($serviceText -match '(?i)(?:^|[^a-z0-9])nginx(?:$|[^a-z0-9])') {
+        return 'Nginx'
+    }
+    return $null
+}
+
+function Test-D4AWindowsServiceHealthy {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    return (
+        [string]$Service.State -eq 'Running' -and
+        [string]$Service.Status -eq 'OK'
+    )
+}
+
+function Test-D4AWindowsServiceDisabled {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    return (
+        [string]$Service.StartMode -eq 'Disabled' -or
+        [string]$Service.State -eq 'Disabled' -or
+        [string]$Service.Status -eq 'Disabled'
+    )
+}
+
+function Get-D4ARunningServiceFamilyCounterparts {
+    param(
+        [Parameter(Mandatory = $true)]$Service,
+        [Parameter(Mandatory = $true)][object[]]$Services
+    )
+
+    $family = Get-D4AWindowsServiceFamily -Service $Service
+    if ([string]::IsNullOrWhiteSpace([string]$family)) {
+        return @()
+    }
+
+    return @($Services | Where-Object {
+            [string]$_.Name -ine [string]$Service.Name -and
+            (Get-D4AWindowsServiceFamily -Service $_) -eq $family -and
+            (Test-D4AWindowsServiceHealthy -Service $_)
+        })
+}
+
+function Get-D4AWindowsServiceDisplayName {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    if ([string]::IsNullOrWhiteSpace([string]$Service.DisplayName)) {
+        return [string]$Service.Name
+    }
+    return [string]$Service.DisplayName
+}
+
+function Add-D4AWindowsServiceMonitorResult {
+    param(
+        [Parameter(Mandatory = $true)]$Service,
+        [Parameter(Mandatory = $true)][object[]]$AllServices,
+        [Parameter(Mandatory = $true)][string]$Check,
+        [Parameter(Mandatory = $true)][string]$Key
+    )
+
+    $display = Get-D4AWindowsServiceDisplayName -Service $Service
+    $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
+        $display, $Service.Name, $Service.State, $Service.Status, $Service.StartMode
+
+    if (Test-D4AWindowsServiceHealthy -Service $Service) {
+        Add-MonitorResult -Severity OK -Category Server -Check $Check -Message $message -Key $Key
+        return
+    }
+
+    $runningCounterparts = @(Get-D4ARunningServiceFamilyCounterparts -Service $Service -Services $AllServices)
+    if ((Test-D4AWindowsServiceDisabled -Service $Service) -and $runningCounterparts.Count -gt 0) {
+        $family = Get-D4AWindowsServiceFamily -Service $Service
+        $counterpartNames = @(foreach ($counterpart in $runningCounterparts) {
+                '{0} [{1}]' -f (Get-D4AWindowsServiceDisplayName -Service $counterpart), $counterpart.Name
+            }) -join ', '
+        $message = '{0}; disabled duplicate was soft-ignored because the running {1} service counterpart is: {2}' -f
+            $message, $family, $counterpartNames
+        Add-MonitorResult -Severity OK -Category Server -Check $Check -Message $message -Key $Key
+        return
+    }
+
+    Add-MonitorResult -Severity Alert -Category Server -Check $Check -Message $message -Key $Key
+}
+
+function Test-D4AWindowsServices {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $plcServices = @($services | Where-Object {
+            (Get-D4AWindowsServiceFamily -Service $_) -eq 'PLC'
+        })
+    $matching = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            $displayName = [string]$service.DisplayName
+            # D4A services consistently use the D4A or Decide4Action prefix.
+            # MDC and PLC aliases are also included after product renames.
+            $serviceScopePattern = '(?i)^\s*(?:D4A|Decide4Action)'
+            $serviceFamily = Get-D4AWindowsServiceFamily -Service $service
+            $matchesScope =
+                $name -match $serviceScopePattern -or
+                $displayName -match $serviceScopePattern -or
+                $serviceFamily -eq 'MDC' -or
+                $serviceFamily -eq 'PLC'
+            if (-not $matchesScope -and $serviceFamily -notin @('Mosquitto/MQTT', 'Nginx')) {
+                # Decide4Action 4.0 names services per instance. A service whose
+                # executable is inside a discovered instance folder, or the
+                # machine-wide 4.0 Watchdog below <base>, is in scope whatever
+                # its name. Broker and web services keep their dedicated checks.
+                $isWebInfrastructure = ('{0} {1}' -f $name, $displayName) -match '(?i)\bnode[-_\s]?red\b|\breverse[-_\s]?proxy\b|\biis\b|\bw3svc\b'
+                if (-not $isWebInfrastructure) {
+                    $matchesScope =
+                        (Test-D4AServiceInD4A40Instance -Service $service) -or
+                        (('{0} {1}' -f $name, $displayName) -match '(?i)watchdog' -and (Test-D4AServiceUnderD4A40Base -Service $service))
+                }
+            }
+
+            if ($matchesScope) {
+                $service
+            }
+        }
+    )
+
+    if ($plcServices.Count -eq 0) {
+        $plcMessage = 'Optional PLC/D4A_PLC Windows service is not installed; service monitoring was soft-ignored.'
+        # Both aliases are emitted so an alert delivered before the service was
+        # removed can transition to recovery without knowing its former name.
+        Add-MonitorResult -Severity OK -Category Server -Check 'Optional PLC service' -Message $plcMessage -Key 'server-windows-service-plc'
+        Add-MonitorResult -Severity OK -Category Server -Check 'Optional PLC service' -Message $plcMessage -Key 'server-windows-service-d4a-plc'
+    }
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity Warning -Category Server -Check 'D4A Windows services' -Message (
+            'No service matched the D4A service scope.'
+        ) -Key 'server-d4a-windows-services'
+        return
+    }
+
+    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
+        $serviceKey = 'server-windows-service-{0}' -f $service.Name
+        Add-D4AWindowsServiceMonitorResult -Service $service -AllServices $services -Check 'Windows service' -Key $serviceKey
+    }
+}
+
+function Test-MosquittoWindowsService {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $matching = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            $displayName = [string]$service.DisplayName
+            if ($name -match '(?i)(?:\bMosquitto\b|\bMQTT\b)' -or $displayName -match '(?i)(?:\bMosquitto\b|\bMQTT\b)') {
+                $service
+            }
+        }
+    )
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'Mosquitto/MQTT service' -Message (
+            'No Mosquitto or MQTT Windows service was found; broker status check was skipped.'
+        ) -Key 'server-mosquitto-mqtt-service'
+        return
+    }
+
+    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
+        $serviceKey = 'server-mosquitto-mqtt-service-{0}' -f $service.Name
+        Add-D4AWindowsServiceMonitorResult -Service $service -AllServices $services -Check 'Mosquitto/MQTT service' -Key $serviceKey
+    }
+}
+
+function Test-WebInfrastructureWindowsServices {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $serviceScopePattern = '(?i)(?:\bnode[-_\s]?red\b|\bnginx\b|\breverse[-_\s]?proxy\b|\biis\b|\bworld\s+wide\s+web\s+publishing\s+service\b|\binternet\s+information\s+services\b)'
+    $matching = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            $displayName = [string]$service.DisplayName
+            if ($name -match $serviceScopePattern -or $displayName -match $serviceScopePattern) {
+                $service
+            }
+        }
+    )
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'Web infrastructure services' -Message (
+            'No configured Node-RED, Nginx, reverse proxy, or IIS Windows service was found; web infrastructure service monitoring was skipped.'
+        ) -Key 'server-web-infrastructure-services'
+        return
+    }
+
+    foreach ($service in ($matching | Sort-Object -Property DisplayName, Name)) {
+        $serviceKey = 'server-web-infrastructure-service-{0}' -f $service.Name
+        Add-D4AWindowsServiceMonitorResult -Service $service -AllServices $services -Check 'Web infrastructure service' -Key $serviceKey
+    }
+}
+
+function Test-SqlServerWindowsServices {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    $databaseEngines = @(
+        foreach ($service in $services) {
+            $name = [string]$service.Name
+            if ($name -ieq 'MSSQLSERVER' -or $name -match '(?i)^MSSQL\$[^$]+$') {
+                $service
+            }
+        }
+    )
+    $optionalPreviouslyMonitored = @($services | Where-Object {
+            $name = [string]$_.Name
+            $name -ieq 'SQLSERVERAGENT' -or
+            $name -match '(?i)^SQLAgent\$[^$]+$' -or
+            $name -ieq 'SQLBrowser'
+        })
+
+    # Preserve the previous result keys as healthy so any delivered Agent or
+    # Browser alert receives one recovery when this release is installed.
+    foreach ($service in ($optionalPreviouslyMonitored | Sort-Object -Property DisplayName, Name)) {
+        $display = Get-D4AWindowsServiceDisplayName -Service $service
+        $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}; optional SQL service ignored because only Database Engine availability is mandatory.' -f
+            $display, $service.Name, $service.State, $service.Status, $service.StartMode
+        $serviceKey = 'server-sql-service-{0}' -f $service.Name
+        Add-MonitorResult -Severity OK -Category Server -Check 'Optional SQL Server service' -Message $message -Key $serviceKey
+    }
+
+    if ($databaseEngines.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine' -Message (
+            'No SQL Server Database Engine service (MSSQLSERVER or MSSQL$<instance>) was found; database-engine service monitoring was skipped.'
+        ) -Key 'server-sql-services'
+        return
+    }
+
+    $runningEngines = @($databaseEngines | Where-Object {
+            $status = [string]$_.Status
+            [string]$_.State -eq 'Running' -and
+                ([string]::IsNullOrWhiteSpace($status) -or $status -eq 'OK')
+        })
+
+    # Database connectivity checks validate every configured D4A database
+    # separately. This service-level check therefore reports one aggregate
+    # outage only when no local Database Engine instance is running. Stopped
+    # leftover instances must not alert while another engine is available.
+    foreach ($service in ($databaseEngines | Sort-Object -Property DisplayName, Name)) {
+        $display = Get-D4AWindowsServiceDisplayName -Service $service
+        $message = '{0} [{1}]; State={2}; Status={3}; StartMode={4}' -f
+            $display, $service.Name, $service.State, $service.Status, $service.StartMode
+        $serviceKey = 'server-sql-service-{0}' -f $service.Name
+
+        if ($runningEngines -contains $service) {
+            $message += '; running Database Engine instance.'
+        }
+        else {
+            $message += '; inactive instance ignored individually; aggregate availability alerts only when no Database Engine instance is running.'
+        }
+        # Retain the historical per-service key as healthy so false alerts from
+        # earlier monitor versions receive a recovery notification.
+        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine instance' -Message $message -Key $serviceKey
+    }
+
+    $runningText = @($runningEngines | Sort-Object -Property DisplayName, Name | ForEach-Object {
+            '{0} [{1}]' -f (Get-D4AWindowsServiceDisplayName -Service $_), $_.Name
+        }) -join ', '
+    if ($runningEngines.Count -gt 0) {
+        Add-MonitorResult -Severity OK -Category Server -Check 'SQL Server Database Engine availability' -Message (
+            '{0} of {1} Database Engine service(s) running: {2}' -f
+                $runningEngines.Count, $databaseEngines.Count, $runningText
+        ) -Key 'server-sql-services'
+    }
+    else {
+        $detectedText = @($databaseEngines | Sort-Object -Property DisplayName, Name | ForEach-Object {
+                '{0} [{1}]; State={2}; Status={3}' -f
+                    (Get-D4AWindowsServiceDisplayName -Service $_), $_.Name, $_.State, $_.Status
+            }) -join ' | '
+        Add-MonitorResult -Severity Alert -Category Server -Check 'SQL Server Database Engine availability' -Message (
+            'No SQL Server Database Engine instance is running. Detected services: {0}' -f $detectedText
+        ) -Key 'server-sql-services'
+    }
+}
+
+# ==============================================================================
+# Decide4Action 4.0 instance discovery
+# ------------------------------------------------------------------------------
+# The 4.0 installer deploys each instance below <base>\<instance> (default
+# C:\Decide4Action\<name>), keeps dbconfig.js in <instance>\API, names services
+# per instance, places nginx, Node-RED, the Node runtime, and the Node Watchdog
+# service in machine-wide folders below <base>, and may store D4AKEY/D4AIV only
+# in the API service environment. Discovery is read-only and never throws: a
+# missing source simply contributes nothing.
+# ==============================================================================
+
+function Add-D4ADiscoveryNote {
+    param([Parameter(Mandatory = $true)][string]$Message)
+
+    if (-not $script:D4ADiscoveryNotes.Contains($Message)) {
+        $script:D4ADiscoveryNotes.Add($Message) | Out-Null
+    }
+}
+
+function Test-D4APathUnderFolder {
+    param(
+        [AllowNull()][string]$Path,
+        [AllowNull()][string]$Folder
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Folder)) { return $false }
+    $normalizedFolder = $Folder.TrimEnd('\')
+    # A drive root is never treated as an instance or base folder.
+    if ($normalizedFolder.Length -le 2) { return $false }
+    return (
+        $Path.Equals($normalizedFolder, [StringComparison]::OrdinalIgnoreCase) -or
+        $Path.StartsWith($normalizedFolder + '\', [StringComparison]::OrdinalIgnoreCase)
+    )
+}
+
+function Get-D4APathCandidatesFromText {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+    $results = [System.Collections.Generic.List[string]]::new()
+    $expanded = [Environment]::ExpandEnvironmentVariables($Text)
+    $pattern = '"(?<Quoted>[A-Za-z]:\\[^"]+)"|(?<Executable>[A-Za-z]:\\.+?\.(?:exe|js|cmd|bat|ps1))(?=\s|$)|(?<Plain>[A-Za-z]:\\[^\s"]+)'
+    foreach ($match in [regex]::Matches($expanded, $pattern)) {
+        $value = if ($match.Groups['Quoted'].Success) {
+            $match.Groups['Quoted'].Value
+        }
+        elseif ($match.Groups['Executable'].Success) {
+            $match.Groups['Executable'].Value
+        }
+        else {
+            $match.Groups['Plain'].Value
+        }
+        $value = $value.Trim().TrimEnd('\')
+        if (-not [string]::IsNullOrWhiteSpace($value) -and -not $results.Contains($value)) {
+            $results.Add($value) | Out-Null
+        }
+    }
+    return @($results.ToArray())
+}
+
+function Get-D4AServiceInventory {
+    if ($null -ne $script:D4AServiceInventoryCache) { return @($script:D4AServiceInventoryCache) }
+
+    $services = @()
+    try {
+        $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    }
+    catch {
+        Add-D4ADiscoveryNote -Message ('Windows service inventory is unavailable for D4A instance discovery: {0}' -f $_.Exception.Message)
+    }
+    $script:D4AServiceInventoryCache = $services
+    return @($services)
+}
+
+function Reset-D4ADiscoveryCache {
+    $script:D4AServiceInventoryCache = $null
+    $script:D4AInstanceLayoutCache = $null
+    $script:D4AApiEndpointCache = $null
+    $script:D4AServiceCommandPathCache = @{}
+    $script:D4ADiscoveryNotes.Clear()
+}
+
+function Get-D4AServiceCommandPaths {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    $cacheKey = [string]$Service.Name
+    if (-not [string]::IsNullOrWhiteSpace($cacheKey) -and $script:D4AServiceCommandPathCache.ContainsKey($cacheKey)) {
+        return @($script:D4AServiceCommandPathCache[$cacheKey])
+    }
+    $paths = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in @(Get-D4APathCandidatesFromText -Text ([string]$Service.PathName))) {
+        if (-not $paths.Contains($candidate)) { $paths.Add($candidate) | Out-Null }
+    }
+
+    # NSSM-hosted services expose the real application and working folder in
+    # the service Parameters key; the 3.9 and 4.0 D4A services both use NSSM.
+    $serviceName = [string]$Service.Name
+    if (-not [string]::IsNullOrWhiteSpace($serviceName)) {
+        try {
+            $parameters = Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\{0}\Parameters' -f $serviceName) -ErrorAction Stop
+            foreach ($valueName in @('Application', 'AppDirectory', 'AppParameters')) {
+                $property = $parameters.PSObject.Properties[$valueName]
+                if ($null -eq $property -or $null -eq $property.Value) { continue }
+                foreach ($candidate in @(Get-D4APathCandidatesFromText -Text ([string]$property.Value))) {
+                    if (-not $paths.Contains($candidate)) { $paths.Add($candidate) | Out-Null }
+                }
+            }
+        }
+        catch {
+            # Services without NSSM parameters are expected.
+        }
+    }
+    $result = @($paths.ToArray())
+    if (-not [string]::IsNullOrWhiteSpace($cacheKey)) { $script:D4AServiceCommandPathCache[$cacheKey] = $result }
+    return $result
+}
+
+function Get-D4AInstanceLayoutFromFolder {
+    param([AllowNull()][string]$Folder)
+
+    if ([string]::IsNullOrWhiteSpace($Folder)) { return $null }
+    try {
+        $fullPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Folder)).TrimEnd('\')
+        if ($fullPath.Length -le 2 -or -not [IO.Directory]::Exists($fullPath)) { return $null }
+
+        # A 3.9 root contains Services\API\dbconfig.js. Never classify its
+        # Services subfolder, or a renamed copy such as Services_old, as a
+        # 4.0 instance root.
+        if ([IO.Path]::GetFileName($fullPath) -match '(?i)^Services') { return $null }
+
+        $dbConfig40 = [IO.Path]::Combine($fullPath, 'API', 'dbconfig.js')
+        if ([IO.File]::Exists($dbConfig40)) {
+            return [pscustomobject]@{ Root = $fullPath; Platform = '4.0'; DbConfigPath = $dbConfig40 }
+        }
+        $dbConfig39 = [IO.Path]::Combine($fullPath, 'Services', 'API', 'dbconfig.js')
+        if ([IO.File]::Exists($dbConfig39)) {
+            return [pscustomobject]@{ Root = $fullPath; Platform = '3.9'; DbConfigPath = $dbConfig39 }
+        }
+    }
+    catch {
+        # Invalid or inaccessible paths are ignored.
+    }
+    return $null
+}
+
+function Find-D4AInstanceLayoutFromPath {
+    param(
+        [AllowNull()][string]$Path,
+        [ValidateRange(1, 8)][int]$MaximumLevels = 6
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    try {
+        $current = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path)).TrimEnd('\')
+    }
+    catch {
+        return $null
+    }
+    if ([IO.File]::Exists($current)) { $current = [IO.Path]::GetDirectoryName($current) }
+
+    for ($level = 0; $level -lt $MaximumLevels -and -not [string]::IsNullOrWhiteSpace($current); $level++) {
+        $layout = Get-D4AInstanceLayoutFromFolder -Folder $current
+        if ($null -ne $layout) { return $layout }
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) { break }
+        $current = $parent
+    }
+    return $null
+}
+
+function Get-D4ABaseFolderCandidates {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in @(
+            $D4ABaseFolder,
+            'C:\Decide4Action',
+            'D:\Decide4Action',
+            'E:\Decide4Action',
+            (Split-Path -Parent $script:ScriptDirectory)
+        )) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+        try {
+            $expanded = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$candidate)).TrimEnd('\')
+            if ($expanded.Length -gt 2 -and [IO.Directory]::Exists($expanded) -and -not $candidates.Contains($expanded)) {
+                $candidates.Add($expanded) | Out-Null
+            }
+        }
+        catch {
+            # Ignore malformed candidates.
+        }
+    }
+    return @($candidates.ToArray())
+}
+
+function Get-D4AInstanceLayouts {
+    if ($null -ne $script:D4AInstanceLayoutCache) { return @($script:D4AInstanceLayoutCache) }
+
+    $layouts = [System.Collections.Generic.List[object]]::new()
+    $seenRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-D4ADiscoveredLayout {
+        param($Layout, [string]$Source)
+
+        if ($null -eq $Layout) { return }
+        if (-not $seenRoots.Add([string]$Layout.Root)) { return }
+        $layouts.Add([pscustomobject]@{
+                Root         = [string]$Layout.Root
+                Name         = [IO.Path]::GetFileName([string]$Layout.Root)
+                Platform     = [string]$Layout.Platform
+                DbConfigPath = [string]$Layout.DbConfigPath
+                BaseFolder   = [IO.Path]::GetDirectoryName([string]$Layout.Root)
+                Source       = $Source
+                Services     = [System.Collections.Generic.List[object]]::new()
+            }) | Out-Null
+    }
+
+    foreach ($root in @($D4AInstallRoot, $env:D4A_HOME)) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        Add-D4ADiscoveredLayout -Layout (Find-D4AInstanceLayoutFromPath -Path ([string]$root) -MaximumLevels 2) -Source 'configured install root'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($DbConfigPath)) {
+        Add-D4ADiscoveredLayout -Layout (Find-D4AInstanceLayoutFromPath -Path $DbConfigPath -MaximumLevels 4) -Source 'configured DbConfigPath'
+    }
+
+    foreach ($baseFolder in @(Get-D4ABaseFolderCandidates)) {
+        Add-D4ADiscoveredLayout -Layout (Get-D4AInstanceLayoutFromFolder -Folder $baseFolder) -Source 'base folder'
+        foreach ($child in @(Get-ChildItem -LiteralPath $baseFolder -Directory -ErrorAction SilentlyContinue)) {
+            Add-D4ADiscoveredLayout -Layout (Get-D4AInstanceLayoutFromFolder -Folder $child.FullName) -Source 'base folder'
+        }
+    }
+
+    $services = @(Get-D4AServiceInventory)
+    $systemRoot = [string]$env:SystemRoot
+    foreach ($service in $services) {
+        $pathName = [string]$service.PathName
+        if ([string]::IsNullOrWhiteSpace($pathName)) { continue }
+        if (-not [string]::IsNullOrWhiteSpace($systemRoot) -and
+            [Environment]::ExpandEnvironmentVariables($pathName).TrimStart('"').StartsWith($systemRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        foreach ($commandPath in @(Get-D4AServiceCommandPaths -Service $service)) {
+            Add-D4ADiscoveredLayout -Layout (Find-D4AInstanceLayoutFromPath -Path $commandPath) -Source ('service {0}' -f $service.Name)
+        }
+    }
+
+    # Attach each Windows service to the instance whose folder contains it.
+    foreach ($service in $services) {
+        $commandPaths = @(Get-D4AServiceCommandPaths -Service $service)
+        foreach ($layout in $layouts) {
+            if (@($commandPaths | Where-Object { Test-D4APathUnderFolder -Path $_ -Folder $layout.Root }).Count -gt 0) {
+                $layout.Services.Add($service) | Out-Null
+                break
+            }
+        }
+    }
+
+    # API\dbconfig.js alone can be a copied folder. A 4.0 instance must also
+    # host a Windows service, be configured explicitly, or sit beside the
+    # installer Node runtime (<base>\Runtime). Unconfirmed folders are ignored.
+    $confirmed = [System.Collections.Generic.List[object]]::new()
+    foreach ($layout in $layouts) {
+        if ($layout.Platform -eq '4.0') {
+            $runtimeExists = -not [string]::IsNullOrWhiteSpace($layout.BaseFolder) -and [IO.Directory]::Exists([IO.Path]::Combine($layout.BaseFolder, 'Runtime'))
+            $configured = $layout.Source -in @('configured install root', 'configured DbConfigPath')
+            if ($layout.Services.Count -eq 0 -and -not $runtimeExists -and -not $configured) {
+                Add-D4ADiscoveryNote -Message ('Ignored {0}: it contains API\dbconfig.js but no D4A service, configuration entry, or <base>\Runtime confirms a 4.0 instance.' -f $layout.Root)
+                continue
+            }
+        }
+        $confirmed.Add($layout) | Out-Null
+    }
+    $result = @($confirmed.ToArray() | Sort-Object -Property Platform, Root)
+    $script:D4AInstanceLayoutCache = $result
+    foreach ($layout in $result) {
+        Add-D4ADiscoveryNote -Message (
+            'D4A {0} instance discovered: root={1}; dbconfig={2}; services={3}; source={4}' -f
+                $layout.Platform, $layout.Root, $layout.DbConfigPath, $layout.Services.Count, $layout.Source
+        )
+    }
+    if ($result.Count -eq 0) {
+        Add-D4ADiscoveryNote -Message 'No D4A 3.9 or 4.0 instance folder was discovered; configured paths and legacy defaults are used.'
+    }
+    return $result
+}
+
+function Test-D4AHas40Instance {
+    return @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' }).Count -gt 0
+}
+
+function Get-D4AInstanceLayoutForPath {
+    param([AllowNull()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    foreach ($layout in @(Get-D4AInstanceLayouts)) {
+        if (Test-D4APathUnderFolder -Path $Path -Folder $layout.Root) { return $layout }
+    }
+    return $null
+}
+
+function Get-D4A40BaseFolders {
+    $folders = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in @(@($D4ABaseFolder) + @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' } | ForEach-Object { $_.BaseFolder }))) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+        try {
+            $expanded = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$candidate)).TrimEnd('\')
+            if ($expanded.Length -gt 2 -and [IO.Directory]::Exists($expanded) -and -not $folders.Contains($expanded)) { $folders.Add($expanded) | Out-Null }
+        }
+        catch { }
+    }
+    return @($folders.ToArray())
+}
+
+function Get-D4AServiceInstanceLayout {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    $serviceName = [string]$Service.Name
+    foreach ($layout in @(Get-D4AInstanceLayouts)) {
+        if (@($layout.Services | Where-Object { [string]$_.Name -ieq $serviceName }).Count -gt 0) { return $layout }
+    }
+    return $null
+}
+
+function Test-D4AServiceInD4A40Instance {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    # Path-based scope applies only to 4.0 instances so 3.9 servers keep the
+    # exact 3.9 service scope and do not receive new alerts.
+    $layout = Get-D4AServiceInstanceLayout -Service $Service
+    return $null -ne $layout -and $layout.Platform -eq '4.0'
+}
+
+function Test-D4AServiceUnderD4A40Base {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    $baseFolders = @(Get-D4A40BaseFolders)
+    if ($baseFolders.Count -eq 0) { return $false }
+    foreach ($commandPath in @(Get-D4AServiceCommandPaths -Service $Service)) {
+        foreach ($baseFolder in $baseFolders) {
+            if (Test-D4APathUnderFolder -Path $commandPath -Folder $baseFolder) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-D4AInstanceApiService {
+    param(
+        [Parameter(Mandatory = $true)]$Service,
+        [Parameter(Mandatory = $true)]$Layout
+    )
+
+    $apiFolder = Join-Path $Layout.Root 'API'
+    return @(Get-D4AServiceCommandPaths -Service $Service | Where-Object { Test-D4APathUnderFolder -Path $_ -Folder $apiFolder }).Count -gt 0
+}
+
+function Get-D4ATcpListeners {
+    $listeners = [System.Collections.Generic.List[object]]::new()
+    $connectionQueryFailed = $false
+    if ($null -ne (Get-Command -Name Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+        try {
+            foreach ($connection in @(Get-NetTCPConnection -State Listen -ErrorAction Stop)) {
+                $listeners.Add([pscustomobject]@{ Port = [int]$connection.LocalPort; ProcessId = [int]$connection.OwningProcess }) | Out-Null
+            }
+            return @($listeners.ToArray())
+        }
+        catch {
+            $connectionQueryFailed = $true
+            Write-ErrorLog -Level Warning -Category Server -Message (
+                'Get-NetTCPConnection could not list listening ports; trying netstat: {0}' -f $_.Exception.Message
+            )
+        }
+    }
+
+    $netstatCommand = Get-Command -Name netstat.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $netstatCommand) {
+        throw 'Neither Get-NetTCPConnection nor netstat.exe can inspect listening TCP ports.'
+    }
+    foreach ($row in @(& $netstatCommand.Source -ano -p tcp 2>$null)) {
+        # A listening socket has a 0.0.0.0:0 or [::]:0 remote address; the
+        # state word itself is localized on non-English Windows.
+        if ([string]$row -match '^\s*TCP\s+\S+:(?<Port>\d+)\s+(?:0\.0\.0\.0:0|\[::\]:0)\s+\S+\s+(?<Pid>\d+)\s*$') {
+            $listeners.Add([pscustomobject]@{ Port = [int]$matches.Port; ProcessId = [int]$matches.Pid }) | Out-Null
+        }
+    }
+    [void]$connectionQueryFailed
+    return @($listeners.ToArray())
+}
+
+function Get-D4AProcessTreeIds {
+    param(
+        [Parameter(Mandatory = $true)][int]$RootProcessId,
+        [AllowNull()][object[]]$Processes
+    )
+
+    $ids = [System.Collections.Generic.List[int]]::new()
+    $ids.Add($RootProcessId) | Out-Null
+    $frontier = @($RootProcessId)
+    for ($depth = 0; $depth -lt 3 -and $frontier.Count -gt 0; $depth++) {
+        $children = @($Processes | Where-Object {
+                $null -ne $_ -and $frontier -contains [int]$_.ParentProcessId -and -not $ids.Contains([int]$_.ProcessId)
+            } | ForEach-Object { [int]$_.ProcessId })
+        foreach ($child in $children) { $ids.Add($child) | Out-Null }
+        $frontier = $children
+    }
+    return @($ids.ToArray())
+}
+
+function Get-D4APreferredApiPort {
+    param([AllowNull()][int[]]$Ports)
+
+    $validPorts = @($Ports | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+    if ($validPorts.Count -eq 0) { return 0 }
+    if ($validPorts -contains $script:LegacyApiPort) { return $script:LegacyApiPort }
+    return [int]$validPorts[0]
+}
+
+function Get-D4ADiscoveredApiEndpoints {
+    if ($null -ne $script:D4AApiEndpointCache) { return @($script:D4AApiEndpointCache) }
+
+    $endpoints = [System.Collections.Generic.List[object]]::new()
+    $instances = @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' })
+    if ($instances.Count -gt 0) {
+        $processes = @()
+        $listeners = @()
+        $inventoryComplete = $true
+        try { $processes = @(Get-SystemClassInstance -ClassName Win32_Process) }
+        catch {
+            $inventoryComplete = $false
+            Add-D4ADiscoveryNote -Message ('Process inventory is unavailable for API port discovery: {0}' -f $_.Exception.Message)
+        }
+        try { $listeners = @(Get-D4ATcpListeners) }
+        catch {
+            $inventoryComplete = $false
+            Add-D4ADiscoveryNote -Message ('Listening-port inventory is unavailable for API port discovery: {0}' -f $_.Exception.Message)
+        }
+
+        foreach ($layout in $instances) {
+            foreach ($service in @($layout.Services | Where-Object { Test-D4AInstanceApiService -Service $_ -Layout $layout })) {
+                $processId = 0
+                [void][int]::TryParse([string]$service.ProcessId, [ref]$processId)
+                $processIds = if ($processId -gt 0) { @(Get-D4AProcessTreeIds -RootProcessId $processId -Processes $processes) } else { @() }
+                $ports = @($listeners | Where-Object { $processIds -contains [int]$_.ProcessId } | ForEach-Object { [int]$_.Port } | Sort-Object -Unique)
+                $endpoint = [pscustomobject]@{
+                    InstanceRoot  = $layout.Root
+                    InstanceName  = $layout.Name
+                    ServiceName   = [string]$service.Name
+                    DisplayName   = [string]$service.DisplayName
+                    State         = [string]$service.State
+                    ProcessIds    = $processIds
+                    Ports         = $ports
+                    PreferredPort = Get-D4APreferredApiPort -Ports $ports
+                    InventoryComplete = $inventoryComplete
+                }
+                $endpoints.Add($endpoint) | Out-Null
+                Add-D4ADiscoveryNote -Message (
+                    'D4A 4.0 API service {0} [{1}] for instance {2}: state={3}; listening port(s)={4}' -f
+                        $endpoint.DisplayName, $endpoint.ServiceName, $endpoint.InstanceName, $endpoint.State,
+                        $(if ($ports.Count -gt 0) { $ports -join ', ' } else { 'none' })
+                )
+            }
+        }
+    }
+
+    $script:D4AApiEndpointCache = @($endpoints.ToArray())
+    return @($script:D4AApiEndpointCache)
+}
+
+function Get-D4ADefaultLocalApiPort {
+    try {
+        $ports = @(Get-D4ADiscoveredApiEndpoints | ForEach-Object { [int]$_.PreferredPort } | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+        if ($ports.Count -eq 1) { return [int]$ports[0] }
+    }
+    catch {
+        # Fall back to the historical 3.9 port.
+    }
+    return $script:LegacyApiPort
+}
+
+function Get-D4ALocalApiPortForLegacyAddress {
+    # Use the discovered 4.0 port only when nothing listens on 32167 and
+    # exactly one 4.0 API port exists, so a 3.9 API on 32167 keeps its port.
+    $discoveredPort = Get-D4ADefaultLocalApiPort
+    if ($discoveredPort -eq $script:LegacyApiPort) { return $script:LegacyApiPort }
+    try {
+        if (@(Get-D4ATcpListeners | Where-Object { $_.Port -eq $script:LegacyApiPort }).Count -gt 0) { return $script:LegacyApiPort }
+    }
+    catch {
+        return $script:LegacyApiPort
+    }
+    return $discoveredPort
+}
+
+function Test-D4AUriTargetsLocalServer {
+    param([Parameter(Mandatory = $true)][Uri]$Uri)
+
+    $hostName = $Uri.DnsSafeHost
+    if ($hostName -ieq 'hostname') { return $true }
+    return Test-D4ADatabaseServerIsLocal -Server $hostName
+}
+
+function Resolve-D4ALegacyLocalApiUri {
+    param([Parameter(Mandatory = $true)][Uri]$ApiUri)
+
+    # IT Tools 3.9 deployments store local API addresses on port 32167. A 4.0
+    # instance can use another port; redirect only when nothing listens on
+    # 32167 and exactly one 4.0 API port was discovered on this server.
+    if ($ApiUri.Port -ne $script:LegacyApiPort -or -not (Test-D4AUriTargetsLocalServer -Uri $ApiUri)) { return $ApiUri }
+    $discoveredPort = Get-D4ALocalApiPortForLegacyAddress
+    if ($discoveredPort -eq $script:LegacyApiPort) { return $ApiUri }
+
+    $builder = [UriBuilder]::new($ApiUri)
+    $builder.Port = $discoveredPort
+    Add-D4ADiscoveryNote -Message (
+        'Configured local API address {0} uses legacy port {1}, which is not listening; the discovered D4A 4.0 API port {2} is used for this run. Update ApiAddress in the JSON configuration to make this permanent.' -f
+            $ApiUri.AbsoluteUri, $script:LegacyApiPort, $discoveredPort
+    )
+    return $builder.Uri
+}
+
+function Get-MonitorEffectiveLocalApiTargets {
+    $configuredUri = @(ConvertTo-HttpUris -Addresses $LocalApiAddress)[0]
+    $isLegacyDefault = $configuredUri.AbsoluteUri.TrimEnd('/') -ieq $script:DefaultLocalApiAddress.TrimEnd('/')
+    $explicitlyConfigured = ($script:CommandLineParameterNames -contains 'LocalApiAddress') -or -not $isLegacyDefault
+    $discovered = @(Get-D4ADiscoveredApiEndpoints | Where-Object { $_.PreferredPort -gt 0 })
+
+    if ($explicitlyConfigured -or $discovered.Count -eq 0) {
+        return @([pscustomobject]@{ Name = 'Direct API'; BaseUri = (Get-AuthorityBaseUri -Uri $configuredUri); Source = 'LocalApiAddress'; Discovered = $false })
+    }
+
+    $targets = [System.Collections.Generic.List[object]]::new()
+    foreach ($endpoint in $discovered) {
+        $name = if ($discovered.Count -eq 1) { 'Direct API' } else { 'Direct API {0}' -f $endpoint.InstanceName }
+        $baseUri = [UriBuilder]::new($configuredUri.Scheme, $configuredUri.DnsSafeHost, [int]$endpoint.PreferredPort, '/').Uri
+        $targets.Add([pscustomobject]@{ Name = $name; BaseUri = $baseUri; Source = ('discovered API service {0}' -f $endpoint.ServiceName); Discovered = $true }) | Out-Null
+    }
+    return @($targets.ToArray())
+}
+
+function Get-MonitorApplicationPerformanceEndpoints {
+    return @(
+        $ApplicationPerformanceEndpoints -split ',' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { '/' + $_.TrimStart('/') } |
+            Select-Object -Unique
+    )
+}
+
+function Get-D4AEnvironmentFileValues {
+    param([AllowNull()][string]$Path)
+
+    $values = @{}
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $values }
+    try {
+        foreach ($line in @([IO.File]::ReadAllLines($Path))) {
+            if ([string]$line -match '^\s*(?:export\s+)?(?<Name>D4AKEY|D4AIV)\s*=\s*(?<Value>.*?)\s*$') {
+                $values[$matches.Name.ToUpperInvariant()] = $matches.Value.Trim().Trim('"').Trim("'")
+            }
+        }
+    }
+    catch {
+        # An unreadable optional file contributes no key.
+    }
+    return $values
+}
+
+function Get-D4AServiceEnvironmentValues {
+    param([Parameter(Mandatory = $true)]$Service)
+
+    # Only D4AKEY and D4AIV are read. Values are never logged.
+    $values = @{}
+    $serviceName = [string]$Service.Name
+    if ([string]::IsNullOrWhiteSpace($serviceName)) { return $values }
+    $serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\{0}' -f $serviceName
+    foreach ($location in @(
+            [pscustomobject]@{ Path = $serviceKey; Name = 'Environment' },
+            [pscustomobject]@{ Path = ('{0}\Parameters' -f $serviceKey); Name = 'AppEnvironmentExtra' },
+            [pscustomobject]@{ Path = ('{0}\Parameters' -f $serviceKey); Name = 'AppEnvironment' }
+        )) {
+        try {
+            $item = Get-ItemProperty -LiteralPath $location.Path -ErrorAction Stop
+            $property = $item.PSObject.Properties[$location.Name]
+            if ($null -eq $property -or $null -eq $property.Value) { continue }
+            foreach ($entry in @($property.Value)) {
+                $text = [string]$entry
+                $separator = $text.IndexOf('=')
+                if ($separator -le 0) { continue }
+                $name = $text.Substring(0, $separator).Trim().ToUpperInvariant()
+                if ($name -notin @('D4AKEY', 'D4AIV')) { continue }
+                if (-not $values.ContainsKey($name)) { $values[$name] = $text.Substring($separator + 1).Trim() }
+            }
+        }
+        catch {
+            # The value is absent or this account cannot read the service key.
+        }
+    }
+
+    # WinSW-hosted services keep environment entries beside the wrapper.
+    foreach ($commandPath in @(Get-D4AServiceCommandPaths -Service $Service | Where-Object { $_ -match '(?i)\.exe$' })) {
+        $xmlPath = [IO.Path]::ChangeExtension($commandPath, '.xml')
+        if (-not (Test-Path -LiteralPath $xmlPath -PathType Leaf)) { continue }
+        try {
+            [xml]$wrapperXml = [IO.File]::ReadAllText($xmlPath)
+            foreach ($node in @($wrapperXml.SelectNodes('//env'))) {
+                $name = ([string]$node.GetAttribute('name')).Trim().ToUpperInvariant()
+                if ($name -in @('D4AKEY', 'D4AIV') -and -not $values.ContainsKey($name)) {
+                    $values[$name] = ([string]$node.GetAttribute('value')).Trim()
+                }
+            }
+        }
+        catch {
+            # Not a WinSW configuration file.
+        }
+    }
+    return $values
+}
+
+function Get-D4ADatabaseKeyCandidates {
+    param([AllowNull()][string]$ConfigPath)
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    function Add-D4AKeyCandidate {
+        param([AllowNull()][string]$Key, [AllowNull()][string]$IV, [Parameter(Mandatory = $true)][string]$Source)
+
+        if ([string]::IsNullOrWhiteSpace($Key) -or [string]::IsNullOrWhiteSpace($IV)) { return }
+        if ($seen.Add(('{0}|{1}' -f $Key, $IV))) {
+            $candidates.Add([pscustomobject]@{ Key = $Key; IV = $IV; Source = $Source }) | Out-Null
+        }
+    }
+
+    foreach ($scope in @('Process', 'Machine', 'User')) {
+        Add-D4AKeyCandidate `
+            -Key ([Environment]::GetEnvironmentVariable('D4AKEY', $scope)) `
+            -IV ([Environment]::GetEnvironmentVariable('D4AIV', $scope)) `
+            -Source ('{0} environment' -f $scope.ToLowerInvariant())
+    }
+    try {
+        Add-D4AKeyCandidate -Key (Get-D4AEnvironmentSecret -Name D4AKEY) -IV (Get-D4AEnvironmentSecret -Name D4AIV) -Source 'combined environment scopes'
+    }
+    catch {
+        # Decide4Action 4.0 may keep the keys only in the service environment.
+    }
+
+    $layout = Get-D4AInstanceLayoutForPath -Path $ConfigPath
+    $orderedServices = [System.Collections.Generic.List[object]]::new()
+    if ($null -ne $layout) {
+        foreach ($service in @($layout.Services | Where-Object { Test-D4AInstanceApiService -Service $_ -Layout $layout })) { $orderedServices.Add($service) | Out-Null }
+        foreach ($service in @($layout.Services)) { if (-not $orderedServices.Contains($service)) { $orderedServices.Add($service) | Out-Null } }
+    }
+    foreach ($service in @(Get-D4AServiceInventory | Where-Object {
+                ('{0} {1}' -f [string]$_.Name, [string]$_.DisplayName) -match '(?i)(?:^|[^a-z0-9])(?:D4A|Decide4Action)'
+            })) {
+        if (@($orderedServices | Where-Object { [string]$_.Name -ieq [string]$service.Name }).Count -eq 0) { $orderedServices.Add($service) | Out-Null }
+    }
+    foreach ($service in $orderedServices) {
+        $environment = Get-D4AServiceEnvironmentValues -Service $service
+        if ($environment.ContainsKey('D4AKEY') -and $environment.ContainsKey('D4AIV')) {
+            Add-D4AKeyCandidate -Key $environment['D4AKEY'] -IV $environment['D4AIV'] -Source ('service environment of {0}' -f $service.Name)
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+        $environmentFile = Join-Path (Split-Path -Parent $ConfigPath) '.env'
+        $fileValues = Get-D4AEnvironmentFileValues -Path $environmentFile
+        if ($fileValues.ContainsKey('D4AKEY') -and $fileValues.ContainsKey('D4AIV')) {
+            Add-D4AKeyCandidate -Key $fileValues['D4AKEY'] -IV $fileValues['D4AIV'] -Source ('environment file {0}' -f $environmentFile)
+        }
+    }
+    return @($candidates.ToArray())
+}
+
+function Test-D4ADecryptedTextPlausible {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrEmpty($Value)) { return $false }
+    foreach ($character in $Value.ToCharArray()) {
+        if ([int]$character -lt 32 -or [int]$character -eq 0xFFFD) { return $false }
+    }
+    return $true
+}
+
+function Get-D4ADatabaseConfigPaths {
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-D4ADatabaseConfigPath {
+        param([AllowNull()][string]$Path)
+
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        try {
+            $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
+            if (-not (Test-Path -LiteralPath $expandedPath -PathType Leaf)) { return }
+            $resolvedPath = (Resolve-Path -LiteralPath $expandedPath -ErrorAction Stop).Path
+            if ($seen.Add($resolvedPath)) {
+                $paths.Add($resolvedPath) | Out-Null
+            }
+        }
+        catch {
+            # One unavailable installation must not prevent checks for others.
+        }
+    }
+
+    Add-D4ADatabaseConfigPath -Path $DbConfigPath
+    foreach ($root in @($D4AInstallRoot, $env:D4A_HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
+            $expandedRoot = [Environment]::ExpandEnvironmentVariables([string]$root)
+            # Decide4Action 4.0: <instance>\API\dbconfig.js; 3.9: <root>\Services\API\dbconfig.js.
+            Add-D4ADatabaseConfigPath -Path (Join-Path $expandedRoot 'API\dbconfig.js')
+            Add-D4ADatabaseConfigPath -Path (Join-Path $expandedRoot 'Services\API\dbconfig.js')
+        }
+    }
+    # Discovered 4.0 instances only: 3.9 database discovery stays exactly as
+    # in the 3.9 monitor.
+    foreach ($layout in @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' })) {
+        Add-D4ADatabaseConfigPath -Path $layout.DbConfigPath
+    }
+
+    try {
+        $dataCollectorServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop | Where-Object {
+                ([string]$_.Name -match '(?i)^(?:Decide4Action|D4A).*data\s*collector') -or
+                ([string]$_.DisplayName -match '(?i)^(?:Decide4Action|D4A).*data\s*collector')
+            })
+        foreach ($service in $dataCollectorServices) {
+            $pathName = [Environment]::ExpandEnvironmentVariables([string]$service.PathName)
+            $executablePath = if ($pathName -match '^\s*"(?<Path>[^"]+\.exe)"') {
+                $Matches['Path']
+            }
+            elseif ($pathName -match '(?i)^\s*(?<Path>.+?\.exe)(?:\s|$)') {
+                $Matches['Path'].Trim()
+            }
+            else {
+                $null
+            }
+            if ([string]::IsNullOrWhiteSpace($executablePath)) { continue }
+
+            try {
+                # Data Collector.exe is located below <D4A root>\Data Collector.
+                $dataCollectorFolder = Split-Path -Parent ([IO.Path]::GetFullPath($executablePath))
+                $applicationRoot = Split-Path -Parent $dataCollectorFolder
+                Add-D4ADatabaseConfigPath -Path (Join-Path $applicationRoot 'API\dbconfig.js')
+                Add-D4ADatabaseConfigPath -Path (Join-Path $applicationRoot 'Services\API\dbconfig.js')
+            }
+            catch {
+                # Keep checking other installed Data Collectors.
+            }
+        }
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Database -Color Yellow -Message (
+            'Unable to discover dbconfig.js files from Data Collector services: {0}' -f $_.Exception.Message
+        )
+    }
+
+    return @($paths.ToArray() | Sort-Object)
+}
+
+function Find-D4AJavaScriptMatchingBrace {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][int]$OpenIndex
+    )
+
+    $depth = 0
+    $quote = $null
+    $escaped = $false
+    $lineComment = $false
+    $blockComment = $false
+    for ($index = $OpenIndex; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        $nextCharacter = if ($index + 1 -lt $Text.Length) { $Text[$index + 1] } else { [char]0 }
+        if ($lineComment) {
+            if ($character -eq "`n") { $lineComment = $false }
+            continue
+        }
+        if ($blockComment) {
+            if ($character -eq '*' -and $nextCharacter -eq '/') { $blockComment = $false; $index++ }
+            continue
+        }
+        if ($null -ne $quote) {
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq $quote) { $quote = $null }
+            continue
+        }
+        if ($character -eq '/' -and $nextCharacter -eq '/') { $lineComment = $true; $index++; continue }
+        if ($character -eq '/' -and $nextCharacter -eq '*') { $blockComment = $true; $index++; continue }
+        if ($character -eq "'" -or $character -eq '"' -or $character -eq '`') { $quote = $character; continue }
+        if ($character -eq '{') { $depth++ }
+        elseif ($character -eq '}') {
+            $depth--
+            if ($depth -eq 0) { return $index }
+        }
+    }
+    return -1
+}
+
+function Split-D4AJavaScriptTopLevelComma {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $items = [System.Collections.Generic.List[string]]::new()
+    $start = 0
+    $quote = $null
+    $escaped = $false
+    $lineComment = $false
+    $blockComment = $false
+    $depthParen = 0
+    $depthBrace = 0
+    $depthBracket = 0
+    for ($index = 0; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        $nextCharacter = if ($index + 1 -lt $Text.Length) { $Text[$index + 1] } else { [char]0 }
+        if ($lineComment) {
+            if ($character -eq "`n") { $lineComment = $false }
+            continue
+        }
+        if ($blockComment) {
+            if ($character -eq '*' -and $nextCharacter -eq '/') { $blockComment = $false; $index++ }
+            continue
+        }
+        if ($null -ne $quote) {
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq $quote) { $quote = $null }
+            continue
+        }
+        if ($character -eq '/' -and $nextCharacter -eq '/') { $lineComment = $true; $index++; continue }
+        if ($character -eq '/' -and $nextCharacter -eq '*') { $blockComment = $true; $index++; continue }
+        if ($character -eq "'" -or $character -eq '"' -or $character -eq '`') { $quote = $character; continue }
+        switch ($character) {
+            '(' { $depthParen++ }
+            ')' { $depthParen-- }
+            '{' { $depthBrace++ }
+            '}' { $depthBrace-- }
+            '[' { $depthBracket++ }
+            ']' { $depthBracket-- }
+            ',' {
+                if ($depthParen -eq 0 -and $depthBrace -eq 0 -and $depthBracket -eq 0) {
+                    $items.Add($Text.Substring($start, $index - $start).Trim()) | Out-Null
+                    $start = $index + 1
+                }
+            }
+        }
+    }
+    if ($start -lt $Text.Length) { $items.Add($Text.Substring($start).Trim()) | Out-Null }
+    return @($items | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function ConvertFrom-D4AJavaScriptLiteral {
+    param([AllowNull()][string]$Value)
+
+    if ($null -eq $Value) { return $null }
+    $trimmedValue = $Value.Trim()
+    if ($trimmedValue -match "^'(.*)'$" -or $trimmedValue -match '^"(.*)"$') {
+        $inner = $Matches[1]
+        return ($inner -replace "\\'", "'" -replace '\\"', '"' -replace '\\\\', '\')
+    }
+    if ($trimmedValue -match '^(?i:true)$') { return $true }
+    if ($trimmedValue -match '^(?i:false)$') { return $false }
+    if ($trimmedValue -match '^(?i:null|undefined)$') { return $null }
+    if ($trimmedValue -match '^-?\d+$') { return [int]$trimmedValue }
+    return $trimmedValue
+}
+
+function Get-D4AJavaScriptTopLevelProperty {
+    param(
+        [Parameter(Mandatory = $true)][string]$ObjectText,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $openIndex = $ObjectText.IndexOf('{')
+    $closeIndex = if ($openIndex -ge 0) { Find-D4AJavaScriptMatchingBrace -Text $ObjectText -OpenIndex $openIndex } else { -1 }
+    if ($openIndex -lt 0 -or $closeIndex -le $openIndex) { return $null }
+    $inner = $ObjectText.Substring($openIndex + 1, $closeIndex - $openIndex - 1)
+    $pattern = '^(?s)\s*(?:[''"]?{0}[''"]?)\s*:\s*(?<value>.+)$' -f [regex]::Escape($Name)
+    foreach ($item in @(Split-D4AJavaScriptTopLevelComma -Text $inner)) {
+        $match = [regex]::Match($item, $pattern)
+        if ($match.Success) { return ConvertFrom-D4AJavaScriptLiteral -Value $match.Groups['value'].Value }
+    }
+    return $null
+}
+
+function Get-D4ADatabaseConfigurationsFromFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $content = [IO.File]::ReadAllText($Path)
+    $configs = [System.Collections.Generic.List[object]]::new()
+    $declarationPattern = '(?m)^\s*(?:var|let|const)\s+(?<name>dbConfig)\s*='
+    foreach ($declaration in [regex]::Matches($content, $declarationPattern)) {
+        $valueStart = $declaration.Index + $declaration.Length
+        while ($valueStart -lt $content.Length -and [char]::IsWhiteSpace($content[$valueStart])) { $valueStart++ }
+        if ($valueStart -ge $content.Length -or $content[$valueStart] -ne '{') { continue }
+        $valueEnd = Find-D4AJavaScriptMatchingBrace -Text $content -OpenIndex $valueStart
+        if ($valueEnd -lt 0) { continue }
+
+        $objectText = $content.Substring($valueStart, $valueEnd - $valueStart + 1)
+        $user = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'user'
+        $password = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'password'
+        $server = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'server'
+        $database = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'database'
+        if ($null -eq $user -or $null -eq $password -or $null -eq $server -or $null -eq $database) { continue }
+
+        $optionsText = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'options'
+        $configs.Add([pscustomobject]@{
+                Name = $declaration.Groups['name'].Value
+                User = [string]$user
+                Password = [string]$password
+                Server = [string]$server
+                Database = [string]$database
+                Port = Get-D4AJavaScriptTopLevelProperty -ObjectText $objectText -Name 'port'
+                InstanceName = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'instanceName' } else { $null }
+                Encrypt = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'encrypt' } else { $null }
+                TrustServerCertificate = if ($optionsText -is [string] -and $optionsText.TrimStart().StartsWith('{')) { Get-D4AJavaScriptTopLevelProperty -ObjectText $optionsText -Name 'trustServerCertificate' } else { $null }
+            }) | Out-Null
+    }
+    return @($configs.ToArray())
+}
+
+function Get-D4AEnvironmentSecret {
+    param([Parameter(Mandatory = $true)][ValidateSet('D4AKEY', 'D4AIV')][string]$Name)
+
+    foreach ($scope in 'Process', 'Machine', 'User') {
+        $value = [Environment]::GetEnvironmentVariable($Name, $scope)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+    throw "Environment variable '$Name' was not found in Process, Machine, or User scope."
+}
+
+function Unprotect-D4APassword {
+    param(
+        [Parameter(Mandatory = $true)][string]$EncryptedPassword,
+        [string]$KeyBase64,
+        [string]$IVBase64
+    )
+
+    if ([string]::IsNullOrWhiteSpace($KeyBase64)) { $KeyBase64 = Get-D4AEnvironmentSecret -Name D4AKEY }
+    if ([string]::IsNullOrWhiteSpace($IVBase64)) { $IVBase64 = Get-D4AEnvironmentSecret -Name D4AIV }
+
+    $aes = $null
+    $decryptor = $null
+    $keyBytes = $null
+    $ivBytes = $null
+    $encryptedBytes = $null
+    $decryptedBytes = $null
+    try {
+        $keyBytes = [Convert]::FromBase64String($KeyBase64)
+        $ivBytes = [Convert]::FromBase64String($IVBase64)
+        $encryptedBytes = [Convert]::FromBase64String($EncryptedPassword)
+        if ($keyBytes.Length -ne 32) { throw "D4AKEY must decode to 32 bytes; actual length is $($keyBytes.Length)." }
+        if ($ivBytes.Length -ne 16) { throw "D4AIV must decode to 16 bytes; actual length is $($ivBytes.Length)." }
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.KeySize = 256
+        $aes.BlockSize = 128
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $aes.Key = $keyBytes
+        $aes.IV = $ivBytes
+        $decryptor = $aes.CreateDecryptor()
+        $decryptedBytes = $decryptor.TransformFinalBlock($encryptedBytes, 0, $encryptedBytes.Length)
+        return [Text.Encoding]::UTF8.GetString($decryptedBytes)
+    }
+    catch { throw "D4A database password decryption failed: $($_.Exception.Message)" }
+    finally {
+        if ($decryptor) { $decryptor.Dispose() }
+        if ($aes) { $aes.Dispose() }
+        foreach ($buffer in @($keyBytes, $ivBytes, $encryptedBytes, $decryptedBytes)) {
+            if ($buffer) { [Array]::Clear($buffer, 0, $buffer.Length) }
+        }
+    }
+}
+
+function Resolve-D4ADatabasePassword {
+    param(
+        [Parameter(Mandatory = $true)][string]$StoredPassword,
+        [AllowNull()][string]$ConfigPath
+    )
+
+    $looksEncrypted = $false
+    $decoded = $null
+    try {
+        $decoded = [Convert]::FromBase64String($StoredPassword)
+        $looksEncrypted = $decoded.Length -ge 16 -and ($decoded.Length % 16) -eq 0
+    }
+    catch {
+        $looksEncrypted = $false
+    }
+    finally {
+        if ($decoded) { [Array]::Clear($decoded, 0, $decoded.Length) }
+    }
+
+    $candidates = @(Get-D4ADatabaseKeyCandidates -ConfigPath $ConfigPath)
+    $failures = [System.Collections.Generic.List[string]]::new()
+    foreach ($candidate in $candidates) {
+        try {
+            $value = Unprotect-D4APassword -EncryptedPassword $StoredPassword -KeyBase64 $candidate.Key -IVBase64 $candidate.IV
+            if (Test-D4ADecryptedTextPlausible -Value $value) {
+                if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) { $script:D4AKeySourceByConfigPath[$ConfigPath] = $candidate }
+                return $value
+            }
+            $failures.Add(('{0}: the decrypted value is not printable text' -f $candidate.Source)) | Out-Null
+        }
+        catch {
+            $failures.Add(('{0}: {1}' -f $candidate.Source, $_.Exception.Message)) | Out-Null
+        }
+    }
+
+    if (-not $looksEncrypted) { return $StoredPassword }
+    if ($candidates.Count -eq 0) {
+        throw 'D4A database password decryption failed: D4AKEY/D4AIV were not found in the process, machine, or user environment, nor in the Windows service environment of the D4A instance services. On Decide4Action 4.0 the installer stores them on the API service; run the monitor as SYSTEM or as an administrator so the service configuration can be read.'
+    }
+    throw ('D4A database password decryption failed with every discovered key source: {0}' -f ($failures -join ' | '))
+}
+
+function ConvertTo-D4ADatabaseBoolean {
+    param([AllowNull()][object]$Value, [bool]$Default)
+
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return [bool]$Value }
+    $parsed = $false
+    if ([bool]::TryParse(([string]$Value), [ref]$parsed)) { return $parsed }
+    return $Default
+}
+
+function Get-D4ALocalSqlInstanceNames {
+    $instances = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-D4ALocalSqlInstanceName {
+        param([AllowNull()][string]$Instance)
+
+        if (-not [string]::IsNullOrWhiteSpace($Instance) -and $seen.Add($Instance)) {
+            $instances.Add($Instance) | Out-Null
+        }
+    }
+
+    foreach ($registryPath in @(
+            'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Microsoft SQL Server\Instance Names\SQL'
+        )) {
+        try {
+            $instanceProperties = Get-ItemProperty -Path $registryPath -ErrorAction Stop
+            foreach ($property in $instanceProperties.PSObject.Properties) {
+                if ($property.Name -match '^PS' -or $property.Name -eq 'Name') { continue }
+                if ($property.Name -eq 'MSSQLSERVER') {
+                    Add-D4ALocalSqlInstanceName -Instance 'localhost'
+                }
+                else {
+                    Add-D4ALocalSqlInstanceName -Instance ('localhost\{0}' -f $property.Name)
+                }
+            }
+        }
+        catch {
+            # Windows service discovery below provides a second source.
+        }
+    }
+
+    $sqlServices = @()
+    try {
+        $sqlServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop | Where-Object {
+                [string]$_.Name -eq 'MSSQLSERVER' -or [string]$_.Name -like 'MSSQL$*'
+            })
+    }
+    catch {
+        try {
+            $sqlServices = @(Get-WmiObject -Class Win32_Service -ErrorAction Stop | Where-Object {
+                    [string]$_.Name -eq 'MSSQLSERVER' -or [string]$_.Name -like 'MSSQL$*'
+                })
+        }
+        catch {
+            # Registry discovery can still identify installed SQL instances.
+        }
+    }
+
+    foreach ($service in $sqlServices) {
+        if ([string]$service.Name -eq 'MSSQLSERVER') {
+            Add-D4ALocalSqlInstanceName -Instance 'localhost'
+        }
+        elseif ([string]$service.Name -like 'MSSQL$*') {
+            Add-D4ALocalSqlInstanceName -Instance ('localhost\{0}' -f ([string]$service.Name).Substring(6))
+        }
+    }
+
+    return @($instances.ToArray())
+}
+
+function Test-D4ADatabaseServerIsLocal {
+    param([AllowNull()][string]$Server)
+
+    $serverName = ([string]$Server).Trim() -replace '^(?i)(?:tcp|np|lpc):', ''
+    $serverName = ($serverName -split '\\', 2)[0]
+    $serverName = ($serverName -split ',', 2)[0]
+    $localNames = @('localhost', '.', '(local)', '127.0.0.1', '::1', $env:COMPUTERNAME)
+    try { $localNames += [System.Net.Dns]::GetHostName() }
+    catch { }
+    return @($localNames | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -icontains $serverName
+}
+
+function Get-D4ADatabaseDataSourceCandidates {
+    param([Parameter(Mandatory = $true)][pscustomobject]$DbConfig)
+
+    $instanceName = ([string]$DbConfig.InstanceName).Trim()
+    $localInstances = @(Get-D4ALocalSqlInstanceNames)
+    if (-not [string]::IsNullOrWhiteSpace($instanceName)) {
+        if (Test-D4ADatabaseServerIsLocal -Server $DbConfig.Server) {
+            if ($instanceName -ieq 'MSSQLSERVER') { return @('localhost') }
+            return @('localhost\{0}' -f $instanceName)
+        }
+
+        $configuredServer = ([string]$DbConfig.Server).Trim() -replace '^(?i)tcp:', ''
+        $configuredServer = ($configuredServer -split '\\', 2)[0]
+        $configuredServer = ($configuredServer -split ',', 2)[0]
+        if ([string]::IsNullOrWhiteSpace($configuredServer)) { return @() }
+        if ($instanceName -ieq 'MSSQLSERVER') { return @($configuredServer) }
+        return @('tcp:{0}\{1}' -f $configuredServer, $instanceName)
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $configuredDataSource = ([string]$DbConfig.Server).Trim()
+    if ($DbConfig.Port -and $configuredDataSource -notmatch ',' -and $configuredDataSource -notmatch '\\') {
+        $configuredDataSource = '{0},{1}' -f $configuredDataSource, $DbConfig.Port
+    }
+    foreach ($candidate in @($configuredDataSource) + $localInstances) {
+        $candidateText = [string]$candidate
+        if (-not [string]::IsNullOrWhiteSpace($candidateText) -and $seen.Add($candidateText)) {
+            $candidates.Add($candidateText) | Out-Null
+        }
+    }
+    return @($candidates.ToArray())
+}
+
+function New-D4ADatabaseConnectionString {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$DbConfig,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [Parameter(Mandatory = $true)][string]$DataSource,
+        [AllowNull()][string]$Database
+    )
+
+    $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $builder['Data Source'] = $DataSource
+    if (-not [string]::IsNullOrWhiteSpace($Database)) {
+        $builder['Initial Catalog'] = $Database
+    }
+    $builder['User ID'] = $DbConfig.User
+    $builder['Password'] = $Password
+    $builder['Connect Timeout'] = $TimeoutSeconds
+    $builder['Encrypt'] = ConvertTo-D4ADatabaseBoolean -Value $DbConfig.Encrypt -Default $false
+    $builder['TrustServerCertificate'] = ConvertTo-D4ADatabaseBoolean -Value $DbConfig.TrustServerCertificate -Default $true
+    return $builder.ConnectionString
+}
+
+function Get-D4ADatabaseSafeFailureDetail {
+    param([Parameter(Mandatory = $true)][Exception]$Exception)
+
+    $message = $Exception.Message
+    $number = $null
+    if ($Exception -is [System.Data.SqlClient.SqlException]) {
+        $sqlError = @($Exception.Errors | Select-Object -First 1)
+        if ($sqlError.Count -gt 0) { $number = [int]$sqlError[0].Number }
+    }
+    switch ($number) {
+        18456 { return 'Login failed or the configured SQL login is unavailable.' }
+        4060 { return 'Login succeeded, but the configured database could not be opened.' }
+        53 { return 'Database host is unreachable or the SQL Server instance was not found.' }
+        2 { return 'Database host is unreachable or the SQL Server instance was not found.' }
+        10060 { return 'Database did not respond before the connection timed out.' }
+        10061 { return 'Database host reached, but the SQL Server port refused the connection.' }
+        -2 { return 'Database did not respond before the connection timed out.' }
+    }
+    if ($message -match '(?i)login failed') { return 'Login failed or the configured SQL login is unavailable.' }
+    if ($message -match '(?i)D4A database password decryption failed') { return 'The configured database password could not be decrypted or recognized as plaintext.' }
+    if ($message -match '(?i)network-related|server was not found|could not open a connection') { return 'Database host is unreachable or the SQL Server instance was not found.' }
+    if ($message -match '(?i)timeout') { return 'Database did not respond before the connection timed out.' }
+    if ($message -match '(?i)certificate chain.*not trusted|authority that is not trusted|SSL Provider') { return 'SQL TLS/certificate trust failed.' }
+    return 'Database connection test failed. Review the database and monitor logs for the exception details.'
+}
+
+function Get-D4ADatabaseFileSpace {
+    param(
+        [Parameter(Mandatory = $true)][object]$Connection,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $command = $null
+    $reader = $null
+    $files = [System.Collections.Generic.List[object]]::new()
+    try {
+        $command = $Connection.CreateCommand()
+        $command.CommandTimeout = $TimeoutSeconds
+        $command.CommandText = @'
+SELECT
+    name AS FileName,
+    type_desc AS FileType,
+    physical_name AS PhysicalName,
+    CAST(size AS decimal(19, 2)) / 128.0 AS TotalSizeMB,
+    (CAST(size AS decimal(19, 2)) / 128.0) -
+        (CAST(FILEPROPERTY(name, 'SpaceUsed') AS decimal(19, 2)) / 128.0) AS UnallocatedFreeSpaceMB,
+    CASE WHEN growth = 0 THEN 'DISABLED' ELSE 'ENABLED' END AS AutoGrowthStatus
+FROM sys.database_files
+WHERE type_desc = 'ROWS'
+  AND name NOT LIKE '%[_]log';
+'@
+        $reader = $command.ExecuteReader()
+        while ($reader.Read()) {
+            $freeSpaceOrdinal = $reader.GetOrdinal('UnallocatedFreeSpaceMB')
+            if ($reader.IsDBNull($freeSpaceOrdinal)) { continue }
+            $files.Add([pscustomobject]@{
+                    FileName               = [string]$reader['FileName']
+                    FileType               = [string]$reader['FileType']
+                    PhysicalName           = [string]$reader['PhysicalName']
+                    TotalSizeMB            = [double]$reader['TotalSizeMB']
+                    UnallocatedFreeSpaceMB = [double]$reader['UnallocatedFreeSpaceMB']
+                    AutoGrowthStatus       = [string]$reader['AutoGrowthStatus']
+                }) | Out-Null
+        }
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($command) { $command.Dispose() }
+    }
+    return $files.ToArray()
+}
+
+function Add-D4ADatabaseFileSpaceResults {
+    param(
+        [Parameter(Mandatory = $true)][string]$DatabaseName,
+        [Parameter(Mandatory = $true)][object[]]$Files
+    )
+
+    $dataFiles = @($Files | Where-Object {
+            [string]$_.FileType -ieq 'ROWS' -and [string]$_.FileName -notmatch '(?i)_log$'
+        })
+    if ($dataFiles.Count -eq 0) {
+        Add-MonitorResult -Severity Warning -Category Database -Check ('Database internal free space - {0}' -f $DatabaseName) -Message (
+            'Database={0}; no non-log ROWS file was returned by sys.database_files; internal free-space evaluation was skipped.' -f $DatabaseName
+        ) -Key ('database-unallocated-space-{0}-discovery' -f $DatabaseName) -NotificationEligible:$false
+        return
+    }
+
+    foreach ($file in $dataFiles) {
+        $totalSizeMb = [Math]::Round([double]$file.TotalSizeMB, 2)
+        $rawFreeSpaceMb = [double]$file.UnallocatedFreeSpaceMB
+        $freeSpaceMb = [Math]::Round($rawFreeSpaceMb, 2)
+        $physicalName = ([string]$file.PhysicalName).Trim()
+        $autoGrowthStatus = ([string]$file.AutoGrowthStatus).Trim().ToUpperInvariant()
+        if ($autoGrowthStatus -notin @('ENABLED', 'DISABLED')) { $autoGrowthStatus = 'UNKNOWN' }
+        $check = 'Database internal free space - {0} / {1}' -f $DatabaseName, $file.FileName
+        $key = 'database-unallocated-space-{0}-{1}' -f $DatabaseName, $file.FileName
+        $message = 'Database={0}; data file={1}; physical file={2}; type={3}; total size={4} MB; unallocated internal free space={5} MB; alert threshold={6} MB; AutoGrowthStatus={7}.' -f
+            $DatabaseName, $file.FileName, $physicalName, $file.FileType, $totalSizeMb, $freeSpaceMb, $script:DatabaseUnallocatedSpaceAlertMb, $autoGrowthStatus
+
+        if ($rawFreeSpaceMb -lt $script:DatabaseUnallocatedSpaceAlertMb -and $autoGrowthStatus -eq 'DISABLED') {
+            Add-MonitorResult -Severity Alert -Category Database -Check $check -Message $message -Key $key
+        }
+        elseif ($autoGrowthStatus -eq 'UNKNOWN') {
+            Add-MonitorResult -Severity Warning -Category Database -Check $check -Message (
+                '{0} AutoGrowthStatus could not be determined; no capacity alert or recovery was generated.' -f $message
+            ) -Key $key -NotificationEligible:$false
+        }
+        else {
+            Add-MonitorResult -Severity OK -Category Database -Check $check -Message $message -Key $key
+        }
+    }
+}
+
+function Get-D4ADataCollectorSqlFreshness {
+    param(
+        [Parameter(Mandatory = $true)][System.Data.SqlClient.SqlConnection]$Connection,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $command = $Connection.CreateCommand()
+    $reader = $null
+    try {
+        $command.CommandTimeout = $TimeoutSeconds
+        $command.CommandText = @'
+SELECT TOP (1) c.name
+FROM sys.columns AS c
+INNER JOIN sys.types AS t ON t.user_type_id = c.user_type_id
+WHERE c.object_id = OBJECT_ID(N'dbo.P4A_LineMonitoringStatus', N'U')
+  AND t.name IN (N'datetime', N'datetime2', N'smalldatetime', N'datetimeoffset')
+  AND c.name IN (N'LastEventTime', N'LastEventDateTime', N'LastEventDate', N'LastEvent')
+ORDER BY CASE c.name WHEN N'LastEventTime' THEN 0 WHEN N'LastEventDateTime' THEN 1 WHEN N'LastEventDate' THEN 2 ELSE 3 END;
+'@
+        $columnName = $command.ExecuteScalar()
+        if ($null -eq $columnName -or $columnName -is [DBNull]) { return $null }
+
+        # The column name comes from sys.columns and is bracket-quoted.
+        $quotedColumn = '[' + ([string]$columnName).Replace(']', ']]') + ']'
+        $command.CommandText = (
+            'SELECT COUNT_BIG(*), MAX(CAST({0} AS datetime2)), ' +
+            'DATEDIFF(SECOND, MAX(CAST({0} AS datetime2)), SYSDATETIME()), ' +
+            'DATEDIFF(SECOND, MAX(CAST({0} AS datetime2)), SYSUTCDATETIME()) ' +
+            'FROM dbo.P4A_LineMonitoringStatus WITH (NOLOCK);'
+        ) -f $quotedColumn
+        $reader = $command.ExecuteReader()
+        if (-not $reader.Read()) { return $null }
+        $lineCount = [long]$reader.GetValue(0)
+        if ($lineCount -eq 0 -or $reader.IsDBNull(1)) {
+            return [pscustomobject]@{ Column = [string]$columnName; LineCount = $lineCount; LatestEvent = $null; AgeSeconds = $null; Basis = $null }
+        }
+        $latestEvent = [datetime]$reader.GetValue(1)
+        $localAge = [long]$reader.GetValue(2)
+        $utcAge = [long]$reader.GetValue(3)
+
+        # The table may hold server-local or UTC timestamps; use the basis
+        # that gives the smallest non-future age, tolerating 2 minutes of skew.
+        $choices = @(
+            [pscustomobject]@{ Basis = 'server local time'; Age = $localAge },
+            [pscustomobject]@{ Basis = 'UTC'; Age = $utcAge }
+        ) | Where-Object { $_.Age -ge -120 } | Sort-Object -Property @{ Expression = { [Math]::Abs($_.Age) } }
+        $selected = @($choices) | Select-Object -First 1
+        return [pscustomobject]@{
+            Column      = [string]$columnName
+            LineCount   = $lineCount
+            LatestEvent = $latestEvent
+            AgeSeconds  = if ($null -eq $selected) { $localAge } else { [Math]::Max([long]0, [long]$selected.Age) }
+            Basis       = if ($null -eq $selected) { 'server local time (timestamp is in the future)' } else { $selected.Basis }
+        }
+    }
+    finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        $command.Dispose()
+    }
+}
+
+function Add-D4ADataCollectorSqlFreshnessResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$DatabaseName,
+        [AllowNull()]$Freshness
+    )
+
+    if ($null -eq $Freshness) {
+        Write-RunLog -Category Database -Color DarkGray -Message (
+            'Data Collector SQL freshness - {0}: P4A_LineMonitoringStatus with a LastEventTime column was not found; check skipped.' -f $DatabaseName
+        )
+        return
+    }
+    $key = 'database-datacollector-freshness-{0}' -f $DatabaseName
+    $check = 'Data Collector SQL freshness - {0}' -f $DatabaseName
+    if ($null -eq $Freshness.LatestEvent) {
+        Add-MonitorResult -Severity OK -Category Database -Check $check -Message (
+            'P4A_LineMonitoringStatus has no line event timestamp yet (lines={0}); no freshness evaluation.' -f $Freshness.LineCount
+        ) -Key $key
+        return
+    }
+
+    $ageMinutes = [Math]::Round(([double]$Freshness.AgeSeconds / 60), 1)
+    $message = 'Latest {0}={1}; age={2} minute(s) ({3}); lines={4}; warning={5} min; critical={6} min.' -f
+        $Freshness.Column, $Freshness.LatestEvent.ToString('yyyy-MM-dd HH:mm:ss'), $ageMinutes, $Freshness.Basis,
+        $Freshness.LineCount, $DataCollectorLastHealthyWarningMinutes, $DataCollectorLastHealthyCriticalMinutes
+    if ($ageMinutes -gt $DataCollectorLastHealthyCriticalMinutes) {
+        if ($DataCollectorSqlFreshnessAlerts) {
+            Add-MonitorResult -Severity Alert -Category Database -Check $check -Message ('Status=Critical; no Data Collector event reached SQL within the critical threshold. {0}' -f $message) -Key $key
+        }
+        else {
+            Add-MonitorResult -Severity Warning -Category Database -Check $check -Message (
+                'Status=Critical (log-only); no Data Collector event reached SQL within the critical threshold. Idle lines can cause this; set DataCollectorSqlFreshnessAlerts=true to notify. {0}' -f $message
+            ) -Key $key -NotificationEligible:$false
+        }
+    }
+    elseif ($ageMinutes -gt $DataCollectorLastHealthyWarningMinutes) {
+        Add-MonitorResult -Severity Warning -Category Database -Check $check -Message ('Status=Warning (log-only). {0}' -f $message) -Key $key -NotificationEligible:$false
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Database -Check $check -Message ('Status=Healthy. {0}' -f $message) -Key $key
+    }
+}
+
+function Test-D4ADatabaseConnectivity {
+    $configPaths = @(Get-D4ADatabaseConfigPaths)
+    if ($configPaths.Count -eq 0) {
+        Add-MonitorResult -Severity Warning -Category Database -Check 'Database connectivity' -Message (
+            'No dbconfig.js file was discovered from the configured D4A installation or active Data Collector services; database connectivity was not tested.'
+        ) -Key 'database-connectivity-discovery' -NotificationEligible:$false
+        return
+    }
+
+    $passwordCache = @{}
+    foreach ($configPath in $configPaths) {
+        try {
+            $databaseConfigs = @(Get-D4ADatabaseConfigurationsFromFile -Path $configPath)
+        }
+        catch {
+            Add-MonitorResult -Severity Alert -Category Database -Check 'Database configuration' -Message (
+                'Unable to read a discovered dbconfig.js file for database monitoring: {0}' -f $_.Exception.Message
+            ) -Key ('database-configuration-{0}' -f ([IO.Path]::GetFileNameWithoutExtension($configPath)))
+            continue
+        }
+        if ($databaseConfigs.Count -eq 0) {
+            Add-MonitorResult -Severity Alert -Category Database -Check 'Database configuration' -Message (
+                'A discovered dbconfig.js file does not contain a complete dbConfig object with server, database, user, and password values.'
+            ) -Key ('database-configuration-{0}' -f ([IO.Path]::GetFileNameWithoutExtension($configPath)))
+            continue
+        }
+
+        foreach ($dbConfig in $databaseConfigs) {
+            $password = $null
+            $databaseKey = 'database-connectivity-{0}-{1}' -f $dbConfig.Database, $dbConfig.Name
+            try {
+                $passwordCacheKey = '{0}|{1}' -f $configPath, $dbConfig.Password
+                if ($passwordCache.ContainsKey($passwordCacheKey)) {
+                    $password = [string]$passwordCache[$passwordCacheKey]
+                }
+                else {
+                    $password = Resolve-D4ADatabasePassword -StoredPassword $dbConfig.Password -ConfigPath $configPath
+                    if ([string]::IsNullOrWhiteSpace($password)) { throw 'D4A database password resolution returned an empty value.' }
+                    $passwordCache[$passwordCacheKey] = $password
+                }
+
+                Add-Type -AssemblyName System.Data -ErrorAction Stop
+                $dataSourceCandidates = @(Get-D4ADatabaseDataSourceCandidates -DbConfig $dbConfig)
+                if ($dataSourceCandidates.Count -eq 0) { throw 'No SQL Server instance could be resolved from dbConfig.' }
+
+                $selectedDataSource = $null
+                $databaseFileSpace = @()
+                $databaseFileSpaceFailure = ''
+                $configLayout = Get-D4AInstanceLayoutForPath -Path $configPath
+                $checkDataCollectorFreshness = $null -ne $configLayout -and $configLayout.Platform -eq '4.0'
+                $dataCollectorFreshness = $null
+                $dataCollectorFreshnessFailure = ''
+                $attempts = [System.Collections.Generic.List[string]]::new()
+                foreach ($dataSourceCandidate in $dataSourceCandidates) {
+                    $dataSource = [string]$dataSourceCandidate
+                    $connection = $null
+                    $command = $null
+                    try {
+                        Write-RunLog -Level Info -Category Database -Color Blue -Message (
+                            'Database connectivity - {0}: trying SQL instance {1}.' -f $dbConfig.Database, $dataSource
+                        )
+                        $connectionString = New-D4ADatabaseConnectionString -DbConfig $dbConfig -Password $password `
+                            -TimeoutSeconds $DatabaseConnectionTimeoutSeconds -DataSource $dataSource -Database 'master'
+                        $connection = [System.Data.SqlClient.SqlConnection]::new($connectionString)
+                        $connection.Open()
+                        $connection.ChangeDatabase([string]$dbConfig.Database)
+                        $command = $connection.CreateCommand()
+                        $command.CommandTimeout = $DatabaseConnectionTimeoutSeconds
+                        $command.CommandText = 'SELECT 1;'
+                        if ([int]$command.ExecuteScalar() -ne 1) { throw 'The database test query returned an unexpected result.' }
+                        try {
+                            $databaseFileSpace = @(Get-D4ADatabaseFileSpace -Connection $connection -TimeoutSeconds $DatabaseConnectionTimeoutSeconds)
+                        }
+                        catch {
+                            $databaseFileSpaceFailure = Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception
+                            Write-ErrorLog -Level Warning -Category Database -Message (
+                                'Database internal free-space query failed for {0}: {1}' -f $dbConfig.Database, $databaseFileSpaceFailure
+                            )
+                        }
+                        if ($checkDataCollectorFreshness) {
+                            # The 4.0 Node Watchdog no longer logs LastEventTime
+                            # evidence, so the read-only SQL equivalent is used.
+                            try {
+                                $dataCollectorFreshness = Get-D4ADataCollectorSqlFreshness -Connection $connection -TimeoutSeconds $DatabaseConnectionTimeoutSeconds
+                            }
+                            catch {
+                                $dataCollectorFreshnessFailure = Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception
+                            }
+                        }
+                        $selectedDataSource = $dataSource
+                        break
+                    }
+                    catch {
+                        $failureDetail = Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception
+                        $attempts.Add(('{0}: {1}' -f $dataSource, $failureDetail)) | Out-Null
+                        Write-RunLog -Level Warning -Category Database -Color Yellow -Message (
+                            'Database connectivity - {0}: SQL instance {1} was not selected. {2}' -f $dbConfig.Database, $dataSource, $failureDetail
+                        )
+                    }
+                    finally {
+                        if ($command) { $command.Dispose() }
+                        if ($connection) {
+                            if ($connection.State -ne [System.Data.ConnectionState]::Closed) { $connection.Close() }
+                            $connection.Dispose()
+                        }
+                    }
+                }
+
+                if ([string]::IsNullOrWhiteSpace($selectedDataSource)) {
+                    throw ('No SQL instance accepted the configured credentials and database. Attempts: {0}' -f ($attempts -join ' | '))
+                }
+                $keySourceText = if ($script:D4AKeySourceByConfigPath.ContainsKey($configPath)) { '; key source={0}' -f $script:D4AKeySourceByConfigPath[$configPath].Source } else { '' }
+                Add-MonitorResult -Severity OK -Category Database -Check ('Database connectivity - {0}' -f $dbConfig.Database) -Message (
+                    'Database={0}; configured dbconfig={1}; file={2}; SQL instance={3}; SELECT 1 completed successfully{4}.' -f $dbConfig.Database, $dbConfig.Name, $configPath, $selectedDataSource, $keySourceText
+                ) -Key $databaseKey
+                if (-not [string]::IsNullOrWhiteSpace($databaseFileSpaceFailure)) {
+                    Add-MonitorResult -Severity Warning -Category Database -Check ('Database internal free space - {0}' -f $dbConfig.Database) -Message (
+                        'Database={0}; SQL instance={1}; internal free-space query could not be completed: {2}' -f
+                            $dbConfig.Database, $selectedDataSource, $databaseFileSpaceFailure
+                    ) -Key ('database-unallocated-space-{0}-query' -f $dbConfig.Database) -NotificationEligible:$false
+                }
+                else {
+                    Add-D4ADatabaseFileSpaceResults -DatabaseName ([string]$dbConfig.Database) -Files $databaseFileSpace
+                }
+                if ($checkDataCollectorFreshness) {
+                    if (-not [string]::IsNullOrWhiteSpace($dataCollectorFreshnessFailure)) {
+                        Add-MonitorResult -Severity Warning -Category Database -Check ('Data Collector SQL freshness - {0}' -f $dbConfig.Database) -Message (
+                            'The read-only freshness query could not be completed: {0}' -f $dataCollectorFreshnessFailure
+                        ) -Key ('database-datacollector-freshness-{0}-query' -f $dbConfig.Database) -NotificationEligible:$false
+                    }
+                    else {
+                        Add-D4ADataCollectorSqlFreshnessResult -DatabaseName ([string]$dbConfig.Database) -Freshness $dataCollectorFreshness
+                    }
+                }
+            }
+            catch {
+                Add-MonitorResult -Severity Alert -Category Database -Check ('Database connectivity - {0}' -f $dbConfig.Database) -Message (
+                    'Database={0}; configured dbconfig={1}; {2}' -f $dbConfig.Database, $dbConfig.Name, (Get-D4ADatabaseSafeFailureDetail -Exception $_.Exception)
+                ) -Key $databaseKey
+            }
+            finally {
+                $password = $null
+            }
+        }
+    }
+    $passwordCache.Clear()
+}
+
+function Test-ApiListener {
+    $listeners = @(Get-D4ATcpListeners)
+    $processes = @()
+    try { $processes = @(Get-Process -ErrorAction SilentlyContinue) } catch { }
+
+    function Format-D4AListenerProcesses {
+        param([object[]]$Items)
+
+        return @(
+            foreach ($item in @($Items)) {
+                $process = $processes | Where-Object { $_.Id -eq [int]$item.ProcessId } | Select-Object -First 1
+                if ($null -ne $process) {
+                    '{0} (PID {1}, {2:N1} MB)' -f $process.ProcessName, $process.Id, ($process.WorkingSet64 / 1MB)
+                }
+                else {
+                    'PID {0}' -f $item.ProcessId
+                }
+            }
+        ) | Select-Object -Unique
+    }
+
+    # Decide4Action 4.0: verify each discovered instance API service listens.
+    $discovered = @(Get-D4ADiscoveredApiEndpoints)
+    if ($discovered.Count -gt 0) {
+        $alertRaised = $false
+        foreach ($endpoint in $discovered) {
+            $label = '{0} [{1}]' -f $(if ([string]::IsNullOrWhiteSpace($endpoint.DisplayName)) { $endpoint.ServiceName } else { $endpoint.DisplayName }), $endpoint.ServiceName
+            $key = 'server-api-listener-{0}' -f $endpoint.ServiceName
+            if ($endpoint.State -ne 'Running') {
+                Add-MonitorResult -Severity Warning -Category Server -Check 'API listener' -Message (
+                    '{0}; instance={1}; service state={2}. The listener was not evaluated; the Windows service check reports service availability.' -f
+                        $label, $endpoint.InstanceName, $endpoint.State
+                ) -Key $key -NotificationEligible:$false
+                continue
+            }
+            if (@($endpoint.Ports).Count -eq 0) {
+                if (-not $endpoint.InventoryComplete) {
+                    Add-MonitorResult -Severity Warning -Category Server -Check 'API listener' -Message (
+                        '{0}; instance={1}; the process or listening-port inventory was unavailable, so the listener could not be evaluated.' -f $label, $endpoint.InstanceName
+                    ) -Key $key -NotificationEligible:$false
+                    continue
+                }
+                $alertRaised = $true
+                Add-MonitorResult -Severity Alert -Category Server -Check 'API listener' -Message (
+                    '{0}; instance={1}; the service is Running but none of its processes (PID {2}) listens on a TCP port.' -f
+                        $label, $endpoint.InstanceName, (@($endpoint.ProcessIds) -join ', ')
+                ) -Key $key
+                continue
+            }
+            $listenerDetails = @(Format-D4AListenerProcesses -Items @($listeners | Where-Object { @($endpoint.Ports) -contains $_.Port }))
+            Add-MonitorResult -Severity OK -Category Server -Check 'API listener' -Message (
+                '{0}; instance={1}; listening on port(s) {2}: {3}' -f $label, $endpoint.InstanceName, (@($endpoint.Ports) -join ', '), ($listenerDetails -join '; ')
+            ) -Key $key
+        }
+        # A server that also runs a 3.9 installation keeps the 3.9 port check,
+        # which reports under the 3.9 rule key.
+        if (@(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '3.9' }).Count -eq 0) {
+            if (-not $alertRaised) {
+                # Keeps the 3.9 rule key healthy so an earlier alert can recover.
+                Add-MonitorResult -Severity OK -Category Server -Check 'API listener' -Message (
+                    '{0} discovered D4A 4.0 API service(s) evaluated.' -f $discovered.Count
+                )
+            }
+            return
+        }
+    }
+
+    # Decide4Action 3.9 and unknown layouts: the configured local API port.
+    $port = @(ConvertTo-HttpUris -Addresses $LocalApiAddress)[0].Port
+    $matching = @($listeners | Where-Object { $_.Port -eq $port })
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity Alert -Category Server -Check 'API listener' -Message ('No process is listening on TCP port {0}.' -f $port)
+        return
+    }
+    $processDetails = @(Format-D4AListenerProcesses -Items $matching)
+    $processCount = @($matching | Select-Object -ExpandProperty ProcessId -Unique).Count
+    $message = '{0} listener(s) found on port {1}: {2}' -f $processCount, $port, ($processDetails -join '; ')
+    if ($processCount -gt 1) {
+        Add-MonitorResult -Severity Warning -Category Server -Check 'API listener' -Message $message
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Server -Check 'API listener' -Message $message
+    }
+}
+
+function Test-MemoryHealth {
+    $operatingSystem = @(Get-SystemClassInstance -ClassName Win32_OperatingSystem) | Select-Object -First 1
+    if ($null -eq $operatingSystem -or [double]$operatingSystem.TotalVisibleMemorySize -le 0) {
+        throw 'Windows did not return valid memory totals.'
+    }
+
+    $totalKb = [double]$operatingSystem.TotalVisibleMemorySize
+    $freeKb = [double]$operatingSystem.FreePhysicalMemory
+    $usedPercent = [Math]::Round((($totalKb - $freeKb) / $totalKb) * 100, 1)
+    $usedGb = [Math]::Round(($totalKb - $freeKb) / 1MB, 2)
+    $totalGb = [Math]::Round($totalKb / 1MB, 2)
+    $message = '{0}% used ({1} GB of {2} GB)' -f $usedPercent, $usedGb, $totalGb
+
+    if ($usedPercent -ge $script:ResourceAlertPercent) {
+        $consecutiveHigh = Update-MonitorResourceConsecutiveHigh -Resource Memory -IsHigh $true
+        if ($consecutiveHigh -ge $script:ResourceConsecutiveRunsRequired) {
+            Add-MonitorResult -Severity Alert -Category Server -Check Memory -Message (
+                '{0}; alert threshold={1}%; consecutive high runs={2}; email notification is eligible.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh
+            )
+        }
+        else {
+            Add-MonitorResult -Severity Warning -Category Server -Check Memory -Message (
+                '{0}; threshold={1}%; consecutive high runs={2}/{3}; logged without an email notification.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh, $script:ResourceConsecutiveRunsRequired
+            ) -NotificationEligible:$false
+        }
+    }
+    elseif ($usedPercent -ge 85) {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Memory -IsHigh $false)
+        Add-MonitorResult -Severity Warning -Category Server -Check Memory -Message (
+            '{0}; warning threshold=85%; logged without an email notification.' -f $message
+        ) -NotificationEligible:$false
+    }
+    else {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Memory -IsHigh $false)
+        Add-MonitorResult -Severity OK -Category Server -Check Memory -Message $message
+    }
+}
+
+function Get-OneCpuSample {
+    try {
+        $row = @(Get-SystemClassInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'") |
+            Select-Object -First 1
+        if ($null -ne $row -and $null -ne $row.PercentProcessorTime) {
+            return [double]$row.PercentProcessorTime
+        }
+    }
+    catch {
+        # Fall through to the less precise Win32_Processor value.
+    }
+
+    $processors = @(Get-SystemClassInstance -ClassName Win32_Processor | Where-Object { $null -ne $_.LoadPercentage })
+    if ($processors.Count -eq 0) {
+        throw 'Windows did not return a CPU utilization value.'
+    }
+    return [double](($processors | Measure-Object -Property LoadPercentage -Average).Average)
+}
+
+function Test-CpuHealth {
+    $sampleCount = [Math]::Max(1, [int][Math]::Ceiling($CpuSampleDurationSeconds / [double]$CpuSampleIntervalSeconds))
+    $samples = [System.Collections.Generic.List[double]]::new()
+    $errors = [System.Collections.Generic.List[string]]::new()
+
+    Write-RunLog -Category Server -Message (
+        'CPU sampling started: {0} sample(s), interval {1} second(s).' -f $sampleCount, $CpuSampleIntervalSeconds
+    ) -Color DarkGray
+
+    for ($index = 1; $index -le $sampleCount; $index++) {
+        try {
+            $samples.Add((Get-OneCpuSample)) | Out-Null
+        }
+        catch {
+            $errors.Add($_.Exception.Message) | Out-Null
+        }
+        if ($index -lt $sampleCount) {
+            Start-Sleep -Seconds $CpuSampleIntervalSeconds
+        }
+    }
+
+    if ($samples.Count -eq 0) {
+        throw ('Every CPU sample failed. {0}' -f ($errors -join ' | '))
+    }
+
+    $average = [Math]::Round((($samples | Measure-Object -Average).Average), 1)
+    $maximum = [Math]::Round((($samples | Measure-Object -Maximum).Maximum), 1)
+    $message = 'Average={0}%; maximum={1}%; successful samples={2}/{3}' -f
+        $average, $maximum, $samples.Count, $sampleCount
+
+    if ($average -ge $script:ResourceAlertPercent) {
+        $consecutiveHigh = Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $true
+        if ($consecutiveHigh -ge $script:ResourceConsecutiveRunsRequired) {
+            Add-MonitorResult -Severity Alert -Category Server -Check CPU -Message (
+                '{0}; alert threshold={1}%; consecutive high runs={2}; email notification is eligible.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh
+            )
+        }
+        else {
+            Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message (
+                '{0}; threshold={1}%; consecutive high runs={2}/{3}; logged without an email notification.' -f
+                    $message, $script:ResourceAlertPercent, $consecutiveHigh, $script:ResourceConsecutiveRunsRequired
+            ) -NotificationEligible:$false
+        }
+    }
+    elseif ($average -ge 70) {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $false)
+        Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message (
+            '{0}; warning threshold=70%; logged without an email notification.' -f $message
+        ) -NotificationEligible:$false
+    }
+    elseif ($errors.Count -gt 0) {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $false)
+        Add-MonitorResult -Severity Warning -Category Server -Check CPU -Message (
+            '{0}; failed samples={1}' -f $message, $errors.Count
+        ) -NotificationEligible:$false
+    }
+    else {
+        [void](Update-MonitorResourceConsecutiveHigh -Resource Cpu -IsHigh $false)
+        Add-MonitorResult -Severity OK -Category Server -Check CPU -Message $message
+    }
+}
+
+function Test-DiskHealth {
+    $disks = @(Get-SystemClassInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' |
+        Where-Object { [double]$_.Size -gt 0 } |
+        Sort-Object -Property DeviceID)
+    if ($disks.Count -eq 0) {
+        throw 'Windows did not return any fixed disks.'
+    }
+
+    foreach ($disk in $disks) {
+        $freeGb = [Math]::Round(([double]$disk.FreeSpace / 1GB), 2)
+        $sizeGb = [Math]::Round(([double]$disk.Size / 1GB), 2)
+        $freePercent = [Math]::Round(([double]$disk.FreeSpace / [double]$disk.Size) * 100, 1)
+        $message = '{0}; free={1} GB of {2} GB ({3}% free)' -f
+            $disk.DeviceID, $freeGb, $sizeGb, $freePercent
+        $diskKey = 'server-disk-space-{0}' -f $disk.DeviceID
+
+        $usedPercent = [Math]::Round(100 - $freePercent, 1)
+        if ($freeGb -le $script:DiskCriticalFreeGb -or $usedPercent -ge $script:DiskCriticalUsedPercent) {
+            Add-MonitorResult -Severity Alert -Category Server -Check 'Disk space' -Message (
+                '{0}; critical threshold reached: free space <= {1} GB or used space >= {2}%.' -f
+                    $message, $script:DiskCriticalFreeGb, $script:DiskCriticalUsedPercent
+            ) -Key $diskKey
+        }
+        else {
+            Add-MonitorResult -Severity OK -Category Server -Check 'Disk space' -Message $message -Key $diskKey
+        }
+    }
+}
+
+function Resolve-NginxErrorLog {
+    if (-not [string]::IsNullOrWhiteSpace($NginxErrorLog)) {
+        $configuredLog = [Environment]::ExpandEnvironmentVariables($NginxErrorLog)
+        if ([IO.File]::Exists($configuredLog)) {
+            return [IO.Path]::GetFullPath($configuredLog)
+        }
+    }
+
+    # Decide4Action 4.0 runs one machine-wide nginx below <base>; use the path
+    # of an nginx service installed there first. 3.9 servers are unchanged.
+    $baseFolders = @(Get-D4A40BaseFolders)
+    foreach ($service in @(Get-D4AServiceInventory | Where-Object { (Get-D4AWindowsServiceFamily -Service $_) -eq 'Nginx' -and (Test-D4AServiceUnderD4A40Base -Service $_) })) {
+        foreach ($commandPath in @(Get-D4AServiceCommandPaths -Service $service)) {
+            if (@($baseFolders | Where-Object { Test-D4APathUnderFolder -Path $commandPath -Folder $_ }).Count -eq 0) { continue }
+            $folder = if ([IO.File]::Exists($commandPath)) { [IO.Path]::GetDirectoryName($commandPath) } else { $commandPath }
+            if ([string]::IsNullOrWhiteSpace($folder)) { continue }
+            $candidates = @([IO.Path]::Combine($folder, 'logs', 'error.log'))
+            $parentFolder = [IO.Path]::GetDirectoryName($folder)
+            if (-not [string]::IsNullOrWhiteSpace($parentFolder)) { $candidates += [IO.Path]::Combine($parentFolder, 'logs', 'error.log') }
+            foreach ($candidate in $candidates) {
+                if ([IO.File]::Exists($candidate)) { return [IO.Path]::GetFullPath($candidate) }
+            }
+        }
+    }
+    foreach ($baseFolder in $baseFolders) {
+        foreach ($folderName in @('nginx', 'Nginx', 'Decide4Action-Nginx', 'Decide4Action-Ngnix')) {
+            $nginxRoot = [IO.Path]::Combine($baseFolder, $folderName)
+            if (-not [IO.Directory]::Exists($nginxRoot)) { continue }
+            $directLog = [IO.Path]::Combine($nginxRoot, 'logs', 'error.log')
+            if ([IO.File]::Exists($directLog)) { return $directLog }
+            $versionedLog = Get-ChildItem -LiteralPath $nginxRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'nginx-*' } |
+                Sort-Object -Property LastWriteTime -Descending |
+                ForEach-Object { [IO.Path]::Combine($_.FullName, 'logs', 'error.log') } |
+                Where-Object { [IO.File]::Exists($_) } |
+                Select-Object -First 1
+            if (-not [string]::IsNullOrWhiteSpace([string]$versionedLog)) { return [string]$versionedLog }
+        }
+    }
+
+    $roots = @(
+        $D4AInstallRoot,
+        $env:D4A_HOME,
+        (Split-Path -Parent $script:ScriptDirectory),
+        'D:\Apps\Decide4Action',
+        'C:\Apps\Decide4Action',
+        'D:\Apps\Decide4Action-v2',
+        'C:\Apps\Decide4Action-v2',
+        'C:\Program Files\Decide4Action',
+        'C:\Program Files\Decide4Action-v2'
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+
+    foreach ($root in $roots) {
+        $expandedRoot = [Environment]::ExpandEnvironmentVariables([string]$root)
+        foreach ($folder in @('Decide4Action-Ngnix', 'Decide4Action-Nginx')) {
+            $nginxRoot = [IO.Path]::Combine($expandedRoot, $folder)
+            if (-not [IO.Directory]::Exists($nginxRoot)) {
+                continue
+            }
+            $candidate = Get-ChildItem -LiteralPath $nginxRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'nginx-*' } |
+                Sort-Object -Property LastWriteTime -Descending |
+                ForEach-Object { [IO.Path]::Combine($_.FullName, 'logs', 'error.log') } |
+                Where-Object { [IO.File]::Exists($_) } |
+                Select-Object -First 1
+            if (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
+                return [string]$candidate
+            }
+        }
+    }
+    return $null
+}
+
+function Test-NginxErrors {
+    $path = Resolve-NginxErrorLog
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Nginx errors' -Message (
+            'No Nginx error log was discovered; optional log inspection was skipped.'
+        )
+        return
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Add-MonitorResult -Severity Error -Category Diagnostics -Check 'Nginx errors' -Message ('Log file not found: {0}' -f $path)
+        return
+    }
+
+    $now = Get-Date
+    $since = $now.AddMinutes(-[Math]::Max($LogLookbackMinutes, $NginxConsecutiveMinutes + 1))
+    $matching = [System.Collections.Generic.List[string]]::new()
+    $minuteBuckets = @{}
+    foreach ($line in @(Get-Content -LiteralPath $path -Tail $DiagnosticTailLines -ErrorAction Stop)) {
+        if ($line -notmatch '(?i)10054|upstream prematurely closed|connect\(\) failed|timed out') {
+            continue
+        }
+
+        $include = $false
+        if ($line -match '^(?<Stamp>\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})') {
+            $parsed = [DateTime]::MinValue
+            if ([DateTime]::TryParseExact(
+                $matches.Stamp,
+                'yyyy/MM/dd HH:mm:ss',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeLocal,
+                [ref]$parsed
+            )) {
+                $include = $parsed -ge $since
+                if ($include) {
+                    $minute = [datetime]::new($parsed.Year, $parsed.Month, $parsed.Day, $parsed.Hour, $parsed.Minute, 0)
+                    $minuteKey = $minute.ToString('o')
+                    if (-not $minuteBuckets.ContainsKey($minuteKey)) { $minuteBuckets[$minuteKey] = 0 }
+                    $minuteBuckets[$minuteKey]++
+                }
+            }
+        }
+        if ($include) {
+            $matching.Add($line) | Out-Null
+        }
+    }
+
+    if ($matching.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Nginx errors' -Message (
+            'No matching upstream errors since {0}; log={1}' -f $since.ToString('yyyy-MM-dd HH:mm:ss'), $path
+        )
+        return
+    }
+
+    $sustainedWindow = $null
+    foreach ($minuteKey in @($minuteBuckets.Keys | Sort-Object)) {
+        $windowStart = [datetime]::Parse($minuteKey, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        $windowMatches = $true
+        for ($offset = 0; $offset -lt $NginxConsecutiveMinutes; $offset++) {
+            $candidateKey = $windowStart.AddMinutes($offset).ToString('o')
+            if (-not $minuteBuckets.ContainsKey($candidateKey) -or [int]$minuteBuckets[$candidateKey] -le $NginxErrorsPerMinuteThreshold) {
+                $windowMatches = $false
+                break
+            }
+        }
+        if ($windowMatches) {
+            $sustainedWindow = $windowStart
+            break
+        }
+    }
+
+    $sample = (($matching | Select-Object -Last 3) -replace '[\r\n]+', ' ') -join ' | '
+    if ($sample.Length -gt 1000) { $sample = $sample.Substring(0, 1000) + '...' }
+    if ($null -ne $sustainedWindow) {
+        $rates = for ($offset = 0; $offset -lt $NginxConsecutiveMinutes; $offset++) {
+            $minute = $sustainedWindow.AddMinutes($offset)
+            '{0}={1}' -f $minute.ToString('yyyy-MM-dd HH:mm'), $minuteBuckets[$minute.ToString('o')]
+        }
+        Add-MonitorResult -Severity Alert -Category Diagnostics -Check 'Nginx errors' -Message (
+            'Sustained Nginx upstream error rate exceeded {0} errors/minute for {1} consecutive minutes; rates={2}; log={3}; sample={4}' -f
+                $NginxErrorsPerMinuteThreshold, $NginxConsecutiveMinutes, ($rates -join ', '), $path, $sample
+        )
+        return
+    }
+
+    Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Nginx errors' -Message (
+        '{0} matching upstream error(s) since {1}, but no sustained rate exceeded {2} errors/minute for {3} consecutive minutes; log={4}' -f
+            $matching.Count, $since.ToString('yyyy-MM-dd HH:mm:ss'), $NginxErrorsPerMinuteThreshold, $NginxConsecutiveMinutes, $path
+    )
+}
+
+function Get-NssmExcludedLogRotationEventIds {
+    $eventIds = [System.Collections.Generic.List[int]]::new()
+    foreach ($value in @($NssmExcludedLogRotationEventIds -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        $eventId = 0
+        if (-not [int]::TryParse($value, [ref]$eventId) -or $eventId -lt 1) {
+            throw ('NssmExcludedLogRotationEventIds contains an invalid event ID: {0}' -f $value)
+        }
+        if (-not $eventIds.Contains($eventId)) {
+            $eventIds.Add($eventId) | Out-Null
+        }
+    }
+    return @($eventIds.ToArray())
+}
+
+function Test-IsExcludedNssmLogRotationEvent {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Event,
+        [Parameter(Mandatory = $true)][int[]]$ExcludedEventIds
+    )
+
+    if ([string]$Event.ProviderName -notmatch '(?i)^nssm$' -or [int]$Event.Id -notin $ExcludedEventIds) {
+        return $false
+    }
+
+    # Do not suppress unrelated NSSM events that happen to reuse an ID. Both
+    # configured IDs are safe only for the expected server.log rotation messages.
+    return [string]$Event.Message -match '(?i)(?:rotated output file|failed to rotate output file).*server\.log'
+}
+
+function Test-IsExcludedNssmPipeEndedOutputEvent {
+    param([Parameter(Mandatory = $true)][psobject]$Event)
+
+    if ([string]$Event.ProviderName -notmatch '(?i)^nssm$') {
+        return $false
+    }
+
+    # NSSM can emit this after a child process ends its output pipe. It is not
+    # evidence that the D4A service is unavailable and must not create alerts.
+    return [string]$Event.Message -match '(?is)failed\s+to\s+read\s+output\s+for\s+service\b.*readfile\(\):\s*the\s+pipe\s+has\s+been\s+ended'
+}
+
+function Test-RelevantWindowsEvents {
+    if ($null -eq (Get-Command -Name Get-WinEvent -ErrorAction SilentlyContinue)) {
+        throw 'Get-WinEvent is unavailable.'
+    }
+
+    $since = (Get-Date).AddMinutes(-$LogLookbackMinutes)
+    $excludedNssmEventIds = @(Get-NssmExcludedLogRotationEventIds)
+    # 3.9 servers keep the exact 3.9 relevance pattern.
+    $componentPattern = '(?i)D4A|Decide4Action|node(?:\.exe)?|32167|Data Collector|\bPLC\b|\bMDC\b'
+    if (Test-D4AHas40Instance) {
+        $apiPorts = @(@($script:LegacyApiPort) + @(Get-D4ADiscoveredApiEndpoints | ForEach-Object { @($_.Ports) }) | Where-Object { [int]$_ -gt 0 } | Sort-Object -Unique)
+        $componentPattern = '(?i)D4A|Decide4Action|node(?:\.exe)?|\b(?:{0})\b|Data Collector|\bPLC\b|\bMDC\b|Watchdog' -f ($apiPorts -join '|')
+    }
+    $events = [System.Collections.Generic.List[object]]::new()
+    foreach ($logName in @('Application', 'System')) {
+        # Get-WinEvent reports "no matching events" as a non-terminating error.
+        # An empty window is healthy, so suppress only that command-level noise.
+        foreach ($event in @(Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $since } -ErrorAction SilentlyContinue)) {
+            if (Test-IsExcludedNssmLogRotationEvent -Event $event -ExcludedEventIds $excludedNssmEventIds) {
+                Write-RunLog -Category Diagnostics -Color DarkGray -Message (
+                    'Excluded safe NSSM server.log rotation event: ID={0}; time={1}.' -f $event.Id, $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                )
+                continue
+            }
+            if (Test-IsExcludedNssmPipeEndedOutputEvent -Event $event) {
+                Write-RunLog -Category Diagnostics -Color DarkGray -Message (
+                    'Excluded non-actionable NSSM pipe-ended output event: ID={0}; time={1}.' -f $event.Id, $event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                )
+                continue
+            }
+            $messageText = [string]$event.Message
+            $provider = [string]$event.ProviderName
+            $componentMentioned = $messageText -match $componentPattern
+            $providerRelevant = $provider -match '(?i)Application Error|\.NET Runtime|Windows Error Reporting|Node|nssm|Service Control Manager'
+            if ($componentMentioned -and $providerRelevant) {
+                $events.Add($event) | Out-Null
+            }
+        }
+    }
+
+    if ($events.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Windows events' -Message (
+            'No relevant crash or service events since {0}.' -f $since.ToString('yyyy-MM-dd HH:mm:ss')
+        )
+        return
+    }
+
+    foreach ($group in @($events | Group-Object -Property ProviderName, Id)) {
+        $latest = $group.Group | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1
+        $eventMessage = (([string]$latest.Message -replace '[\r\n]+', ' ').Trim())
+        if ($eventMessage.Length -gt 700) {
+            $eventMessage = $eventMessage.Substring(0, 700) + '...'
+        }
+        $severity = if (@($group.Group | Where-Object {
+            $_.Level -in @(1, 2) -or $_.LevelDisplayName -match '(?i)critical|error'
+        }).Count -gt 0) { 'Alert' } else { 'Warning' }
+        $eventKey = 'diagnostics-windows-event-{0}-{1}' -f $latest.ProviderName, $latest.Id
+        Add-MonitorResult -Severity $severity -Category Diagnostics -Check 'Windows events' -Message (
+            '{0} event(s); provider={1}; ID={2}; latest={3}; message={4}' -f
+                $group.Count,
+                $latest.ProviderName,
+                $latest.Id,
+                $latest.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'),
+                $eventMessage
+        ) -Key $eventKey -NotificationEligible:$false
+        Write-RunLog -Category Diagnostics -Color DarkGray -Message (
+            'Windows event {0} is log-only. D4A and Mosquitto service availability is evaluated independently by the Windows service checks.' -f $eventKey
+        )
+    }
+}
+
+function Resolve-WatchdogLogRoot {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    function Add-WatchdogCandidate {
+        param([AllowNull()][string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        $expandedPath = [Environment]::ExpandEnvironmentVariables($Path)
+        if (-not $candidates.Contains($expandedPath)) {
+            $candidates.Add($expandedPath) | Out-Null
+        }
+    }
+
+    Add-WatchdogCandidate -Path $WatchdogLogRoot
+    $instanceRoots = @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' } | ForEach-Object { $_.Root })
+    foreach ($root in @(@($D4AInstallRoot, $env:D4A_HOME, (Split-Path -Parent $script:ScriptDirectory)) + $instanceRoots + @('D:\Apps\Decide4Action', 'C:\Apps\Decide4Action'))) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
+            Add-WatchdogCandidate -Path ([IO.Path]::Combine(
+                    [Environment]::ExpandEnvironmentVariables([string]$root),
+                    'Log',
+                    'TaskSchedulerOutput'
+                ))
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if ([IO.Directory]::Exists($candidate)) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
+    }
+    return $null
+}
+
+function Get-WatchdogLogEntryTime {
+    param(
+        # Blank separator lines are valid in TaskSchedulerOutput logs.
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [datetime]$FallbackTime
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $FallbackTime }
+    if ($Line -match '^\[(?<Timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\]') {
+        $parsedTime = [DateTime]::MinValue
+        if ([DateTime]::TryParseExact($matches.Timestamp, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsedTime)) {
+            return $parsedTime
+        }
+    }
+    return $FallbackTime
+}
+
+function ConvertTo-MonitorDateTimeOffset {
+    param([AllowNull()][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $parsed = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($Value.Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+        return $parsed
+    }
+    return $null
+}
+
+function Get-DataCollectorWindowsService {
+    $services = @(Get-SystemClassInstance -ClassName Win32_Service)
+    return @(
+        $services | Where-Object {
+            $name = [string]$_.Name
+            $displayName = [string]$_.DisplayName
+            ($name -match '(?i)^\s*(?:D4A|Decide4Action).*Data\s*Collector' -or
+             $displayName -match '(?i)^\s*(?:D4A|Decide4Action).*Data\s*Collector' -or
+             (('{0} {1}' -f $name, $displayName) -match '(?i)data\s*collector|datacollector' -and (Test-D4AServiceInD4A40Instance -Service $_)))
+        } | Select-Object -First 1
+    )
+}
+
+function Test-IsDataCollectorWatchdogFile {
+    param([Parameter(Mandatory = $true)][object]$File)
+
+    $serviceFolderName = Split-Path -Leaf (Split-Path -Parent $File.FullName)
+    return $serviceFolderName -match '(?i)data\s*collector|datacollector|^dc$'
+}
+
+function Test-DataCollectorWatchdogHealth {
+    param([Parameter(Mandatory = $true)][string]$WatchdogRoot)
+
+    $dataCollectorService = @(Get-DataCollectorWindowsService)
+    if ($dataCollectorService.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+            'No D4A Data Collector Windows service was found; Watchdog LastEventTime retry analysis was skipped.'
+        ) -Key 'diagnostics-datacollector-sql-health'
+        return
+    }
+
+    $service = $dataCollectorService[0]
+    if ([string]$service.State -ne 'Running' -or [string]$service.Status -ne 'OK') {
+        # Test-D4AWindowsServices has already added the immediate service alert.
+        Write-RunLog -Level Alert -Category Diagnostics -Color Red -Message (
+            'Data Collector service is not running. SQL LastEventTime retry logic was skipped; service state={0}; status={1}.' -f $service.State, $service.Status
+        )
+        return
+    }
+
+    $todayFileName = '{0}.txt' -f (Get-Date -Format 'yyyyMMdd')
+    $dataCollectorLog = @(
+        Get-ChildItem -LiteralPath $WatchdogRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)data\s*collector|datacollector|^dc$' } |
+            ForEach-Object { Join-Path $_.FullName $todayFileName } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+    )
+    if ($dataCollectorLog.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+            'Data Collector service is running, but no current Watchdog Data Collector log was found. SQL LastEventTime retry analysis was skipped.'
+        ) -Key 'diagnostics-datacollector-sql-health'
+        return
+    }
+
+    $logFile = Get-Item -LiteralPath $dataCollectorLog[0] -ErrorAction Stop
+    $state = Get-MonitorRuntimeState
+    $tracking = $state.DataCollectorLastEvent
+    $entryTime = $logFile.LastWriteTime
+    $latestFailure = $null
+    $latestHealthy = ConvertTo-MonitorDateTimeOffset -Value ([string]$tracking.LastHealthy)
+    foreach ($line in @(Get-Content -LiteralPath $logFile.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop)) {
+        $entryTime = Get-WatchdogLogEntryTime -Line ([string]$line) -FallbackTime $entryTime
+        if ($line -match '(?i)LastHealthy:\s*(?<Value>[^|,\r\n]+)') {
+            $candidateHealthy = ConvertTo-MonitorDateTimeOffset -Value $matches.Value
+            if ($null -ne $candidateHealthy -and ($null -eq $latestHealthy -or $candidateHealthy -gt $latestHealthy)) {
+                $latestHealthy = $candidateHealthy
+            }
+        }
+        if ($line -match '(?i)Data Collector LastEvent healthy') {
+            $candidateHealthy = [DateTimeOffset]$entryTime
+            if ($null -eq $latestHealthy -or $candidateHealthy -gt $latestHealthy) { $latestHealthy = $candidateHealthy }
+        }
+        if ($line -match '(?i)Unable to evaluate LastEventTime|Data Collector LastEvent error') {
+            $failureId = '{0}|{1}' -f $entryTime.ToUniversalTime().ToString('o'), (([string]$line -replace '\s+', ' ').Trim())
+            $failure = [pscustomobject]@{
+                Id      = $failureId
+                Time    = [DateTimeOffset]$entryTime
+                IsSqlTimeout = $line -match '(?i)Execution Timeout Expired|SQL.*timeout|timeout'
+                Sample  = (([string]$line -replace '[\r\n]+', ' ').Trim())
+            }
+            if ($null -eq $latestFailure -or $failure.Time -gt $latestFailure.Time -or
+                ($failure.Time -eq $latestFailure.Time -and $failure.IsSqlTimeout -and -not $latestFailure.IsSqlTimeout)) {
+                $latestFailure = $failure
+            }
+        }
+    }
+
+    $hasUnresolvedFailure = $null -ne $latestFailure -and ($null -eq $latestHealthy -or $latestFailure.Time -ge $latestHealthy)
+    if (-not $hasUnresolvedFailure) {
+        $tracking.ConsecutiveFailures = 0
+        if ($null -ne $latestHealthy) { $tracking.LastHealthy = $latestHealthy.ToString('o') }
+    }
+    elseif ($tracking.LastProcessedFailureId -ne $latestFailure.Id) {
+        $tracking.ConsecutiveFailures = [int]$tracking.ConsecutiveFailures + 1
+        $tracking.LastProcessedFailureId = $latestFailure.Id
+    }
+    if ($null -ne $latestHealthy) { $tracking.LastHealthy = $latestHealthy.ToString('o') }
+    Save-MonitorRuntimeState -State $state
+
+    $failureCount = [int]$tracking.ConsecutiveFailures
+    if ($hasUnresolvedFailure) {
+        $timeoutLabel = if ($latestFailure.IsSqlTimeout) { 'SQL health check timeout' } else { 'LastEventTime health check failure' }
+        if ($failureCount -lt $DataCollectorConsecutiveFailureThreshold) {
+            $diagnosticAction = if ($failureCount -ge 2) { 'retry and collect diagnostics' } else { 'retry; do not notify yet' }
+            Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+                'Data Collector status=Degraded / {0}; consecutive failures={1}/{2}; action={3}; service=Running; sample={4}' -f
+                    $timeoutLabel, $failureCount, $DataCollectorConsecutiveFailureThreshold, $diagnosticAction, $latestFailure.Sample
+            )
+            Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+                'Status=Degraded / {0}; consecutive failures={1}/{2}; action={3}; no notification sent.' -f
+                    $timeoutLabel, $failureCount, $DataCollectorConsecutiveFailureThreshold, $diagnosticAction
+            ) -Key 'diagnostics-datacollector-sql-health'
+        }
+        else {
+            Add-MonitorResult -Severity Alert -Category Diagnostics -Check 'Data Collector SQL health' -Message (
+                'Status=Alert / {0}; {1} consecutive LastEventTime failures while the service is Running; threshold={2}; sample={3}' -f
+                    $timeoutLabel, $failureCount, $DataCollectorConsecutiveFailureThreshold, $latestFailure.Sample
+            ) -Key 'diagnostics-datacollector-sql-health'
+        }
+    }
+
+    if ($null -ne $latestHealthy) {
+        $lastHealthyAgeMinutes = [Math]::Round(((Get-Date) - $latestHealthy.LocalDateTime).TotalMinutes, 1)
+        if ($lastHealthyAgeMinutes -gt $DataCollectorLastHealthyCriticalMinutes) {
+            Add-MonitorResult -Severity Alert -Category Diagnostics -Check 'Data Collector LastHealthy' -Message (
+                'Status=Critical; service=Running; LastHealthy={0}; age={1} minutes; critical threshold={2} minutes.' -f
+                    $latestHealthy.ToString('o'), $lastHealthyAgeMinutes, $DataCollectorLastHealthyCriticalMinutes
+            ) -Key 'diagnostics-datacollector-lasthealthy'
+        }
+        elseif ($lastHealthyAgeMinutes -gt $DataCollectorLastHealthyWarningMinutes) {
+            Add-MonitorResult -Severity Warning -Category Diagnostics -Check 'Data Collector LastHealthy' -Message (
+                'Status=Warning; service=Running; LastHealthy={0}; age={1} minutes; warning threshold={2} minutes.' -f
+                    $latestHealthy.ToString('o'), $lastHealthyAgeMinutes, $DataCollectorLastHealthyWarningMinutes
+            ) -Key 'diagnostics-datacollector-lasthealthy'
+        }
+        elseif (-not $hasUnresolvedFailure) {
+            Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Data Collector LastHealthy' -Message (
+                'Status=Healthy; service=Running; LastHealthy={0}; age={1} minutes.' -f $latestHealthy.ToString('o'), $lastHealthyAgeMinutes
+            ) -Key 'diagnostics-datacollector-lasthealthy'
+        }
+    }
+}
+
+function Test-IsOptionalPlcNotConfiguredEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    return (
+        $normalized -match '(?i)\bservice\s+[''"]?(?:D4A[_\s-]?)?PLC[''"]?\s+(?:was\s+)?not\s+found\b' -or
+        $normalized -match '(?i)\bskipping\s+PLC\s+connection\s+check\b'
+    )
+}
+
+function Get-D4AWindowsServiceComponentType {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $normalized = (($Text -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $null }
+
+    $hasD4AMarker = $normalized -match '(?i)\bDecide4Action\b|(?:^|[^a-z0-9])D4A'
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])data[\s_-]*collector(?:$|[^a-z0-9])') { return 'Data Collector' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?API(?:service)?(?:$|[^a-z0-9])') { return 'API' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?App(?:lication)?(?:service)?(?:$|[^a-z0-9])') { return 'App' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])watchdog(?:service)?(?:$|[^a-z0-9])') { return 'Watchdog' }
+    if ($hasD4AMarker -and $normalized -match '(?i)(?:^|[^a-z0-9])scheduler(?:service)?(?:$|[^a-z0-9])') { return 'Scheduler' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?MDC(?:service)?(?:$|[^a-z0-9])') { return 'MDC' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:D4A[\s_-]*)?PLC(?:service)?(?:$|[^a-z0-9])') { return 'PLC' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:mosquitto|mqtt)(?:$|[^a-z0-9])') { return 'Mosquitto/MQTT' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])nginx(?:$|[^a-z0-9])') { return 'Nginx' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])node[\s_-]*red(?:$|[^a-z0-9])') { return 'Node-RED' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])reverse[\s_-]*proxy(?:$|[^a-z0-9])') { return 'Reverse proxy' }
+    if ($normalized -match '(?i)(?:^|[^a-z0-9])(?:IIS|W3SVC)(?:$|[^a-z0-9])|world\s+wide\s+web\s+publishing\s+service|internet\s+information\s+services') { return 'IIS' }
+    return $null
+}
+
+function Resolve-WatchdogRenamedServiceEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Evidence,
+        [Parameter(Mandatory = $true)][object[]]$InstalledServices
+    )
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    $missingServiceMatch = [regex]::Match(
+        $normalized,
+        '(?i)\bservice\s+[''"](?<ServiceName>[^''"]+)[''"]\s+(?:was\s+)?not\s+found\b'
+    )
+    if (-not $missingServiceMatch.Success) { return $null }
+
+    $missingServiceName = $missingServiceMatch.Groups['ServiceName'].Value.Trim()
+    $componentType = Get-D4AWindowsServiceComponentType -Text $missingServiceName
+    if ([string]::IsNullOrWhiteSpace([string]$componentType)) { return $null }
+
+    $runningCounterparts = @($InstalledServices | Where-Object {
+            $candidateText = '{0} {1}' -f [string]$_.Name, [string]$_.DisplayName
+            (Get-D4AWindowsServiceComponentType -Text $candidateText) -eq $componentType -and
+            (Test-D4AWindowsServiceHealthy -Service $_)
+        })
+    if ($runningCounterparts.Count -eq 0) { return $null }
+
+    return [pscustomobject]@{
+        MissingServiceName = $missingServiceName
+        ComponentType      = $componentType
+        RunningServices    = @($runningCounterparts)
+    }
+}
+
+function Test-IsWatchdogHealthPublicationFailureEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    return $normalized -match '(?i)failed\s+to\s+publish\s+health\s+data\b'
+}
+
+function Test-IsNonActionableWatchdogHealthPublicationEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    # This is a static MQTT threshold declaration. The word "stale" describes
+    # the configured threshold, not a detected stale broker condition.
+    if ($normalized -match '(?i)\[config\]\s+mqtt-broker\s+uptime:\s*(?:on|off),\s*stale\s+\d+\s*s,\s*grace\s+\d+\s*s') {
+        return $true
+    }
+
+    # Watchdog health publication is optional and is not a local service-health
+    # authority. Endpoint and Windows-service checks independently report any
+    # outage that requires action.
+    return Test-IsWatchdogHealthPublicationFailureEvidence -Evidence $normalized
+}
+
+function Get-WatchdogEvidenceDisposition {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return 'Ignore' }
+
+    # PLC is optional. Watchdog records its absence as a skipped check rather
+    # than a service failure, so this evidence must never generate an alert.
+    if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence $normalized) {
+        return 'Ignore'
+    }
+
+    if (Test-IsNonActionableWatchdogHealthPublicationEvidence -Evidence $normalized) {
+        return 'Ignore'
+    }
+
+    # These messages contain words such as "error" but explicitly report a healthy result.
+    if ($normalized -match '(?i)healthy\s*\(no\s+matching\s+events\)|\bhealthy\b|conditions\s+back\s+to\s+normal|\bOK\s+-|Status\s*=\s*Healthy') {
+        return 'Ignore'
+    }
+
+    # A completed recovery is useful history, but the monitor's direct checks decide
+    # whether a service is currently unavailable and whether a notification is needed.
+    if ($normalized -match '(?i)restart\s+succeeded|restarted\s+(?:service|successfully)|service\s+.+\s+started\.?') {
+        return 'Warning'
+    }
+
+    # Failure to inspect optional evidence must not be presented as a service outage.
+    if ($normalized -match '(?i)unable\s+to\s+query\s+(?:Service\s+Control\s+Manager|Application).*events') {
+        return 'Warning'
+    }
+
+    if ($normalized -match '(?i)restart\s+failed|restart\s+unsuccessful|failed\s+to\s+restart|unable\s+to\s+(?:start|restart)\s+service|service\s+.+\s+(?:not\s+found|is\s+disabled|is\s+not\s+running)|status\s+is\s+["'']?(?:stopped|paused|startpending|stoppending)|detected\s+\d+\s+.*error\s+event|\bunhealthy\b|\bstale\b|\btimeout\b|timed\s+out|\bexception\b|\bcrash(?:ed)?\b|\bunavailable\b|no\s+MQTT\s+device\s+messages\s+observed|no\s+MQTT\s+last-contact\s+samples\s+observed') {
+        return 'Alert'
+    }
+
+    if ($normalized -match '(?i)restart\s+(?:deferred|skipped)|unable\s+to\s+(?:read|evaluate|persist)|\bfailed\b|\berror\b') {
+        return 'Warning'
+    }
+
+    return 'Ignore'
+}
+
+function Test-IsWatchdogSqlConnectivityEvidence {
+    param([Parameter(Mandatory = $true)][string]$Evidence)
+
+    $normalized = (($Evidence -replace '[\r\n]+', ' ') -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+
+    return (
+        $normalized -match '(?i)network-related\s+or\s+instance-specific\s+error.*establishing\s+a\s+connection\s+to\s+SQL\s+Server' -or
+        $normalized -match '(?i)Named\s+Pipes\s+Provider,\s*error:\s*40\s*-\s*Could\s+not\s+open\s+a\s+connection\s+to\s+SQL\s+Server' -or
+        $normalized -match '(?i)SQL\s+Server.*server\s+was\s+not\s+found\s+or\s+was\s+not\s+accessible' -or
+        $normalized -match '(?i)\bSHUTDOWN\s+is\s+in\s+progress\b' -or
+        $normalized -match '(?i)\bsession\s+is\s+in\s+the\s+kill\s+state\b'
+    )
+}
+
+function Update-WatchdogSqlConnectivityState {
+    param([AllowNull()][object]$LatestEvidenceTime)
+
+    $state = Get-MonitorRuntimeState
+    $tracking = $state.WatchdogSqlConnectivity
+    if ($null -eq $LatestEvidenceTime) {
+        if ([int]$tracking.ConsecutiveFailures -ne 0 -or -not [string]::IsNullOrWhiteSpace([string]$tracking.LastProcessedEvidence)) {
+            $tracking.ConsecutiveFailures = 0
+            $tracking.LastProcessedEvidence = $null
+            $tracking.LastDetectedAt = $null
+            Save-MonitorRuntimeState -State $state
+        }
+        return 0
+    }
+
+    $resolvedEvidenceTime = [datetime]$LatestEvidenceTime
+    $evidenceId = $resolvedEvidenceTime.ToUniversalTime().ToString('o')
+    if ([string]$tracking.LastProcessedEvidence -ne $evidenceId) {
+        $tracking.ConsecutiveFailures = [int]$tracking.ConsecutiveFailures + 1
+        $tracking.LastProcessedEvidence = $evidenceId
+    }
+    $tracking.LastDetectedAt = (Get-Date).ToUniversalTime().ToString('o')
+    Save-MonitorRuntimeState -State $state
+    return [int]$tracking.ConsecutiveFailures
+}
+
+function Add-WatchdogSqlConnectivityResult {
+    param([object[]]$EvidenceRecords)
+
+    $records = @($EvidenceRecords | Sort-Object -Property Time -Descending)
+    $databaseProbeResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Database' -and
+            [string]$_.Check -like 'Database connectivity - *'
+        })
+    $failedDatabaseProbeResults = @($databaseProbeResults | Where-Object { [string]$_.Severity -ne 'OK' })
+    if ($databaseProbeResults.Count -gt 0 -and $failedDatabaseProbeResults.Count -eq 0) {
+        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
+        Add-MonitorResult -Severity OK -Category Database -Check 'Watchdog SQL connectivity' -Message (
+            'SQL connectivity is restored; all {0} configured database probe(s) completed SELECT 1 successfully. Any recent Watchdog shutdown or session kill-state evidence is resolved.' -f
+                $databaseProbeResults.Count
+        ) -Key 'diagnostics-watchdog-sql-connectivity'
+        return
+    }
+
+    if ($records.Count -eq 0) {
+        [void](Update-WatchdogSqlConnectivityState -LatestEvidenceTime $null)
+        return
+    }
+
+    $latestEvidenceTime = [datetime]$records[0].Time
+    $consecutiveFailures = Update-WatchdogSqlConnectivityState -LatestEvidenceTime $latestEvidenceTime
+    $serviceNames = @($records | Select-Object -ExpandProperty Service -Unique | Sort-Object)
+    $sample = [string]$records[0].Text
+    if ($sample.Length -gt 900) { $sample = $sample.Substring(0, 900) + '...' }
+    $messagePrefix = 'Watchdog reported one SQL Server availability/connectivity incident across {0} check(s); affected logs={1}; latest evidence={2}; consecutive affected runs={3}/{4}' -f
+        $records.Count,
+        ($serviceNames -join ', '),
+        $latestEvidenceTime.ToString('yyyy-MM-dd HH:mm:ss'),
+        $consecutiveFailures,
+        $script:WatchdogSqlConnectivityConsecutiveRunsRequired
+
+    if ($consecutiveFailures -ge $script:WatchdogSqlConnectivityConsecutiveRunsRequired) {
+        Add-MonitorResult -Severity Alert -Category Database -Check 'Watchdog SQL connectivity' -Message (
+            '{0}; the failure persisted and is notification-eligible; sample={1}' -f $messagePrefix, $sample
+        ) -Key 'diagnostics-watchdog-sql-connectivity'
+    }
+    else {
+        Add-MonitorResult -Severity Warning -Category Database -Check 'Watchdog SQL connectivity' -Message (
+            '{0}; treated as a possible temporary connectivity loss and logged without notification; sample={1}' -f $messagePrefix, $sample
+        ) -Key 'diagnostics-watchdog-sql-connectivity' -NotificationEligible:$false
+    }
+}
+
+function Get-WatchdogApiLiveHealthSummary {
+    $apiEndpointResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Application' -and [string]$_.Check -match '^(?i)API health(?:\s|\()'
+        })
+    $apiServiceResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Server' -and
+            [string]$_.Check -eq 'Windows service' -and
+            (('{0} {1}' -f [string]$_.Key, [string]$_.Message) -match '(?i)(?:^|[^a-z0-9])api(?:$|[^a-z0-9])')
+        })
+    $apiListenerResults = @($script:Results | Where-Object {
+            [string]$_.Category -eq 'Server' -and [string]$_.Check -eq 'API listener'
+        })
+
+    $endpointHealthy = $apiEndpointResults.Count -gt 0 -and
+        @($apiEndpointResults | Where-Object { [string]$_.Severity -in @('Alert', 'Error') }).Count -eq 0
+    $serviceEvidence = if ($apiServiceResults.Count -gt 0) { $apiServiceResults } else { $apiListenerResults }
+    $serviceHealthy = @($serviceEvidence).Count -gt 0 -and
+        @($serviceEvidence | Where-Object { [string]$_.Severity -in @('Alert', 'Error') }).Count -eq 0
+    $healthy = $endpointHealthy -and $serviceHealthy
+
+    $endpointSummary = if ($apiEndpointResults.Count -eq 0) {
+        'API endpoint health was not evaluated'
+    }
+    else {
+        @($apiEndpointResults | ForEach-Object { '{0}={1}' -f $_.Check, $_.Severity }) -join ', '
+    }
+    $serviceSummary = if (@($serviceEvidence).Count -eq 0) {
+        'API service/listener health was not evaluated'
+    }
+    else {
+        @($serviceEvidence | ForEach-Object { '{0}={1}' -f $_.Check, $_.Severity }) -join ', '
+    }
+
+    return [pscustomobject]@{
+        IsHealthy   = $healthy
+        HasEvidence = ($apiEndpointResults.Count -gt 0 -and @($serviceEvidence).Count -gt 0)
+        Message     = '{0}; {1}' -f $endpointSummary, $serviceSummary
+    }
+}
+
+function Test-IsWatchdogApiEndpointFailureEvidence {
+    param([string]$Evidence)
+
+    if ([string]::IsNullOrWhiteSpace($Evidence)) { return $false }
+    return $Evidence -match '(?i)(?:https?://\S+|api\s+endpoint).*?(?:unavailable|timed?\s*out|timeout|not\s+responding)'
+}
+
+function Test-IsWatchdogApiRestartSuccessEvidence {
+    param([string]$Evidence)
+
+    if ([string]::IsNullOrWhiteSpace($Evidence)) { return $false }
+    return (
+        $Evidence -match '(?i)restart\s+succeeded' -and
+        $Evidence -match '(?i)(?:monitor:\s*api-endpoint|restarted\s+service\s+[''\"]?[^|]*api|reason:\s*\[api\])'
+    )
+}
+
+function Get-D4A40WatchdogServices {
+    return @(Get-D4AServiceInventory | Where-Object {
+            $text = '{0} {1}' -f [string]$_.Name, [string]$_.DisplayName
+            $text -match '(?i)watchdog' -and (
+                $text -match '(?i)(?:^|[^a-z0-9])(?:D4A|Decide4Action)' -or
+                (Test-D4AServiceUnderD4A40Base -Service $_) -or
+                (Test-D4AServiceInD4A40Instance -Service $_)
+            )
+        })
+}
+
+function Get-D4A40WatchdogLogFiles {
+    param([object[]]$WatchdogServices)
+
+    $folders = [System.Collections.Generic.List[string]]::new()
+    function Add-D4AWatchdogFolder {
+        param([AllowNull()][string]$Folder)
+
+        if ([string]::IsNullOrWhiteSpace($Folder)) { return }
+        try {
+            $full = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Folder)).TrimEnd('\')
+            if ([IO.Directory]::Exists($full) -and -not $folders.Contains($full) -and $full -notmatch '(?i)\\TaskSchedulerOutput$') {
+                $folders.Add($full) | Out-Null
+            }
+        }
+        catch { }
+    }
+
+    Add-D4AWatchdogFolder -Folder $WatchdogLogRoot
+    foreach ($layout in @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' })) {
+        Add-D4AWatchdogFolder -Folder (Join-Path $layout.Root 'logs')
+    }
+    foreach ($baseFolder in @(Get-D4A40BaseFolders)) {
+        Add-D4AWatchdogFolder -Folder (Join-Path $baseFolder 'logs')
+        Add-D4AWatchdogFolder -Folder (Join-Path $baseFolder 'Watchdog\logs')
+    }
+    foreach ($service in @($WatchdogServices)) {
+        foreach ($commandPath in @(Get-D4AServiceCommandPaths -Service $service)) {
+            $folder = if ([IO.File]::Exists($commandPath)) { [IO.Path]::GetDirectoryName($commandPath) } else { $commandPath }
+            Add-D4AWatchdogFolder -Folder (Join-Path $folder 'logs')
+            Add-D4AWatchdogFolder -Folder (Join-Path ([IO.Path]::GetDirectoryName($folder)) 'logs')
+        }
+    }
+
+    $files = [System.Collections.Generic.List[object]]::new()
+    foreach ($folder in $folders) {
+        $folderIsWatchdog = $folder -match '(?i)watchdog'
+        foreach ($file in @(Get-ChildItem -LiteralPath $folder -File -ErrorAction SilentlyContinue)) {
+            if ($file.Extension -notin @('.log', '.txt')) { continue }
+            if ($folderIsWatchdog -or $file.Name -match '(?i)watchdog') { $files.Add($file) | Out-Null }
+        }
+        foreach ($subfolder in @(Get-ChildItem -LiteralPath $folder -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)watchdog' })) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $subfolder.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.log', '.txt') })) {
+                $files.Add($file) | Out-Null
+            }
+        }
+    }
+    return @($files.ToArray() | Sort-Object -Property FullName -Unique | Sort-Object -Property LastWriteTime -Descending)
+}
+
+function Get-D4A40WatchdogLineTime {
+    param(
+        [AllowEmptyString()][string]$Line,
+        [datetime]$FallbackTime
+    )
+
+    if ($Line -match '(?<Stamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)') {
+        $parsed = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse($matches.Stamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+            return $parsed.LocalDateTime
+        }
+    }
+    return $FallbackTime
+}
+
+function Test-D4A40WatchdogServiceLogs {
+    $watchdogServices = @(Get-D4A40WatchdogServices)
+    $has40Instance = @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' }).Count -gt 0
+    if ($watchdogServices.Count -eq 0) {
+        if ($has40Instance) {
+            Add-MonitorResult -Severity OK -Category Diagnostics -Check 'D4A 4.0 Watchdog logs' -Message (
+                'No Decide4Action 4.0 Watchdog Windows service was found; 4.0 Watchdog evidence was skipped.'
+            ) -Key 'diagnostics-watchdog40-logs'
+        }
+        return
+    }
+
+    $serviceSummary = @($watchdogServices | ForEach-Object { '{0} [{1}] State={2}' -f $_.DisplayName, $_.Name, $_.State }) -join '; '
+    $runningServices = @($watchdogServices | Where-Object { [string]$_.State -eq 'Running' })
+    $logFiles = @(Get-D4A40WatchdogLogFiles -WatchdogServices $watchdogServices)
+    if ($logFiles.Count -eq 0) {
+        Add-MonitorResult -Severity Warning -Category Diagnostics -Check 'D4A 4.0 Watchdog logs' -Message (
+            'Watchdog service(s): {0}. No Watchdog log file was found in <instance>\logs, <base>\logs, or the service folder. Set WatchdogLogRoot to the 4.0 Watchdog log folder to enable evidence analysis.' -f $serviceSummary
+        ) -Key 'diagnostics-watchdog40-logs' -NotificationEligible:$false
+        return
+    }
+
+    $newest = $logFiles[0]
+    $ageMinutes = [Math]::Round(((Get-Date) - $newest.LastWriteTime).TotalMinutes, 1)
+    if ($runningServices.Count -gt 0 -and $ageMinutes -gt $WatchdogLogStaleMinutes) {
+        Add-MonitorResult -Severity Warning -Category Diagnostics -Check 'D4A 4.0 Watchdog activity' -Message (
+            'The Watchdog service is Running but its newest log was last written {0} minute(s) ago (threshold {1}); file={2}; services={3}.' -f
+                $ageMinutes, $WatchdogLogStaleMinutes, $newest.FullName, $serviceSummary
+        ) -Key 'diagnostics-watchdog40-activity' -NotificationEligible:$false
+    }
+    else {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'D4A 4.0 Watchdog activity' -Message (
+            'Newest Watchdog log written {0} minute(s) ago; file={1}; services={2}.' -f $ageMinutes, $newest.FullName, $serviceSummary
+        ) -Key 'diagnostics-watchdog40-activity'
+    }
+
+    # The 4.0 Watchdog log format is not a stable contract, so evidence is
+    # classified with conservative keywords and is always log-only. Windows
+    # service and endpoint checks remain the authority for notifications.
+    $since = (Get-Date).AddMinutes(-$LogLookbackMinutes)
+    $restartLines = [System.Collections.Generic.List[string]]::new()
+    $failureLines = [System.Collections.Generic.List[string]]::new()
+    $restartTargets = @{}
+    foreach ($file in @($logFiles | Where-Object { $_.LastWriteTime -ge $since } | Select-Object -First 5)) {
+        $lines = @(Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop)
+        # Lines inherit the previous timestamp. Before the first timestamp,
+        # or in a file without timestamps, only the last 20 lines are used.
+        $entryTime = [datetime]::MinValue
+        $hasTimestamps = @($lines | Where-Object { ([string]$_) -match '\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}' }).Count -gt 0
+        if (-not $hasTimestamps) {
+            $entryTime = $file.LastWriteTime
+            $lines = @($lines | Select-Object -Last 20)
+        }
+        foreach ($line in $lines) {
+            $text = ([string]$line -replace '[\r\n]+', ' ').Trim()
+            $entryTime = Get-D4A40WatchdogLineTime -Line $text -FallbackTime $entryTime
+            if ([string]::IsNullOrWhiteSpace($text) -or $entryTime -lt $since) { continue }
+            if ($text -match '(?i)not-installed|\b1060\b|healthy|\bOK\b|rotat|reopen') { continue }
+            if ($text -match '(?i)\brestart(?:ed|ing)?\b|\bsc\s+start\b|\bstopp(?:ed|ing)\s+(?:service|target)\b') {
+                $restartLines.Add(('{0} | {1}' -f $file.Name, $text)) | Out-Null
+                $target = if ($text -match '(?i)(?:service|target)\s*[:=]?\s*[''"]?(?<Name>[A-Za-z0-9_.$-]+)') { $matches.Name } else { 'unknown' }
+                if (-not $restartTargets.ContainsKey($target)) { $restartTargets[$target] = 0 }
+                $restartTargets[$target] = [int]$restartTargets[$target] + 1
+            }
+            elseif ($text -match '(?i)\bfail(?:ed|ure)?\b|\berror\b|\bunable\b|\bcannot\b|\btimed?\s*out\b|ECONNREFUSED|ECONNRESET') {
+                $failureLines.Add(('{0} | {1}' -f $file.Name, $text)) | Out-Null
+            }
+        }
+    }
+
+    if ($restartLines.Count -eq 0 -and $failureLines.Count -eq 0) {
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'D4A 4.0 Watchdog logs' -Message (
+            'No Watchdog restart or failure evidence since {0}; newest file={1}.' -f $since.ToString('yyyy-MM-dd HH:mm:ss'), $newest.FullName
+        ) -Key 'diagnostics-watchdog40-logs'
+        return
+    }
+
+    if ($restartLines.Count -gt 0) {
+        $loopTargets = @($restartTargets.Keys | Where-Object { [int]$restartTargets[$_] -ge 3 })
+        $sample = (@($restartLines | Select-Object -Last 3) -join ' || ')
+        if ($sample.Length -gt 1000) { $sample = $sample.Substring(0, 1000) + '...' }
+        $loopText = if ($loopTargets.Count -gt 0) {
+            '; possible restart loop for: {0}' -f (@($loopTargets | ForEach-Object { '{0} x{1}' -f $_, $restartTargets[$_] }) -join ', ')
+        }
+        else { '' }
+        Add-MonitorResult -Severity Warning -Category Diagnostics -Check 'D4A 4.0 Watchdog restarts' -Message (
+            '{0} Watchdog restart/start line(s) since {1}{2}. Log-only evidence; service availability is alerted by the Windows service checks. sample={3}' -f
+                $restartLines.Count, $since.ToString('yyyy-MM-dd HH:mm:ss'), $loopText, $sample
+        ) -Key 'diagnostics-watchdog40-restarts' -NotificationEligible:$false
+    }
+    if ($failureLines.Count -gt 0) {
+        $sample = (@($failureLines | Select-Object -Last 3) -join ' || ')
+        if ($sample.Length -gt 1000) { $sample = $sample.Substring(0, 1000) + '...' }
+        Add-MonitorResult -Severity Warning -Category Diagnostics -Check 'D4A 4.0 Watchdog failures' -Message (
+            '{0} Watchdog failure line(s) since {1}. Log-only evidence. sample={2}' -f
+                $failureLines.Count, $since.ToString('yyyy-MM-dd HH:mm:ss'), $sample
+        ) -Key 'diagnostics-watchdog40-failures' -NotificationEligible:$false
+    }
+}
+
+function Test-WatchdogServiceLogs {
+    # Decide4Action 4.0 Node Watchdog service (log-only evidence).
+    try {
+        Test-D4A40WatchdogServiceLogs
+    }
+    catch {
+        Add-MonitorResult -Severity Warning -Category Diagnostics -Check 'D4A 4.0 Watchdog logs' -Message (
+            'The 4.0 Watchdog log analysis could not complete: {0}' -f $_.Exception.Message
+        ) -Key 'diagnostics-watchdog40-analysis' -NotificationEligible:$false
+    }
+
+    # Legacy PowerShell Watchdog (3.9, and 4.0 servers that still run it).
+    $watchdogRoot = Resolve-WatchdogLogRoot
+    if ([string]::IsNullOrWhiteSpace($watchdogRoot)) {
+        Add-WatchdogSqlConnectivityResult -EvidenceRecords @()
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+            'Legacy Watchdog TaskSchedulerOutput folder was not found; legacy root-cause log analysis was skipped. Decide4Action 4.0 Watchdog evidence is analyzed separately.'
+        ) -Key 'diagnostics-watchdog-logs'
+        return
+    }
+
+    Test-DataCollectorWatchdogHealth -WatchdogRoot $watchdogRoot
+
+    $installedWindowsServices = @()
+    try {
+        $installedWindowsServices = @(Get-SystemClassInstance -ClassName Win32_Service)
+    }
+    catch {
+        Write-RunLog -Level Warning -Category Diagnostics -Color Yellow -Message (
+            'Unable to reconcile Watchdog service names with installed Windows services: {0}' -f $_.Exception.Message
+        )
+    }
+
+    $since = (Get-Date).AddMinutes(-$LogLookbackMinutes)
+    $todayFileName = '{0}.txt' -f (Get-Date -Format 'yyyyMMdd')
+    $logFiles = [System.Collections.Generic.List[object]]::new()
+    foreach ($serviceFolder in @(Get-ChildItem -LiteralPath $watchdogRoot -Directory -ErrorAction SilentlyContinue)) {
+        $logFile = Join-Path $serviceFolder.FullName $todayFileName
+        if (Test-Path -LiteralPath $logFile -PathType Leaf) {
+            $file = Get-Item -LiteralPath $logFile -ErrorAction Stop
+            if ($file.LastWriteTime -ge $since) { $logFiles.Add($file) | Out-Null }
+        }
+    }
+
+    if ($logFiles.Count -eq 0) {
+        Add-WatchdogSqlConnectivityResult -EvidenceRecords @()
+        Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+            'No Watchdog service log was updated during the current monitoring window; root={0}' -f $watchdogRoot
+        ) -Key 'diagnostics-watchdog-logs'
+        return
+    }
+
+    $sqlConnectivityRecords = [System.Collections.Generic.List[object]]::new()
+    foreach ($file in $logFiles) {
+        if (Test-IsDataCollectorWatchdogFile -File $file) { continue }
+        $serviceName = Split-Path -Leaf (Split-Path -Parent $file.FullName)
+        $isPlcServiceLog = $serviceName -match '(?i)^(?:D4A[_\s-]?)?PLC$'
+        $watchdogRuleKey = if ($isPlcServiceLog) { 'diagnostics-watchdog-plc' } else { 'diagnostics-watchdog-{0}' -f $serviceName }
+        $legacyWatchdogRuleKey = 'diagnostics-watchdog-{0}' -f $serviceName
+        $lines = @((Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop))
+        $entryTime = $file.LastWriteTime
+        $records = [System.Collections.Generic.List[object]]::new()
+        $recordLines = [System.Collections.Generic.List[string]]::new()
+        $recordTime = $entryTime
+        foreach ($rawLine in $lines) {
+            $line = (([string]$rawLine -replace '[\r\n]+', ' ').Trim())
+            if ($line -eq '---------------') { continue }
+            if ($line -match '^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]') {
+                if ($recordLines.Count -gt 0) {
+                    $records.Add([pscustomobject]@{ Time = $recordTime; Text = ($recordLines -join ' | ') }) | Out-Null
+                    $recordLines.Clear()
+                }
+                $recordTime = Get-WatchdogLogEntryTime -Line $line -FallbackTime $entryTime
+            }
+            if (-not [string]::IsNullOrWhiteSpace($line)) { $recordLines.Add($line) | Out-Null }
+        }
+        if ($recordLines.Count -gt 0) {
+            $records.Add([pscustomobject]@{ Time = $recordTime; Text = ($recordLines -join ' | ') }) | Out-Null
+        }
+
+        $alertSamples = [System.Collections.Generic.List[string]]::new()
+        $warningSamples = [System.Collections.Generic.List[string]]::new()
+        $renamedServiceResolutions = [System.Collections.Generic.List[string]]::new()
+        $plcNotConfigured = $false
+        $healthPublicationIgnored = $false
+        $apiLiveHealth = if ($serviceName -match '(?i)^api$') { Get-WatchdogApiLiveHealthSummary } else { $null }
+        $reconciledApiRecovery = $false
+        foreach ($record in $records) {
+            if ([datetime]$record.Time -lt $since) { continue }
+            if ($null -ne $apiLiveHealth -and $apiLiveHealth.IsHealthy -and
+                ((Test-IsWatchdogApiEndpointFailureEvidence -Evidence ([string]$record.Text)) -or
+                    (Test-IsWatchdogApiRestartSuccessEvidence -Evidence ([string]$record.Text)))) {
+                $reconciledApiRecovery = $true
+                continue
+            }
+            if (Test-IsOptionalPlcNotConfiguredEvidence -Evidence ([string]$record.Text)) {
+                $plcNotConfigured = $true
+                continue
+            }
+            if (Test-IsWatchdogHealthPublicationFailureEvidence -Evidence ([string]$record.Text)) {
+                $healthPublicationIgnored = $true
+                continue
+            }
+            $renamedServiceResolution = Resolve-WatchdogRenamedServiceEvidence `
+                -Evidence ([string]$record.Text) `
+                -InstalledServices $installedWindowsServices
+            if ($null -ne $renamedServiceResolution) {
+                $runningNames = @(foreach ($runningService in @($renamedServiceResolution.RunningServices)) {
+                        '{0} [{1}]' -f (Get-D4AWindowsServiceDisplayName -Service $runningService), $runningService.Name
+                    }) -join ', '
+                $resolutionMessage = "Watchdog service '$($renamedServiceResolution.MissingServiceName)' was not found under its former name; running $($renamedServiceResolution.ComponentType) counterpart(s): $runningNames."
+                if (-not $renamedServiceResolutions.Contains($resolutionMessage)) {
+                    $renamedServiceResolutions.Add($resolutionMessage) | Out-Null
+                }
+                continue
+            }
+            if (Test-IsWatchdogSqlConnectivityEvidence -Evidence ([string]$record.Text)) {
+                $sqlConnectivityRecords.Add([pscustomobject]@{
+                    Time    = [datetime]$record.Time
+                    Text    = [string]$record.Text
+                    Service = $serviceName
+                }) | Out-Null
+                continue
+            }
+            $disposition = Get-WatchdogEvidenceDisposition -Evidence ([string]$record.Text)
+            if ($disposition -eq 'Ignore') { continue }
+            $sample = [string]$record.Text
+            if ($sample.Length -gt 900) { $sample = $sample.Substring(0, 900) + '...' }
+            if ($disposition -eq 'Alert') {
+                if (-not $alertSamples.Contains($sample)) { $alertSamples.Add($sample) | Out-Null }
+            }
+            elseif (-not $warningSamples.Contains($sample)) {
+                $warningSamples.Add($sample) | Out-Null
+            }
+        }
+
+        $severity = if ($alertSamples.Count -gt 0) { 'Alert' } elseif ($warningSamples.Count -gt 0) { 'Warning' } else { $null }
+        if ($null -eq $severity) {
+            if ($reconciledApiRecovery) {
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+                    'A recent Watchdog API timeout/restart was soft-ignored because the current API endpoint and API service/listener checks are healthy. {0}' -f
+                        $apiLiveHealth.Message
+                ) -Key $watchdogRuleKey
+            }
+            if ($renamedServiceResolutions.Count -gt 0) {
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+                    'Watchdog missing-service evidence was soft-ignored after live service alias validation. {0}' -f
+                        (@($renamedServiceResolutions) -join ' ')
+                ) -Key $watchdogRuleKey
+            }
+            if ($plcNotConfigured) {
+                $plcMessage = 'PLC/D4A_PLC is not configured on this server; the Watchdog PLC connection check was soft-ignored.'
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message $plcMessage -Key 'diagnostics-watchdog-plc'
+                if ($isPlcServiceLog -and $legacyWatchdogRuleKey -ine 'diagnostics-watchdog-plc') {
+                    # Bridge alerts produced by releases that used the folder name in the rule key.
+                    Add-MonitorResult -Severity OK -Category Diagnostics -Check 'PLC connection check' -Message $plcMessage -Key $legacyWatchdogRuleKey
+                }
+            }
+            if ($healthPublicationIgnored) {
+                Add-MonitorResult -Severity OK -Category Diagnostics -Check 'Watchdog service logs' -Message (
+                    'Watchdog health-data publication failure evidence was ignored because health publication is optional; direct endpoint and Windows-service checks remain authoritative.'
+                ) -Key $watchdogRuleKey
+            }
+            continue
+        }
+        $samples = if ($severity -eq 'Alert') { $alertSamples } else { $warningSamples }
+        $selectedSamples = @($samples | Select-Object -First 3)
+        $evidenceLabel = if ($severity -eq 'Alert') { 'actionable failure evidence' } else { 'diagnostic or recovery evidence' }
+        Add-MonitorResult -Severity $severity -Category Diagnostics -Check 'Watchdog service logs' -Message (
+            'Recent Watchdog {0}; service={1}; file={2}; sample={3}' -f $evidenceLabel, $serviceName, $file.FullName, ($selectedSamples -join ' || ')
+        ) -Key $watchdogRuleKey -NotificationEligible:($severity -eq 'Alert')
+    }
+    Add-WatchdogSqlConnectivityResult -EvidenceRecords $sqlConnectivityRecords.ToArray()
+}
+
+function Resolve-DbConfigPath {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    function Add-Candidate {
+        param([string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        try {
+            $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+            if (-not $candidates.Contains($expanded)) {
+                $candidates.Add($expanded) | Out-Null
+            }
+        }
+        catch {
+            Write-ErrorLog -Category Email -Message ('Unable to expand email configuration path {0}: {1}' -f $Path, $_.Exception.Message)
+        }
+    }
+
+    Add-Candidate -Path $DbConfigPath
+    foreach ($root in @($D4AInstallRoot, $env:D4A_HOME)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
+            $expandedRoot = [Environment]::ExpandEnvironmentVariables([string]$root)
+            Add-Candidate -Path (Join-Path $expandedRoot 'API\dbconfig.js')
+            Add-Candidate -Path (Join-Path $expandedRoot 'Services\API\dbconfig.js')
+        }
+    }
+    foreach ($path in @(
+        'C:\Decide4Action\Services\API\dbconfig.js',
+        'D:\Decide4Action\Services\API\dbconfig.js',
+        'C:\Decide4Action-v2\Services\API\dbconfig.js',
+        'D:\Decide4Action-v2\Services\API\dbconfig.js',
+        'C:\Apps\Decide4Action\Services\API\dbconfig.js',
+        'D:\Apps\Decide4Action\Services\API\dbconfig.js',
+        'C:\Apps\Decide4Action-v2\Services\API\dbconfig.js',
+        'D:\Apps\Decide4Action-v2\Services\API\dbconfig.js',
+        'C:\Program Files\Decide4Action\Services\API\dbconfig.js',
+        'C:\Program Files\Decide4Action-v2\Services\API\dbconfig.js'
+    )) {
+        Add-Candidate -Path $path
+    }
+    # Decide4Action 4.0 instances after the 3.9 locations, so 3.9 servers keep
+    # their previous choice.
+    foreach ($layout in @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' })) {
+        Add-Candidate -Path $layout.DbConfigPath
+    }
+
+    foreach ($candidate in $candidates) {
+        try {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction Stop) {
+                return (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+            }
+        }
+        catch {
+            Write-ErrorLog -Category Email -Message ('Unable to inspect email configuration path {0}: {1}' -f $candidate, $_.Exception.Message)
+        }
+    }
+    return $null
+}
+
+function Resolve-NodeExecutable {
+    param([string]$ResolvedDbConfigPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($NodeExecutable)
+        if (Test-Path -LiteralPath $expanded -PathType Leaf) {
+            return (Get-Item -LiteralPath $expanded -ErrorAction Stop).FullName
+        }
+        throw ('Specified Node executable not found: {0}' -f $expanded)
+    }
+
+    foreach ($commandName in @('node.exe', 'node')) {
+        $command = Get-Command -Name $commandName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+            return [string]$command.Source
+        }
+    }
+
+    $candidatePaths = [System.Collections.Generic.List[string]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($ResolvedDbConfigPath)) {
+        $apiDirectory = Split-Path -Parent $ResolvedDbConfigPath
+        $candidatePaths.Add((Join-Path $apiDirectory 'node.exe')) | Out-Null
+        $candidatePaths.Add((Join-Path (Split-Path -Parent $apiDirectory) 'node.exe')) | Out-Null
+    }
+    # Decide4Action 4.0 installs one signed runtime at <base>\Runtime\node-v<version>\node.exe.
+    foreach ($baseFolder in @(Get-D4A40BaseFolders)) {
+        $runtimeFolder = Join-Path $baseFolder 'Runtime'
+        foreach ($runtime in @(Get-ChildItem -LiteralPath $runtimeFolder -Directory -Filter 'node-v*' -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime -Descending)) {
+            $candidatePaths.Add((Join-Path $runtime.FullName 'node.exe')) | Out-Null
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        $candidatePaths.Add((Join-Path $env:ProgramFiles 'nodejs\node.exe')) | Out-Null
+    }
+    if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+        $candidatePaths.Add((Join-Path ${env:ProgramFiles(x86)} 'nodejs\node.exe')) | Out-Null
+    }
+
+    foreach ($candidate in $candidatePaths) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Get-Item -LiteralPath $candidate -ErrorAction Stop).FullName
+        }
+    }
+    throw 'Node.js was not found. Supply -NodeExecutable or add node.exe to PATH.'
+}
+
+function Invoke-NodeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodePath,
+        [Parameter(Mandatory = $true)][string]$HelperPath,
+        [Parameter(Mandatory = $true)][string]$PayloadPath,
+        [hashtable]$EnvironmentOverrides = @{}
+    )
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $NodePath
+    $startInfo.Arguments = '"{0}" "{1}"' -f $HelperPath.Replace('"', '\"'), $PayloadPath.Replace('"', '\"')
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($name in @($EnvironmentOverrides.Keys)) {
+        # Only the child process receives these values; they are never logged.
+        $startInfo.EnvironmentVariables[[string]$name] = [string]$EnvironmentOverrides[$name]
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'The Node email helper process could not be started.'
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $processTimeoutMs = ($EmailTimeoutSeconds + 10) * 1000
+        if (-not $process.WaitForExit($processTimeoutMs)) {
+            try { $process.Kill() } catch { }
+            throw ('The email helper exceeded the {0}-second process timeout.' -f ($EmailTimeoutSeconds + 10))
+        }
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result.Trim()
+        $stderr = $stderrTask.Result.Trim()
+        if ($process.ExitCode -ne 0) {
+            $detail = (@($stderr, $stdout) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ' | '
+            if ([string]::IsNullOrWhiteSpace($detail)) {
+                $detail = 'The Node helper returned no diagnostic output.'
+            }
+            throw ('Node email helper failed with exit code {0}: {1}' -f $process.ExitCode, $detail)
+        }
+        return $stdout
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Get-D4AEmailHelperEnvironment {
+    param([Parameter(Mandatory = $true)][string]$ResolvedDbConfigPath)
+
+    # dbconfig.js decrypts its secrets from process.env when Node loads it. On
+    # Decide4Action 4.0 the keys can exist only in the API service environment,
+    # so the email helper receives the matching keys explicitly.
+    $overrides = @{}
+    if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('D4AKEY', 'Process')) -and
+        -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable('D4AIV', 'Process'))) {
+        return $overrides
+    }
+    $candidate = $null
+    if ($script:D4AKeySourceByConfigPath.ContainsKey($ResolvedDbConfigPath)) {
+        $candidate = $script:D4AKeySourceByConfigPath[$ResolvedDbConfigPath]
+    }
+    else {
+        $candidate = @(Get-D4ADatabaseKeyCandidates -ConfigPath $ResolvedDbConfigPath) | Select-Object -First 1
+    }
+    if ($null -ne $candidate) {
+        $overrides['D4AKEY'] = [string]$candidate.Key
+        $overrides['D4AIV'] = [string]$candidate.IV
+        Write-RunLog -Category Email -Color DarkGray -Message ('The email helper receives D4AKEY/D4AIV from: {0}.' -f $candidate.Source)
+    }
+    return $overrides
+}
+
+function Invoke-DbConfiguredEmail {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResolvedDbConfigPath,
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$TextBody,
+        [Parameter(Mandatory = $true)][string]$HtmlBody
+    )
+
+    $nodePath = Resolve-NodeExecutable -ResolvedDbConfigPath $ResolvedDbConfigPath
+    $tempId = '{0}_{1}' -f $PID, [Guid]::NewGuid().ToString('N')
+    $helperPath = Join-Path (Split-Path -Parent $script:RunLogPath) ('d4a_monitor_email_{0}.js' -f $tempId)
+    $payloadPath = Join-Path (Split-Path -Parent $script:RunLogPath) ('d4a_monitor_email_{0}.json' -f $tempId)
+    $payload = [ordered]@{
+        dbConfigPath         = $ResolvedDbConfigPath
+        nodemailerModulePath = $NodemailerModulePath
+        scriptDirectory      = $script:ScriptDirectory
+        timeoutMs            = $EmailTimeoutSeconds * 1000
+        to                   = $NotificationTo
+        from                 = $FromAddress
+        subject              = $Subject
+        text                 = $TextBody
+        html                 = $HtmlBody
+    }
+
+    $helper = @'
+"use strict";
+const fs = require("fs");
+const path = require("path");
+
+function loadNodemailer(explicitPath, configDirectory, scriptDirectory) {
+    const candidates = [];
+    if (explicitPath) candidates.push(explicitPath);
+    candidates.push(path.join(configDirectory, "node_modules", "nodemailer"));
+    candidates.push(path.join(path.dirname(configDirectory), "node_modules", "nodemailer"));
+    if (scriptDirectory) {
+        candidates.push(path.join(scriptDirectory, "node_modules", "nodemailer"));
+        candidates.push(path.join(scriptDirectory, "scripts", "node_modules", "nodemailer"));
+    }
+    if (process.env.USERPROFILE) {
+        candidates.push(path.join(process.env.USERPROFILE, "Downloads", "scripts", "node_modules", "nodemailer"));
+    }
+
+    const failures = [];
+    for (const candidate of candidates) {
+        try {
+            if (path.isAbsolute(candidate) && fs.existsSync(candidate)) return require(candidate);
+            return require(require.resolve(candidate, { paths: [configDirectory, path.dirname(configDirectory), process.cwd()] }));
+        } catch (error) {
+            failures.push(candidate + ": " + error.message);
+        }
+    }
+    try {
+        return require(require.resolve("nodemailer", { paths: [configDirectory, path.dirname(configDirectory), process.cwd()] }));
+    } catch (error) {
+        failures.push("nodemailer: " + error.message);
+    }
+    throw new Error("nodemailer could not be loaded. " + failures.join(" | "));
+}
+
+function asBoolean(value) {
+    if (typeof value === "boolean") return value;
+    return String(value || "").toLowerCase() === "true";
+}
+
+async function main() {
+    const payload = JSON.parse(fs.readFileSync(process.argv[2], "utf8").replace(/^\uFEFF/, ""));
+    const configPath = path.resolve(payload.dbConfigPath);
+    const configDirectory = path.dirname(configPath);
+    process.chdir(configDirectory);
+    const loadedConfig = require(configPath);
+    const config = loadedConfig && loadedConfig.default ? loadedConfig.default : loadedConfig;
+    const timeoutMs = Number(payload.timeoutMs || 30000);
+
+    let transporter = config.EmailTransporter;
+    if (!transporter || typeof transporter.sendMail !== "function") {
+        const nodemailer = loadNodemailer(payload.nodemailerModulePath, configDirectory, payload.scriptDirectory);
+        transporter = nodemailer.createTransport({
+            host: config.EmailHost,
+            port: Number(config.EmailPort || 587),
+            secure: asBoolean(config.EmailSecure),
+            auth: config.EmailUser || config.EmailPass ? { user: config.EmailUser, pass: config.EmailPass } : undefined,
+            connectionTimeout: timeoutMs,
+            greetingTimeout: timeoutMs,
+            socketTimeout: timeoutMs,
+            tls: config.EmailTlsCiphers ? { ciphers: config.EmailTlsCiphers } : undefined
+        });
+    }
+
+    const configuredFrom = payload.from || config.EmailFrom || config.EmailUser;
+    if (!configuredFrom) throw new Error("No sender was found in -FromAddress, EmailFrom, or EmailUser.");
+    const addressMatch = String(configuredFrom).match(/<\s*([^<>]+)\s*>/);
+    const senderAddress = (addressMatch ? addressMatch[1] : String(configuredFrom)).trim();
+    if (!senderAddress) throw new Error("The configured sender address is empty.");
+    if (!payload.to) throw new Error("NotificationTo is empty.");
+
+    const info = await transporter.sendMail({
+        from: { name: "D4A Monitoring", address: senderAddress },
+        to: payload.to,
+        subject: payload.subject,
+        text: payload.text,
+        html: payload.html
+    });
+    console.log("Email sent successfully.");
+    console.log("MessageId: " + (info && info.messageId ? info.messageId : ""));
+}
+
+main().catch(error => {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exit(1);
+});
+'@
+
+    try {
+        [IO.File]::WriteAllText($helperPath, $helper, $script:Utf8NoBom)
+        [IO.File]::WriteAllText($payloadPath, ($payload | ConvertTo-Json -Depth 6), $script:Utf8NoBom)
+        $environmentOverrides = Get-D4AEmailHelperEnvironment -ResolvedDbConfigPath $ResolvedDbConfigPath
+        $output = Invoke-NodeProcess -NodePath $nodePath -HelperPath $helperPath -PayloadPath $payloadPath -EnvironmentOverrides $environmentOverrides
+        return [pscustomobject]@{
+            Method  = 'D4A dbconfig.js / Node.js / nodemailer'
+            Details = $output
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $helperPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $payloadPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-MonitorSenderEmailAddress {
+    param([Parameter(Mandatory = $true)][string]$Sender)
+
+    try {
+        return ([Net.Mail.MailAddress]::new($Sender)).Address
+    }
+    catch {
+        throw "The configured sender address is invalid: $Sender"
+    }
+}
+
+function Invoke-SmtpEmail {
+    param(
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$TextBody,
+        [Parameter(Mandatory = $true)][string]$HtmlBody
+    )
+
+    if ([string]::IsNullOrWhiteSpace($SmtpServer)) {
+        throw 'SmtpServer is empty.'
+    }
+    $from = if ([string]::IsNullOrWhiteSpace($FromAddress)) {
+        'd4a-monitor@decide4action.com'
+    }
+    else {
+        $FromAddress
+    }
+
+    $credential = $null
+    if (-not [string]::IsNullOrWhiteSpace($SmtpCredentialFile)) {
+        if (-not (Test-Path -LiteralPath $SmtpCredentialFile -PathType Leaf)) {
+            throw ('SMTP credential file not found: {0}' -f $SmtpCredentialFile)
+        }
+        $credential = Import-Clixml -LiteralPath $SmtpCredentialFile -ErrorAction Stop
+        if ($credential -isnot [Management.Automation.PSCredential]) {
+            throw 'SmtpCredentialFile must contain a PSCredential object.'
+        }
+    }
+
+    $message = [Net.Mail.MailMessage]::new()
+    $client = [Net.Mail.SmtpClient]::new($SmtpServer, $SmtpPort)
+    try {
+        $senderAddress = Get-MonitorSenderEmailAddress -Sender $from
+        $message.From = [Net.Mail.MailAddress]::new($senderAddress, 'D4A Monitoring', [Text.Encoding]::UTF8)
+        $message.To.Add($NotificationTo)
+        $message.Subject = $Subject
+        $message.SubjectEncoding = [Text.Encoding]::UTF8
+        $message.BodyEncoding = [Text.Encoding]::UTF8
+        $message.AlternateViews.Add([Net.Mail.AlternateView]::CreateAlternateViewFromString(
+            $TextBody, [Text.Encoding]::UTF8, 'text/plain'
+        )) | Out-Null
+        $message.AlternateViews.Add([Net.Mail.AlternateView]::CreateAlternateViewFromString(
+            $HtmlBody, [Text.Encoding]::UTF8, 'text/html'
+        )) | Out-Null
+
+        $client.EnableSsl = [bool]$SmtpUseSsl
+        $client.Timeout = $EmailTimeoutSeconds * 1000
+        if ($null -ne $credential) {
+            $client.Credentials = $credential.GetNetworkCredential()
+        }
+        $client.Send($message)
+        return [pscustomobject]@{ Method = 'PowerShell SMTP'; Details = $null }
+    }
+    finally {
+        $message.Dispose()
+        $client.Dispose()
+    }
+}
+
+function Get-MonitorSubjectComponentLabel {
+    param([Parameter(Mandatory = $true)][object]$Result)
+
+    $check = [string]$Result.Check
+    $searchText = '{0} {1} {2}' -f $Result.Category, $check, $Result.Key
+    if ($check -match '(?i)certificate' -and $searchText -match '(?i)\bAPI\b') { return 'API Certificate' }
+    if ($check -match '(?i)certificate' -and $searchText -match '(?i)frontend') { return 'Frontend Certificate' }
+    if ($searchText -match '(?i)\bAPI\b') { return 'API' }
+    if ($searchText -match '(?i)disk') { return 'Disk Space' }
+    if ($searchText -match '(?i)data collector') { return 'Data Collector' }
+    if ($searchText -match '(?i)nginx') { return 'Nginx' }
+    if ($searchText -match '(?i)sql server agent|sqlagent') { return 'SQL Server Agent' }
+    if ($searchText -match '(?i)sqlbrowser') { return 'SQL Server Browser' }
+    if ($searchText -match '(?i)sql server|mssql') { return 'SQL Server' }
+    if ($searchText -match '(?i)mosquitto|mqtt') { return 'Mosquitto/MQTT' }
+    if ($searchText -match '(?i)\bCPU\b') { return 'CPU' }
+    if ($searchText -match '(?i)memory|\bRAM\b') { return 'Memory' }
+    if ($check -match '(?i)windows service' -and [string]$Result.Message -match '^(?<ServiceName>.+?)\s+\[') {
+        return $matches.ServiceName.Trim()
+    }
+    if ($searchText -match '(?i)frontend') { return 'Frontend' }
+    if (-not [string]::IsNullOrWhiteSpace($check)) { return ($check -replace '\s*\([^)]*\)\s*$', '').Trim() }
+    return 'Monitoring'
+}
+
+function Get-MonitorAlertSubjectLabel {
+    param([object[]]$IssueResults)
+
+    $distinctIssues = @($IssueResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })
+    if ($distinctIssues.Count -gt 1) { return 'Multiple Alerts detected' }
+    if ($distinctIssues.Count -eq 0) { return 'Monitoring Alert' }
+
+    $issue = $distinctIssues[0]
+    $component = Get-MonitorSubjectComponentLabel -Result $issue
+    $level = if ($component -eq 'Disk Space' -and $issue.Severity -in @('Alert', 'Error')) {
+        'Critical'
+    }
+    elseif ($issue.Severity -eq 'Warning') {
+        'Warning'
+    }
+    else {
+        'Alert'
+    }
+    return '{0} {1}' -f $component, $level
+}
+
+function Get-MonitorRecoverySubjectLabel {
+    param([object[]]$RecoveryResults)
+
+    $distinctRecoveries = @($RecoveryResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })
+    if ($distinctRecoveries.Count -gt 1) { return 'Multiple Recoveries detected' }
+    if ($distinctRecoveries.Count -eq 0) { return 'Monitoring Recovery' }
+    return '{0} Recovery' -f (Get-MonitorSubjectComponentLabel -Result $distinctRecoveries[0])
+}
+
+function New-EmailContent {
+    param(
+        [Parameter(Mandatory = $true)][string]$MonitoredSite,
+        [Parameter(Mandatory = $true)][string]$MonitoringName,
+        [string]$NotificationReference,
+        [object[]]$ActiveIgnoreRules,
+        [object[]]$RecoveryResults,
+        [ValidateSet('Alert', 'Recovery', 'Test', 'Daily')]
+        [string]$EmailType = 'Alert'
+    )
+
+    $allResults = @($script:Results.ToArray())
+    $recoveryResults = @($RecoveryResults)
+    $dailyOnlyResults = @($allResults | Where-Object {
+        $_.Severity -ne 'OK' -and -not $_.NotificationEligible
+    })
+    $emailResults = switch ($EmailType) {
+        'Alert' {
+            @($allResults | Where-Object { $_.Severity -eq 'OK' -or $_.NotificationEligible })
+        }
+        'Recovery' { $recoveryResults }
+        default { $allResults }
+    }
+    $issues = @($emailResults | Where-Object { $_.Severity -ne 'OK' })
+    $unignoredIssues = @($issues | Where-Object { -not $_.IgnoreActive })
+    $ignoredIssues = @($issues | Where-Object { $_.IgnoreActive })
+    $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
+    $ruleEntries = @(Get-IgnoreRuleEntries -Results $emailResults)
+    $heading = switch ($EmailType) {
+        'Test' { 'MONITORING TEST RESULTS' }
+        'Daily' { 'DAILY MONITORING RESULTS' }
+        'Recovery' { 'MONITORING RECOVERY' }
+        default { 'MONITORING ALERT' }
+    }
+    $subject = switch ($EmailType) {
+        'Test' { 'Monitoring test results for {0}' -f $MonitoringName }
+        'Daily' { 'Daily monitoring results for {0}' -f $MonitoringName }
+        'Recovery' { '{0} - {1}' -f (Get-MonitorRecoverySubjectLabel -RecoveryResults $recoveryResults), $MonitoringName }
+        default { '{0} - {1}' -f (Get-MonitorAlertSubjectLabel -IssueResults $unignoredNotifiableIssues), $MonitoringName }
+    }
+
+    $text = [Text.StringBuilder]::new()
+    [void]$text.AppendLine($heading)
+    [void]$text.AppendLine(('Monitoring name: {0}' -f $MonitoringName))
+    if (-not [string]::IsNullOrWhiteSpace($NotificationReference)) {
+        [void]$text.AppendLine(('Notification reference: {0}' -f $NotificationReference))
+    }
+    [void]$text.AppendLine(('Sites: {0}' -f $MonitoredSite))
+    [void]$text.AppendLine(('Server: {0}' -f $env:COMPUTERNAME))
+    [void]$text.AppendLine(('Scan started: {0}' -f $script:RunStartedAt.ToString('yyyy-MM-dd HH:mm:ss zzz')))
+    [void]$text.AppendLine(('Scan completed: {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')))
+    [void]$text.AppendLine(('Issues detected: {0}' -f $issues.Count))
+    [void]$text.AppendLine(('Issues not ignored: {0}' -f $unignoredIssues.Count))
+    [void]$text.AppendLine(('Issues covered by active rules: {0}' -f $ignoredIssues.Count))
+    [void]$text.AppendLine(('Recovered previously notified issues: {0}' -f $recoveryResults.Count))
+    [void]$text.AppendLine(('Active ignore rules: {0}' -f @($ActiveIgnoreRules).Count))
+    if ($EmailType -eq 'Alert' -and $dailyOnlyResults.Count -gt 0) {
+        [void]$text.AppendLine(('Daily-only warning evidence held for the daily monitoring email: {0}' -f $dailyOnlyResults.Count))
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('ISSUES DETECTED')
+    if ($issues.Count -eq 0) {
+        [void]$text.AppendLine('No warnings, alerts, or errors were detected.')
+    }
+    else {
+        foreach ($result in $issues) {
+            $ignoreStatus = if ($result.IgnoreActive) {
+                'IGNORED ({0}{1})' -f $result.IgnoreMode, $(if ($null -ne $result.IgnoreUntil) { '; until ' + $result.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { '' })
+            }
+            else {
+                'NOT IGNORED'
+            }
+            [void]$text.AppendLine(('[{0}] [{1}] {2}: {3}' -f $result.Severity, $result.Category, $result.Check, $result.Message))
+            [void]$text.AppendLine(('Rule key: {0}; Ignore status: {1}' -f $result.Key, $ignoreStatus))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('RECOVERED ISSUES')
+    if ($recoveryResults.Count -eq 0) {
+        [void]$text.AppendLine('No previously notified issue recovered during this scan.')
+    }
+    else {
+        foreach ($recovery in $recoveryResults) {
+            [void]$text.AppendLine(('[RECOVERY] [{0}] {1}: {2} [key={3}]' -f $recovery.Category, $recovery.Check, $recovery.Message, $recovery.Key))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('ACTIVE IGNORE RULES')
+    if (@($ActiveIgnoreRules).Count -eq 0) {
+        [void]$text.AppendLine('No active ignore rules are defined.')
+    }
+    else {
+        foreach ($rule in @($ActiveIgnoreRules | Sort-Object -Property Key)) {
+            $until = if ($null -ne $rule.IgnoreUntil) { $rule.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { 'permanent' }
+            [void]$text.AppendLine(('{0}|{1}|{2}|{3}' -f $rule.Key, $rule.Mode, $rule.Duration, $until))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('IGNORE RULE ENTRIES FOR NOT-IGNORED ISSUES')
+    if ($ruleEntries.Count -eq 0) {
+        [void]$text.AppendLine('No new ignore-rule entries are needed.')
+    }
+    else {
+        [void]$text.AppendLine(('Add one of the following lines to: {0}' -f $script:IgnoreRulesPath))
+        foreach ($entry in $ruleEntries) {
+            [void]$text.AppendLine(('Temporary (edit duration if needed): {0}' -f $entry.Temporary))
+            [void]$text.AppendLine(('Permanent: {0}' -f $entry.Permanent))
+        }
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('AUTOMATIC NOTIFICATION COOLDOWN')
+    [void]$text.AppendLine('After an alert email, the monitor automatically silences the same issue for 24 hours.')
+    [void]$text.AppendLine('To change the duration, run the command below. It updates both the duration and expiry time from now:')
+[void]$text.AppendLine(('  .\D4A-ScheduledMonitor.ps1 -SetIssueCooldown ''<rule-key>'' -IssueCooldownDuration ''12h'''))
+    [void]$text.AppendLine('To remove the automatic cooldown, run:')
+[void]$text.AppendLine(('  .\D4A-ScheduledMonitor.ps1 -ClearIssueCooldown ''<rule-key>'''))
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine('COMPLETE SCAN RESULTS')
+    foreach ($result in $emailResults) {
+        $ignoreStatus = if ($result.IgnoreActive) { 'ignored' } else { 'not ignored' }
+        [void]$text.AppendLine(('[{0}] [{1}] {2}: {3} [key={4}; {5}]' -f $result.Severity, $result.Category, $result.Check, $result.Message, $result.Key, $ignoreStatus))
+    }
+    [void]$text.AppendLine('')
+    [void]$text.AppendLine(('Monitoring logs: {0}' -f $script:MonitorLogDirectory))
+    [void]$text.AppendLine(('Monitor summary log: {0}' -f $script:RunLogPath))
+
+    $html = [Text.StringBuilder]::new()
+    [void]$html.AppendLine('<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#202124;font-size:14px">')
+    [void]$html.AppendLine(('<h2>{0}</h2>' -f [Net.WebUtility]::HtmlEncode($heading)))
+    if (-not [string]::IsNullOrWhiteSpace($NotificationReference)) {
+        [void]$html.AppendLine(('<p><b>Notification reference:</b> <code>{0}</code></p>' -f [Net.WebUtility]::HtmlEncode($NotificationReference)))
+    }
+    [void]$html.AppendLine(('<p><b>Monitoring name:</b> {0}<br><b>Sites:</b> {1}<br><b>Server:</b> {2}<br><b>Time:</b> {3}<br><b>Issues detected:</b> {4}<br><b>Not ignored:</b> {5}<br><b>Covered by active ignore rules:</b> {6}<br><b>Recovered previously notified issues:</b> {7}</p>' -f
+        [Net.WebUtility]::HtmlEncode($MonitoringName),
+        [Net.WebUtility]::HtmlEncode($MonitoredSite),
+        [Net.WebUtility]::HtmlEncode($env:COMPUTERNAME),
+        [Net.WebUtility]::HtmlEncode((Get-Date).ToString('yyyy-MM-dd HH:mm:ss zzz')),
+        $issues.Count,
+        $unignoredIssues.Count,
+        $ignoredIssues.Count,
+        $recoveryResults.Count))
+    if ($EmailType -eq 'Alert' -and $dailyOnlyResults.Count -gt 0) {
+        [void]$html.AppendLine(('<p><i>{0} daily-only warning item(s) were retained for the daily monitoring email and are omitted here.</i></p>' -f $dailyOnlyResults.Count))
+    }
+
+    if ($issues.Count -eq 0) {
+        [void]$html.AppendLine('<p style="padding:10px;background:#e8f5e9;border:1px solid #81c784"><b>Healthy:</b> No warnings, alerts, or errors were detected.</p>')
+    }
+    else {
+        [void]$html.AppendLine('<h3>Issues detected</h3><table style="border-collapse:collapse;width:100%" border="1" cellpadding="6">')
+        [void]$html.AppendLine('<tr><th>Severity</th><th>Category</th><th>Check</th><th>Details</th><th>Rule key</th><th>Ignore status</th></tr>')
+        foreach ($result in $issues) {
+            $background = if ($result.IgnoreActive) { '#e3f2fd' } elseif ($result.Severity -in @('Alert', 'Error')) { '#f8d7da' } else { '#fff3cd' }
+            $ignoreStatus = if ($result.IgnoreActive) {
+                'Ignored: {0}{1}' -f $result.IgnoreMode, $(if ($null -ne $result.IgnoreUntil) { '; until ' + $result.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { '' })
+            }
+            else {
+                'Not ignored'
+            }
+            [void]$html.AppendLine(('<tr style="background:{0}"><td><b>{1}</b></td><td>{2}</td><td>{3}</td><td>{4}</td><td><code>{5}</code></td><td>{6}</td></tr>' -f
+                $background,
+                [Net.WebUtility]::HtmlEncode([string]$result.Severity),
+                [Net.WebUtility]::HtmlEncode([string]$result.Category),
+                [Net.WebUtility]::HtmlEncode([string]$result.Check),
+                [Net.WebUtility]::HtmlEncode([string]$result.Message),
+                [Net.WebUtility]::HtmlEncode([string]$result.Key),
+                [Net.WebUtility]::HtmlEncode($ignoreStatus)))
+        }
+        [void]$html.AppendLine('</table>')
+    }
+
+    [void]$html.AppendLine('<h3>Recovered issues</h3>')
+    if ($recoveryResults.Count -eq 0) {
+        [void]$html.AppendLine('<p>No previously notified issue recovered during this scan.</p>')
+    }
+    else {
+        [void]$html.AppendLine('<table style="border-collapse:collapse;width:100%;background:#e8f5e9" border="1" cellpadding="6"><tr><th>Component</th><th>Check</th><th>Details</th><th>Rule key</th></tr>')
+        foreach ($recovery in $recoveryResults) {
+            [void]$html.AppendLine(('<tr><td>{0}</td><td>{1}</td><td>{2}</td><td><code>{3}</code></td></tr>' -f
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Category),
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Check),
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Message),
+                [Net.WebUtility]::HtmlEncode([string]$recovery.Key)))
+        }
+        [void]$html.AppendLine('</table>')
+    }
+
+    [void]$html.AppendLine('<h3>Active ignore rules</h3>')
+    if (@($ActiveIgnoreRules).Count -eq 0) {
+        [void]$html.AppendLine('<p>No active ignore rules are defined.</p>')
+    }
+    else {
+        [void]$html.AppendLine('<table style="border-collapse:collapse;width:100%" border="1" cellpadding="6"><tr><th>Rule key</th><th>Mode</th><th>Duration</th><th>Ignore until</th></tr>')
+        foreach ($rule in @($ActiveIgnoreRules | Sort-Object -Property Key)) {
+            $until = if ($null -ne $rule.IgnoreUntil) { $rule.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz') } else { 'Permanent' }
+            [void]$html.AppendLine(('<tr><td><code>{0}</code></td><td>{1}</td><td>{2}</td><td>{3}</td></tr>' -f
+                [Net.WebUtility]::HtmlEncode([string]$rule.Key),
+                [Net.WebUtility]::HtmlEncode([string]$rule.Mode),
+                [Net.WebUtility]::HtmlEncode([string]$rule.Duration),
+                [Net.WebUtility]::HtmlEncode($until)))
+        }
+        [void]$html.AppendLine('</table>')
+    }
+
+    [void]$html.AppendLine('<h3>Ignore a currently not-ignored issue</h3>')
+    if ($ruleEntries.Count -eq 0) {
+        [void]$html.AppendLine('<p>No new ignore-rule entries are needed.</p>')
+    }
+    else {
+        [void]$html.AppendLine(('<p>Add one line to <code>{0}</code>. A temporary rule receives its end date automatically during the next scan.</p>' -f [Net.WebUtility]::HtmlEncode($script:IgnoreRulesPath)))
+        foreach ($entry in $ruleEntries) {
+            [void]$html.AppendLine(('<p><b>{0}</b><br>Temporary: <code>{1}</code><br>Permanent: <code>{2}</code></p>' -f
+                [Net.WebUtility]::HtmlEncode([string]$entry.Key),
+                [Net.WebUtility]::HtmlEncode([string]$entry.Temporary),
+                [Net.WebUtility]::HtmlEncode([string]$entry.Permanent)))
+        }
+    }
+
+    [void]$html.AppendLine('<h3>Automatic notification cooldown</h3>')
+    [void]$html.AppendLine('<p>After an alert email, the same issue is automatically silenced for 24 hours. A resolved issue has its automatic rule removed. The override command recalculates both duration and expiry time from now.</p>')
+[void]$html.AppendLine('<p>Override: <code>.\D4A-ScheduledMonitor.ps1 -SetIssueCooldown ''&lt;rule-key&gt;'' -IssueCooldownDuration ''12h''</code><br>Remove: <code>.\D4A-ScheduledMonitor.ps1 -ClearIssueCooldown ''&lt;rule-key&gt;''</code></p>')
+
+    [void]$html.AppendLine('<h3>Complete scan results</h3><table style="border-collapse:collapse;width:100%" border="1" cellpadding="6">')
+    [void]$html.AppendLine('<tr><th>Severity</th><th>Category</th><th>Check</th><th>Details</th><th>Rule key</th><th>Ignore status</th></tr>')
+    foreach ($result in $emailResults) {
+        $ignoreStatus = if ($result.IgnoreActive) { 'Ignored' } else { 'Not ignored' }
+        [void]$html.AppendLine(('<tr><td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td><code>{4}</code></td><td>{5}</td></tr>' -f
+            [Net.WebUtility]::HtmlEncode([string]$result.Severity),
+            [Net.WebUtility]::HtmlEncode([string]$result.Category),
+            [Net.WebUtility]::HtmlEncode([string]$result.Check),
+            [Net.WebUtility]::HtmlEncode([string]$result.Message),
+            [Net.WebUtility]::HtmlEncode([string]$result.Key),
+            $ignoreStatus))
+    }
+    [void]$html.AppendLine('</table>')
+    [void]$html.AppendLine(('<p><b>Monitoring logs:</b> <code>{0}</code><br><b>Monitor summary log:</b> <code>{1}</code><br><b>Ignore rules:</b> <code>{2}</code></p>' -f
+        [Net.WebUtility]::HtmlEncode($script:MonitorLogDirectory),
+        [Net.WebUtility]::HtmlEncode($script:RunLogPath),
+        [Net.WebUtility]::HtmlEncode($script:IgnoreRulesPath)))
+    [void]$html.AppendLine('</body></html>')
+
+    return [pscustomobject]@{
+        Subject  = $subject
+        TextBody = $text.ToString()
+        HtmlBody = $html.ToString()
+    }
+}
+
+function Limit-DiscordText {
+    param(
+        [AllowNull()][string]$Text,
+        [ValidateRange(1, 4000)][int]$MaximumLength,
+        [switch]$PreserveLineBreaks
+    )
+
+    $normalizedText = if ($null -eq $Text) {
+        ''
+    }
+    elseif ($PreserveLineBreaks.IsPresent) {
+        (($Text -replace '\r\n?', "`n") -replace "`n{3,}", "`n`n").Trim()
+    }
+    else {
+        (($Text -replace '[\r\n]+', ' ') -replace '\s{2,}', ' ').Trim()
+    }
+    if ($normalizedText.Length -le $MaximumLength) { return $normalizedText }
+    return $normalizedText.Substring(0, [Math]::Max(1, $MaximumLength - 3)).TrimEnd() + '...'
+}
+
+function Get-DiscordSeverityEmoji {
+    param([Parameter(Mandatory = $true)][object]$Result)
+
+    switch ([string]$Result.Severity) {
+        'OK' { return ':white_check_mark:' }
+        'Warning' { return ':warning:' }
+        'Alert' {
+            if ([string]$Result.Category -eq 'Application' -or [string]$Result.Check -match '(?i)frontend|api') {
+                return ':rotating_light: :red_circle:'
+            }
+            return ':rotating_light:'
+        }
+        'Error' { return ':rotating_light:' }
+        default { return ':information_source:' }
+    }
+}
+
+function Get-DiscordNotificationEmoji {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily', 'Status')][string]$NotificationType,
+        [object[]]$IssueResults
+    )
+
+    if ($NotificationType -eq 'Recovery') { return ':green_circle:' }
+    if ($NotificationType -eq 'Status') { return ':white_check_mark:' }
+    if ($NotificationType -in @('Test', 'Daily')) { return ':information_source:' }
+    $criticalIssues = @($IssueResults | Where-Object { [string]$_.Severity -in @('Alert', 'Error') })
+    if ($criticalIssues.Count -eq 0 -and @($IssueResults | Where-Object { [string]$_.Severity -eq 'Warning' }).Count -gt 0) { return ':warning:' }
+    $siteIssue = @($criticalIssues | Where-Object { [string]$_.Category -eq 'Application' })
+    if ($siteIssue.Count -gt 0) { return ':rotating_light: :red_circle:' }
+    return ':rotating_light:'
+}
+
+function Get-DiscordNotificationColor {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily', 'Status')][string]$NotificationType,
+        [object[]]$IssueResults
+    )
+
+    switch ($NotificationType) {
+        'Recovery' { return 3066993 } # Green
+        'Test' { return 3447003 }     # Blue
+        'Daily' { return 10181046 }   # Purple
+        'Status' {
+            $severities = @($IssueResults | ForEach-Object { [string]$_.Severity })
+            if ($severities.Count -eq 0) { return 3066993 } # Green
+            if ($severities -contains 'Error' -or $severities -contains 'Alert') { return 15158332 } # Red
+            return 15844367 # Yellow
+        }
+        default {
+            $severities = @($IssueResults | ForEach-Object { [string]$_.Severity })
+            if ($severities -contains 'Error' -or $severities -contains 'Alert') { return 15158332 } # Red
+            return 15844367 # Yellow
+        }
+    }
+}
+
+function Format-DiscordStatusField {
+    param(
+        [object[]]$Results,
+        [Parameter(Mandatory = $true)][string]$Fallback
+    )
+
+    $items = @($Results | Select-Object -First 4 | ForEach-Object {
+            "{0} **{1}**`n{2}" -f (Get-DiscordSeverityEmoji -Result $_), $_.Check, $_.Message
+        })
+    if ($items.Count -eq 0) { return $Fallback }
+    return Limit-DiscordText -Text ($items -join "`n`n") -MaximumLength 850 -PreserveLineBreaks
+}
+
+function New-DiscordNotificationPayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$MonitoredSite,
+        [Parameter(Mandatory = $true)][string]$MonitoringName,
+        [Parameter(Mandatory = $true)][ValidateSet('Alert', 'Recovery', 'Test', 'Daily', 'Status')][string]$NotificationType,
+        [string]$NotificationReference,
+        [object[]]$RecoveryResults
+    )
+
+    $allResults = @($script:Results.ToArray())
+    $recoveryResults = @($RecoveryResults)
+    $reportResults = switch ($NotificationType) {
+        'Alert' {
+            @($allResults | Where-Object {
+                    $_.Severity -ne 'OK' -and $_.NotificationEligible -and -not $_.IgnoreActive
+                })
+        }
+        'Recovery' { $recoveryResults }
+        default { $allResults }
+    }
+    $issueResults = @($reportResults | Where-Object { $_.Severity -ne 'OK' })
+    $distinctIssues = @($issueResults | Group-Object -Property Key | ForEach-Object { $_.Group | Select-Object -First 1 })
+    $subjectResults = if ($NotificationType -eq 'Recovery') { $recoveryResults } else { $distinctIssues }
+    $componentLabels = @($subjectResults | ForEach-Object { Get-MonitorSubjectComponentLabel -Result $_ } | Select-Object -Unique)
+    $componentText = if ($componentLabels.Count -eq 0) { 'No active issue' } elseif ($componentLabels.Count -eq 1) { $componentLabels[0] } else { $componentLabels -join ', ' }
+    $notificationLabel = switch ($NotificationType) {
+        'Alert' { Get-MonitorAlertSubjectLabel -IssueResults $distinctIssues }
+        'Recovery' { Get-MonitorRecoverySubjectLabel -RecoveryResults $recoveryResults }
+        'Test' { 'Monitoring Test Results' }
+        'Daily' { 'Daily Monitoring Results' }
+        'Status' { 'Monitoring Status' }
+    }
+    $title = Limit-DiscordText -Text ('{0} {1} - {2}' -f (Get-DiscordNotificationEmoji -NotificationType $NotificationType -IssueResults $distinctIssues), $notificationLabel, $MonitoringName) -MaximumLength 256
+    $fields = [System.Collections.Generic.List[object]]::new()
+    $referenceLine = if ([string]::IsNullOrWhiteSpace($NotificationReference)) { '' } else { "**Reference:** ``$NotificationReference```n" }
+    $fields.Add([ordered]@{
+            name = 'Notification'
+            value = Limit-DiscordText -Text (
+                "${referenceLine}**Type:** $NotificationType`n**Affected component(s):** $componentText`n**Server:** $env:COMPUTERNAME`n**Time:** $((Get-Date).ToString('ddd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))"
+            ) -MaximumLength 600 -PreserveLineBreaks
+            inline = $false
+        }) | Out-Null
+
+    if ($NotificationType -eq 'Recovery') {
+        foreach ($recovery in @($recoveryResults | Select-Object -First 5)) {
+            $component = Get-MonitorSubjectComponentLabel -Result $recovery
+            $fields.Add([ordered]@{
+                    name = Limit-DiscordText -Text (':green_circle: Recovery | {0}' -f $component) -MaximumLength 100
+                    value = Limit-DiscordText -Text ("**Reference:** ``{0}```n**Check:** {1}`n**Alert value:** {2}`n**Current value:** {3}`n**Status:** {4}`n**Rule:** ``{5}``" -f $recovery.NotificationReference, $recovery.Check, $recovery.PreviousValue, $recovery.CurrentValue, $recovery.Message, $recovery.Key) -MaximumLength 900 -PreserveLineBreaks
+                    inline = $false
+                }) | Out-Null
+        }
+    }
+    elseif ($NotificationType -eq 'Status') {
+        $endpointResults = @($allResults | Where-Object { $_.Category -eq 'Application' })
+        $serviceResults = @($allResults | Where-Object {
+                $_.Category -eq 'Server' -and $_.Check -match '(?i)service|listener'
+            })
+        $resourceResults = @($allResults | Where-Object {
+                $_.Category -eq 'Server' -and $_.Check -in @('Memory', 'CPU', 'Disk space')
+            })
+        $fields.Add([ordered]@{
+                name = 'Endpoint availability'
+                value = Format-DiscordStatusField -Results $endpointResults -Fallback 'No endpoint results were produced.'
+                inline = $false
+            }) | Out-Null
+        $fields.Add([ordered]@{
+                name = 'Service status'
+                value = Format-DiscordStatusField -Results $serviceResults -Fallback 'No service results were produced.'
+                inline = $false
+            }) | Out-Null
+        $fields.Add([ordered]@{
+                name = 'Resource usage'
+                value = Format-DiscordStatusField -Results $resourceResults -Fallback 'No CPU, memory, or disk results were produced.'
+                inline = $false
+            }) | Out-Null
+    }
+    elseif ($issueResults.Count -eq 0) {
+        $fields.Add([ordered]@{
+                name = 'Result'
+                value = ':white_check_mark: All monitored checks completed successfully.'
+                inline = $false
+            }) | Out-Null
+    }
+    else {
+        foreach ($result in @($distinctIssues | Select-Object -First 5)) {
+            $component = Get-MonitorSubjectComponentLabel -Result $result
+            $fieldName = Limit-DiscordText -Text ('{0} {1} | {2}' -f (Get-DiscordSeverityEmoji -Result $result), $result.Severity, $component) -MaximumLength 100
+            $fieldValue = Limit-DiscordText -Text (
+                "**Check:** $($result.Check)`n**Details:** $($result.Message)`n**Rule:** $(( '`{0}`' -f $result.Key ))"
+            ) -MaximumLength 700 -PreserveLineBreaks
+            $fields.Add([ordered]@{
+                    name = $fieldName
+                    value = $fieldValue
+                    inline = $false
+                }) | Out-Null
+        }
+        if ($distinctIssues.Count -gt 5) {
+            $fields.Add([ordered]@{
+                    name = 'Additional affected checks'
+                    value = ('{0} additional issue(s) are available in the monitoring logs.' -f ($distinctIssues.Count - 5))
+                    inline = $false
+                }) | Out-Null
+        }
+    }
+
+    if ($NotificationType -ne 'Status') {
+        $fields.Add([ordered]@{
+                name = 'Monitoring logs'
+                value = Limit-DiscordText -Text ('`{0}`' -f $script:ErrorLogPath) -MaximumLength 400
+                inline = $false
+            }) | Out-Null
+    }
+
+    return [ordered]@{
+        username = 'D4A Monitoring'
+        allowed_mentions = [ordered]@{ parse = @() }
+        embeds = @([ordered]@{
+                title = $title
+                color = Get-DiscordNotificationColor -NotificationType $NotificationType -IssueResults $issueResults
+                description = Limit-DiscordText -Text ("**Site:** {0}`n**Monitoring name:** {1}" -f $MonitoredSite, $MonitoringName) -MaximumLength 900 -PreserveLineBreaks
+                fields = @($fields.ToArray())
+                footer = [ordered]@{ text = ('D4A Monitoring | Version {0}' -f $script:MonitorVersion) }
+                timestamp = [DateTime]::UtcNow.ToString('o')
+            })
+    }
+}
+
+function Send-MonitorDiscordNotification {
+    param([Parameter(Mandatory = $true)][object]$Payload)
+
+    if ($DisableDiscord.IsPresent) {
+        throw 'Discord notifications are disabled for this run.'
+    }
+    if ([string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+        throw 'DiscordWebhookUrl is not configured.'
+    }
+    Test-DiscordWebhookUrl -WebhookUrl $DiscordWebhookUrl
+
+    $response = $null
+    try {
+        Initialize-MonitorWebTls
+        $request = [Net.HttpWebRequest]::Create([Uri]$DiscordWebhookUrl)
+        $request.Method = 'POST'
+        $request.ContentType = 'application/json; charset=utf-8'
+        $request.Accept = 'application/json'
+        $request.UserAgent = 'D4A-ScheduledMonitor/{0}' -f $script:MonitorVersion
+        $request.Timeout = $DiscordTimeoutSeconds * 1000
+        $request.ReadWriteTimeout = $DiscordTimeoutSeconds * 1000
+        $payloadBytes = $script:Utf8NoBom.GetBytes(($Payload | ConvertTo-Json -Depth 8 -Compress))
+        $request.ContentLength = $payloadBytes.Length
+        $requestStream = $request.GetRequestStream()
+        try {
+            $requestStream.Write($payloadBytes, 0, $payloadBytes.Length)
+        }
+        finally {
+            $requestStream.Dispose()
+        }
+
+        $response = [Net.HttpWebResponse]$request.GetResponse()
+        $statusCode = [int]$response.StatusCode
+        if ($statusCode -lt 200 -or $statusCode -ge 300) {
+            throw ('Discord webhook returned HTTP {0}.' -f $statusCode)
+        }
+        return [pscustomobject]@{ Method = 'Discord webhook'; Details = ('HTTP {0}' -f $statusCode) }
+    }
+    catch [Net.WebException] {
+        $statusCode = $null
+        if ($null -ne $_.Exception.Response) {
+            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+        }
+        if ($null -ne $statusCode) {
+            throw ('Discord webhook delivery failed with HTTP {0}.' -f $statusCode)
+        }
+        throw ('Discord webhook delivery failed after {0} seconds. Check network access to discord.com.' -f $DiscordTimeoutSeconds)
+    }
+    catch {
+        throw 'Discord webhook delivery failed. Check the local webhook configuration and network access to discord.com.'
+    }
+    finally {
+        if ($null -ne $response) { $response.Dispose() }
+    }
+}
+
+function Send-MonitorEmail {
+    param(
+        [Parameter(Mandatory = $true)][string]$Subject,
+        [Parameter(Mandatory = $true)][string]$TextBody,
+        [Parameter(Mandatory = $true)][string]$HtmlBody
+    )
+
+    if ([string]::IsNullOrWhiteSpace($NotificationTo)) {
+        throw 'NotificationTo is empty.'
+    }
+
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $resolvedConfig = Resolve-DbConfigPath
+    if (-not [string]::IsNullOrWhiteSpace($resolvedConfig)) {
+        try {
+            return Invoke-DbConfiguredEmail `
+                -ResolvedDbConfigPath $resolvedConfig `
+                -Subject $Subject `
+                -TextBody $TextBody `
+                -HtmlBody $HtmlBody
+        }
+        catch {
+            $failures.Add(('dbconfig.js delivery failed: {0}' -f $_.Exception.Message)) | Out-Null
+        }
+    }
+    else {
+        $failures.Add('No D4A API dbconfig.js file was found.') | Out-Null
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SmtpServer)) {
+        try {
+            return Invoke-SmtpEmail -Subject $Subject -TextBody $TextBody -HtmlBody $HtmlBody
+        }
+        catch {
+            $failures.Add(('SMTP fallback failed: {0}' -f $_.Exception.Message)) | Out-Null
+        }
+    }
+    else {
+        $failures.Add('SMTP fallback is not configured; set -SmtpServer to enable it.') | Out-Null
+    }
+
+    throw ($failures -join ' ')
+}
+
+function Get-ExitCode {
+    $severities = @($script:Results | Select-Object -ExpandProperty Severity)
+    if ($severities -contains 'Error' -or $severities -contains 'Alert') { return 2 }
+    if ($severities -contains 'Warning') { return 1 }
+    return 0
+}
+
+function Invoke-D4AMonitor {
+    if (-not $script:LoggingReady) { Initialize-MonitorLogging }
+    Write-RunLog -Category Monitor -Color Cyan -Message (
+        'D4A monitoring run started. Version={0}; release date={1}; script={2}' -f
+            $script:MonitorVersion, $script:MonitorReleaseDate, $script:ScriptPath
+    )
+    Write-RunLog -Category Configuration -Message (
+        'Configuration={0}; external configuration loaded={1}' -f $script:ResolvedConfigPath, $script:ConfigurationLoaded
+    ) -Color DarkGray
+    Write-RunLog -Category Monitor -Message ('Monitoring logs={0}' -f $script:MonitorLogDirectory) -Color DarkGray
+    Write-RunLog -Category Monitor -Message ('Monitor summary log={0}' -f $script:RunLogPath) -Color DarkGray
+    Write-RunLog -Category Monitor -Message (
+        'Monitor edition=Decide4Action {0}; release channel={1}; automatic update={2}.' -f
+            $script:MonitorTargetPlatform, $script:MonitorReleaseChannel, $(if ($AutomaticUpdateEnabled) { 'enabled' } else { 'disabled' })
+    ) -Color DarkGray
+
+    $activeMaintenance = Get-ActiveMonitorMaintenanceWindow
+    if ($null -ne $activeMaintenance) {
+        $maintenanceDetails = if ([string]::IsNullOrWhiteSpace([string]$activeMaintenance.Comment)) { '' } else { '; details={0}' -f $activeMaintenance.Comment }
+        $maintenanceMessage = 'Scheduled maintenance is active: {0}; schedule={1}; start={2}; monitoring checks and notifications are skipped until {3}{4}.' -f
+            $activeMaintenance.Name,
+            $activeMaintenance.Schedule,
+            $activeMaintenance.Start.ToString('yyyy-MM-dd HH:mm:ss'),
+            $activeMaintenance.End.ToString('yyyy-MM-dd HH:mm:ss'),
+            $maintenanceDetails
+        Write-RunLog -Level INFO -Category Maintenance -Color Cyan -Message $maintenanceMessage
+        Add-MonitorResult -Severity OK -Category Maintenance -Check 'Scheduled maintenance' -Message $maintenanceMessage -Key 'maintenance-window-active'
+        return
+    }
+
+    if ($SendDiscordStatus.IsPresent -and
+        ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            'Use -SendDiscordStatus by itself; it cannot be combined with test or daily email reports.'
+        )
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget) -and
+        ($SendDiscordStatus.IsPresent -or $SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            'Use -ForceRecoveryTarget by itself; it cannot be combined with status, test, or daily reports.'
+        )
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget) -and
+        (($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) -and
+            ($DisableEmail.IsPresent -or -not $EnableEmailNotifications))) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            '-ForceRecoveryTarget requires at least one enabled notification channel.'
+        )
+        return
+    }
+    if ($SendDiscordStatus.IsPresent -and
+        ($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl))) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            '-SendDiscordStatus requires a configured DiscordWebhookUrl and cannot be used with -DisableDiscord.'
+        )
+        return
+    }
+    if ($DisableEmail.IsPresent -and
+        ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent -or $SendDiscordStatus.IsPresent) -and
+        ($DisableDiscord.IsPresent -or [string]::IsNullOrWhiteSpace($DiscordWebhookUrl))) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check Notification -Message (
+            '-DisableEmail requires a configured DiscordWebhookUrl when sending test, daily, or Discord status results.'
+        )
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SetIssueCooldown) -and -not [string]::IsNullOrWhiteSpace($ClearIssueCooldown)) {
+        Add-MonitorResult -Severity Error -Category Configuration -Check 'Issue cooldown' -Message (
+            'Use either -SetIssueCooldown or -ClearIssueCooldown, not both.'
+        )
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SetIssueCooldown)) {
+        Set-AutomaticIssueCooldown -Key $SetIssueCooldown -Duration $IssueCooldownDuration
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ClearIssueCooldown)) {
+        Set-AutomaticIssueCooldown -Key $ClearIssueCooldown -Remove
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($SiteAddress) -and [Environment]::UserInteractive) {
+        $script:SiteAddressFromPrompt = Read-Host 'Enter the D4A site address(es), separated by commas (default: hostname:1200)'
+    }
+    else {
+        $script:SiteAddressFromPrompt = $SiteAddress
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:SiteAddressFromPrompt)) {
+        $script:SiteAddressFromPrompt = 'hostname:1200'
+    }
+    $resolvedMonitoringName = if ([string]::IsNullOrWhiteSpace($MonitoringName)) { $env:COMPUTERNAME } else { $MonitoringName.Trim() }
+    $monitorEndpoints = [System.Collections.Generic.List[object]]::new()
+    try {
+        $frontendUris = @(ConvertTo-HttpUris -Addresses $script:SiteAddressFromPrompt)
+        $resolvedSiteNames = @(Get-MonitorSiteDisplayNames -FrontendUris $frontendUris)
+        $resolvedMonitoringName = if ($resolvedSiteNames.Count -gt 0) { $resolvedSiteNames -join ', ' } elseif ([string]::IsNullOrWhiteSpace($MonitoringName)) { $env:COMPUTERNAME } else { $MonitoringName.Trim() }
+        $apiUris = @(Get-MonitorApiUris -FrontendUris $frontendUris)
+        for ($index = 0; $index -lt $frontendUris.Count; $index++) {
+            $frontendUri = $frontendUris[$index]
+            $apiUri = $apiUris[$index]
+            $monitorEndpoints.Add([pscustomobject]@{
+                FrontendUri = $frontendUri
+                ApiUri      = $apiUri
+                Label       = $resolvedSiteNames[$index]
+            }) | Out-Null
+        }
+        Write-RunLog -Category Configuration -Message ('MonitoringName={0}; Sites={1}; APIs={2}; email={3}; email recipient={4}; Discord={5}; test notification={6}; daily summary={7}; Discord status={8}' -f
+            $resolvedMonitoringName,
+            (($monitorEndpoints | ForEach-Object { $_.FrontendUri.AbsoluteUri }) -join ', '),
+            (($monitorEndpoints | ForEach-Object { $_.ApiUri.AbsoluteUri }) -join ', '),
+            (Get-EmailDeliveryConfigurationStatus),
+            $NotificationTo,
+            (Get-DiscordDeliveryConfigurationStatus),
+            $SendTestResultsEmail.IsPresent,
+            $SendDailySummaryEmail.IsPresent,
+            $SendDiscordStatus.IsPresent) -Color White
+    }
+    catch {
+        Add-MonitorResult -Severity Error -Category Configuration -Check 'Site address' -Message $_.Exception.Message
+    }
+
+    $lockPath = Join-Path (Split-Path -Parent $script:RunLogPath) 'scheduled-monitor.lock'
+    $lockStream = $null
+    $waitForOverlap = [string]$env:D4A_MONITOR_WAIT_FOR_OVERLAP -match '^(?i:1|true|yes)$'
+    $overlapWaitTimeoutSeconds = 900
+    $configuredOverlapWaitTimeout = 0
+    if ([int]::TryParse([string]$env:D4A_MONITOR_OVERLAP_WAIT_TIMEOUT_SECONDS, [ref]$configuredOverlapWaitTimeout) -and
+        $configuredOverlapWaitTimeout -ge 30 -and $configuredOverlapWaitTimeout -le 3600) {
+        $overlapWaitTimeoutSeconds = $configuredOverlapWaitTimeout
+    }
+    try {
+        $overlapWaitStartedAt = Get-Date
+        while ($null -eq $lockStream) {
+            try {
+                $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            }
+            catch {
+                if (-not $waitForOverlap) {
+                    Add-MonitorResult -Severity Warning -Category Monitor -Check 'Overlap lock' -Message (
+                        'Another monitor instance is running. This scan was skipped.'
+                    )
+                    return
+                }
+
+                $elapsedSeconds = [int][math]::Floor(((Get-Date) - $overlapWaitStartedAt).TotalSeconds)
+                if ($elapsedSeconds -ge $overlapWaitTimeoutSeconds) {
+                    Add-MonitorResult -Severity Warning -Category Monitor -Check 'Overlap lock' -Message (
+                        'Another monitor instance was still running after {0} second(s). The manual scan was not started.' -f $overlapWaitTimeoutSeconds
+                    )
+                    return
+                }
+                Write-RunLog -Level INFO -Category Monitor -Color Blue -Message (
+                    'Another monitor instance is running. Manual scan is waiting for the overlap lock; elapsed={0}s; timeout={1}s.' -f
+                        $elapsedSeconds, $overlapWaitTimeoutSeconds
+                )
+                Start-Sleep -Seconds 5
+            }
+        }
+        if ($waitForOverlap -and ((Get-Date) - $overlapWaitStartedAt).TotalSeconds -ge 1) {
+            Write-RunLog -Level OK -Category Monitor -Color Green -Message (
+                'The overlapping monitor run completed. Manual scan acquired the lock after {0:N1} second(s).' -f
+                    ((Get-Date) - $overlapWaitStartedAt).TotalSeconds
+            )
+        }
+
+        try {
+            [void](Get-D4AInstanceLayouts)
+            [void](Get-D4ADiscoveredApiEndpoints)
+        }
+        catch {
+            Add-D4ADiscoveryNote -Message ('D4A discovery did not complete: {0}' -f $_.Exception.Message)
+        }
+        foreach ($note in @($script:D4ADiscoveryNotes.ToArray())) {
+            Write-RunLog -Category Discovery -Color DarkGray -Message $note
+        }
+
+        foreach ($endpoint in @($monitorEndpoints)) {
+            Invoke-SafeMonitorCheck -Category Application -Check Frontend -Action {
+                Test-WebEndpoint -Name ('Frontend availability ({0})' -f $endpoint.Label) -Uri $endpoint.FrontendUri
+            }
+            Invoke-SafeMonitorCheck -Category Application -Check API -Action {
+                Test-WebEndpoint `
+                    -Name ('API health ({0})' -f $endpoint.Label) `
+                    -Uri $endpoint.ApiUri `
+                    -FailureAttempts $ApiHealthFailureAttempts `
+                    -FailureRetryIntervalSeconds $ApiHealthRetryIntervalSeconds `
+                    -TreatNotFoundAsReachable:(Test-D4AHas40Instance)
+            }
+            Invoke-SafeMonitorCheck -Category TLS -Check Frontend -Action {
+                Test-TlsCertificate -Name ('Frontend certificate ({0})' -f $endpoint.Label) -Uri $endpoint.FrontendUri
+            }
+            Invoke-SafeMonitorCheck -Category TLS -Check API -Action {
+                Test-TlsCertificate -Name ('API certificate ({0})' -f $endpoint.Label) -Uri $endpoint.ApiUri
+            }
+            # Direct API results keep one rule key per site, as in 3.9, so an
+            # earlier per-site alert still receives its recovery notification.
+            Invoke-SafeMonitorCheck -Category 'Application performance' -Check Endpoints -Action {
+                Test-ApplicationPerformance -PublicApiBaseUri (Get-AuthorityBaseUri -Uri $endpoint.ApiUri) -TargetLabel $endpoint.Label -IncludeDirectApi
+            }
+        }
+
+    Invoke-SafeMonitorCheck -Category Server -Check 'D4A Windows services' -Action { Test-D4AWindowsServices }
+    Invoke-SafeMonitorCheck -Category Server -Check 'SQL Server services' -Action { Test-SqlServerWindowsServices }
+    Invoke-SafeMonitorCheck -Category Database -Check 'Database connectivity' -Action { Test-D4ADatabaseConnectivity }
+    Invoke-SafeMonitorCheck -Category Server -Check 'Mosquitto/MQTT service' -Action { Test-MosquittoWindowsService }
+    Invoke-SafeMonitorCheck -Category Server -Check 'Web infrastructure services' -Action { Test-WebInfrastructureWindowsServices }
+        Invoke-SafeMonitorCheck -Category Server -Check 'API listener' -Action { Test-ApiListener }
+        Invoke-SafeMonitorCheck -Category Server -Check Memory -Action { Test-MemoryHealth }
+        Invoke-SafeMonitorCheck -Category Server -Check CPU -Action { Test-CpuHealth }
+        Invoke-SafeMonitorCheck -Category Server -Check Disks -Action { Test-DiskHealth }
+        Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Nginx errors' -Action { Test-NginxErrors }
+        Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Windows events' -Action { Test-RelevantWindowsEvents }
+        Invoke-SafeMonitorCheck -Category Diagnostics -Check 'Watchdog service logs' -Action { Test-WatchdogServiceLogs }
+
+        Apply-ServiceAlertConfirmationPolicy
+
+        $activeIgnoreRules = @()
+        try {
+            $activeIgnoreRules = @(Get-ActiveIgnoreRules)
+            Apply-IgnoreRulesToResults -ActiveRules $activeIgnoreRules
+        }
+        catch {
+            Add-MonitorResult -Severity Error -Category Ignore -Check 'Ignore rules' -Message (
+                'Unable to load or apply ignore-rules.txt: {0}' -f $_.Exception.Message
+            ) -Key 'ignore-rules'
+        }
+
+        $forcedRecoveryResults = @()
+        if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+            try {
+                $forcedRecoveryResults = @(Get-ForcedRecoveryResults -Target $ForceRecoveryTarget)
+                Write-RunLog -Level OK -Category Recovery -Color Green -Message (
+                    'Forced recovery target is healthy: {0}; matching result(s)={1}.' -f $ForceRecoveryTarget, $forcedRecoveryResults.Count
+                )
+            }
+            catch {
+                Add-MonitorResult -Severity Warning -Category Recovery -Check 'Forced recovery verification' -Message $_.Exception.Message -NotificationEligible:$false
+            }
+        }
+
+        $issuesBeforeEmail = @($script:Results | Where-Object { $_.Severity -ne 'OK' })
+        $ignoredIssues = @($issuesBeforeEmail | Where-Object { $_.IgnoreActive })
+        $unignoredIssues = @($issuesBeforeEmail | Where-Object { -not $_.IgnoreActive })
+        $unignoredNotifiableIssues = @($unignoredIssues | Where-Object { $_.NotificationEligible })
+        $dailyOnlyResults = @($unignoredIssues | Where-Object { -not $_.NotificationEligible })
+        $recoveredNotifiedIssues = @(if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+                $forcedRecoveryResults
+            }
+            else {
+                Get-RecoveredNotifiedIssues
+            })
+        if (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+            # A forced recovery check is focused on the selected target and must
+            # not send unrelated alerts found during the same diagnostic run.
+            $unignoredNotifiableIssues = @()
+        }
+        $explicitlyResolvedIssueKeys = @(
+            $script:Results |
+                Group-Object -Property Key |
+                Where-Object {
+                    @($_.Group | Where-Object { $_.Severity -ne 'OK' }).Count -eq 0 -and
+                    @($_.Group | Where-Object { $_.Severity -eq 'OK' }).Count -gt 0
+                } |
+                Select-Object -ExpandProperty Name
+        )
+        Remove-ExplicitlyResolvedAutomaticIssueCooldowns -ResolvedIssueKeys $explicitlyResolvedIssueKeys
+        if ($activeIgnoreRules.Count -gt 0) {
+            Write-RunLog -Category Ignore -Color Cyan -Message ('Active ignore rules loaded: {0}; file={1}' -f $activeIgnoreRules.Count, $script:IgnoreRulesPath)
+        }
+        foreach ($ignoredIssue in $ignoredIssues) {
+            $untilText = if ($null -ne $ignoredIssue.IgnoreUntil) {
+                '; until ' + $ignoredIssue.IgnoreUntil.ToString('yyyy-MM-dd HH:mm:ss zzz')
+            }
+            else {
+                ''
+            }
+            Write-RunLog -Category Ignore -Color DarkGray -Message (
+                'Issue {0} is ignored by a {1} rule{2}.' -f $ignoredIssue.Key, $ignoredIssue.IgnoreMode, $untilText
+            )
+        }
+
+        $emailReportRequested = $EnableEmailNotifications -and -not $DisableEmail.IsPresent -and
+            ($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent)
+        $emailType = if ($emailReportRequested -and $SendTestResultsEmail.IsPresent) {
+            'Test'
+        }
+        elseif ($emailReportRequested -and $SendDailySummaryEmail.IsPresent) {
+            'Daily'
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($ForceRecoveryTarget)) {
+            'Recovery'
+        }
+        elseif ($unignoredNotifiableIssues.Count -gt 0) {
+            'Alert'
+        }
+        else {
+            'Recovery'
+        }
+        $discordNotificationType = if ($SendDiscordStatus.IsPresent) { 'Status' } else { $emailType }
+        $notificationReference = ''
+        if ($emailType -eq 'Alert') {
+            $notificationReference = New-MonitorNotificationReference
+        }
+        elseif ($emailType -eq 'Recovery') {
+            $recoveryReferences = @($recoveredNotifiedIssues | ForEach-Object {
+                    if ($null -ne $_.PSObject.Properties['NotificationReference'] -and
+                        -not [string]::IsNullOrWhiteSpace([string]$_.NotificationReference)) {
+                        [string]$_.NotificationReference
+                    }
+                } | Select-Object -Unique)
+            $notificationReference = if ($recoveryReferences.Count -eq 1) {
+                $recoveryReferences[0]
+            }
+            else {
+                New-MonitorNotificationReference
+            }
+        }
+        if (($SendTestResultsEmail.IsPresent -or $SendDailySummaryEmail.IsPresent) -and -not $emailReportRequested) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'The requested email report was skipped because email delivery is {0}. Set EnableEmailNotifications to true in the JSON configuration to enable it.' -f
+                    (Get-EmailDeliveryConfigurationStatus).ToLowerInvariant()
+            )
+        }
+        $notificationRequested = (
+            $emailReportRequested -or
+            $SendDiscordStatus.IsPresent -or
+            $unignoredNotifiableIssues.Count -gt 0 -or
+            $recoveredNotifiedIssues.Count -gt 0
+        )
+        $shouldSendEmail = $EnableEmailNotifications -and -not $DisableEmail.IsPresent -and -not $SendDiscordStatus.IsPresent -and $notificationRequested
+        $shouldSendDiscord = -not $DisableDiscord.IsPresent -and
+            -not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl) -and
+            $notificationRequested
+        $shouldSendNotification = $shouldSendEmail -or $shouldSendDiscord
+
+        if ($shouldSendNotification) {
+            $siteForNotification = if ($monitorEndpoints.Count -gt 0) {
+                (($monitorEndpoints | ForEach-Object { $_.FrontendUri.AbsoluteUri.TrimEnd('/') }) -join ', ')
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($script:SiteAddressFromPrompt)) {
+                $script:SiteAddressFromPrompt
+            }
+            else {
+                'unknown site'
+            }
+
+            $emailDeliverySucceeded = $false
+            $discordDeliverySucceeded = $false
+            if ($shouldSendEmail) {
+                $content = New-EmailContent `
+                    -MonitoredSite $siteForNotification `
+                    -MonitoringName $resolvedMonitoringName `
+                    -NotificationReference $notificationReference `
+                    -ActiveIgnoreRules $activeIgnoreRules `
+                    -RecoveryResults $recoveredNotifiedIssues `
+                    -EmailType $emailType
+                Write-RunLog -Category Email -Color Cyan -Message ('Sending to {0}; subject={1}' -f $NotificationTo, $content.Subject)
+                try {
+                    $delivery = Send-MonitorEmail `
+                        -Subject $content.Subject `
+                        -TextBody $content.TextBody `
+                        -HtmlBody $content.HtmlBody
+                    Write-RunLog -Level OK -Category Email -Color Green -Message (
+                        'Email notification sent to {0} using {1}. {2}' -f $NotificationTo, $delivery.Method, $delivery.Details
+                    )
+                    $emailDeliverySucceeded = $true
+                }
+                catch {
+                    Add-MonitorResult -Severity Error -Category Email -Check 'Notification delivery' -Message $_.Exception.Message
+                }
+            }
+
+            if ($shouldSendDiscord) {
+                try {
+                    $discordPayload = New-DiscordNotificationPayload `
+                        -MonitoredSite $siteForNotification `
+                        -MonitoringName $resolvedMonitoringName `
+                        -NotificationType $discordNotificationType `
+                        -NotificationReference $notificationReference `
+                        -RecoveryResults $recoveredNotifiedIssues
+                    Write-RunLog -Category Discord -Color Cyan -Message (
+                        'Sending Discord notification; type={0}; component(s) are included in the formatted message.' -f $discordNotificationType
+                    )
+                    $discordDelivery = Send-MonitorDiscordNotification -Payload $discordPayload
+                    Write-RunLog -Level OK -Category Discord -Color Green -Message (
+                        'Discord notification sent successfully. {0}' -f $discordDelivery.Details
+                    )
+                    $discordDeliverySucceeded = $true
+                }
+                catch {
+                    Add-MonitorResult -Severity Error -Category Discord -Check 'Notification delivery' -Message $_.Exception.Message -NotificationEligible:$false
+                }
+            }
+
+            $notificationDeliverySucceeded = $emailDeliverySucceeded -or $discordDeliverySucceeded
+            if ($notificationDeliverySucceeded) {
+                $newlyNotifiedIssues = if ($emailType -eq 'Alert') { $unignoredNotifiableIssues } else { @() }
+                try {
+                    Update-NotifiedIssueStateAfterDelivery `
+                        -NewlyNotifiedIssues $newlyNotifiedIssues `
+                        -RecoveredIssues $recoveredNotifiedIssues `
+                        -NotificationReference $notificationReference
+                }
+                catch {
+                    Add-MonitorResult -Severity Warning -Category Recovery -Check 'Notification state' -Message (
+                        'A notification was delivered, but notification/recovery state could not be saved: {0}' -f $_.Exception.Message
+                    ) -NotificationEligible:$false
+                }
+                if ($emailType -eq 'Alert' -and $unignoredNotifiableIssues.Count -gt 0) {
+                    foreach ($issueKey in @($unignoredNotifiableIssues | Select-Object -ExpandProperty Key -Unique)) {
+                        try {
+                            Set-AutomaticIssueCooldown -Key $issueKey -Duration '24h'
+                        }
+                        catch {
+                            Add-MonitorResult -Severity Warning -Category Ignore -Check 'Automatic cooldown' -Message (
+                                'A notification was delivered, but the automatic cooldown for {0} could not be saved: {1}' -f $issueKey, $_.Exception.Message
+                            ) -NotificationEligible:$false
+                        }
+                    }
+                }
+            }
+        }
+        elseif ((-not $EnableEmailNotifications -or $DisableEmail.IsPresent) -and $DisableDiscord.IsPresent) {
+            Write-RunLog -Category Notification -Color DarkGray -Message 'Email and Discord delivery are disabled for this run; health checks and logs completed without outbound notifications.'
+        }
+        elseif ((-not $EnableEmailNotifications -or $DisableEmail.IsPresent) -and -not $DisableDiscord.IsPresent -and -not [string]::IsNullOrWhiteSpace($DiscordWebhookUrl)) {
+            Write-RunLog -Category Discord -Color DarkGray -Message 'No notification was required; email delivery is disabled and Discord remains available.'
+        }
+        elseif (-not $EnableEmailNotifications -or $DisableEmail.IsPresent) {
+            Write-RunLog -Category Email -Color DarkGray -Message ('Email delivery is {0}.' -f (Get-EmailDeliveryConfigurationStatus).ToLowerInvariant())
+        }
+        elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredIssues.Count -eq 0) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'All detected issues are covered by active ignore rules; no notification was required.'
+            )
+        }
+        elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredNotifiableIssues.Count -eq 0 -and $dailyOnlyResults.Count -gt 0) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'Only daily-summary warning evidence was detected; it is retained for the daily monitoring results email.'
+            )
+        }
+        elseif ($issuesBeforeEmail.Count -gt 0 -and $unignoredNotifiableIssues.Count -eq 0) {
+            Write-RunLog -Category Email -Color DarkGray -Message (
+                'Only non-notifying diagnostic or recovered-check warnings were detected; no normal notification was required.'
+            )
+        }
+        else {
+            Write-RunLog -Category Email -Color Green -Message 'No issue was detected; no notification was required.'
+        }
+    }
+    finally {
+        if ($null -ne $lockStream) {
+            $lockStream.Dispose()
+        }
+    }
+}
+
+$finalExitCode = 2
+try {
+    Import-MonitorConfiguration
+    Test-MonitorConfigurationValues
+    Initialize-MonitorLogging
+    Invoke-MonitorAutomaticUpdate
+    if (-not [string]::IsNullOrWhiteSpace($AddSiteApiAddress) -and [string]::IsNullOrWhiteSpace($AddSiteAddress)) {
+        throw 'AddSiteApiAddress requires AddSiteAddress so each API address can be matched to a frontend site.'
+    }
+    $managementModes = @(@(
+            $ValidateConfiguration.IsPresent,
+            $ShowConfiguration.IsPresent,
+            -not [string]::IsNullOrWhiteSpace($AddSiteAddress),
+            -not [string]::IsNullOrWhiteSpace($SetIssueCooldown),
+            -not [string]::IsNullOrWhiteSpace($ClearIssueCooldown)
+        ) | Where-Object { $_ })
+    if ($managementModes.Count -gt 1) {
+        throw 'Use only one management command at a time: ValidateConfiguration, ShowConfiguration, AddSiteAddress/AddSiteApiAddress, SetIssueCooldown, or ClearIssueCooldown.'
+    }
+
+    if ($ShowConfiguration.IsPresent) {
+        Show-MonitorConfiguration
+        $finalExitCode = 0
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($AddSiteAddress)) {
+        Add-MonitorConfiguredSites -Addresses $AddSiteAddress -ApiAddresses $AddSiteApiAddress
+        $finalExitCode = 0
+    }
+    elseif ($ValidateConfiguration.IsPresent) {
+        Write-Host ('Monitoring configuration is valid. Version={0}; release date={1}; configuration={2}' -f
+            $script:MonitorVersion, $script:MonitorReleaseDate, $script:ResolvedConfigPath) -ForegroundColor Green
+        Write-Host ('MonitoringName={0}; SiteAddress={1}; Email={2}; NotificationTo={3}; Discord={4}; LogRetentionDays={5}' -f
+            $MonitoringName, $SiteAddress, (Get-EmailDeliveryConfigurationStatus), $NotificationTo, (Get-DiscordDeliveryConfigurationStatus), $LogRetentionDays) -ForegroundColor Gray
+        $finalExitCode = 0
+    }
+    else {
+        Invoke-D4AMonitor
+        $finalExitCode = Get-ExitCode
+    }
+}
+catch {
+    $fatalMessage = $_.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) {
+        $fatalMessage = '{0} | Stack: {1}' -f $fatalMessage, (($_.ScriptStackTrace -replace '[\r\n]+', ' ').Trim())
+    }
+    if ($script:LoggingReady) {
+        Write-RunLog -Level Error -Category Monitor -Color Red -Message ('Fatal monitor failure: {0}' -f $fatalMessage)
+        Write-ErrorLog -Level Error -Category Monitor -Message ('Fatal monitor failure: {0}' -f $fatalMessage)
+    }
+    else {
+        Write-Host ('[FATAL] Unable to initialize or run the monitor: {0}' -f $fatalMessage) -ForegroundColor Red
+    }
+    $finalExitCode = 2
+}
+finally {
+    if ($script:LoggingReady) {
+        $counts = [ordered]@{
+            OK      = @($script:Results | Where-Object { $_.Severity -eq 'OK' }).Count
+            Warning = @($script:Results | Where-Object { $_.Severity -eq 'Warning' }).Count
+            Alert   = @($script:Results | Where-Object { $_.Severity -eq 'Alert' }).Count
+            Error   = @($script:Results | Where-Object { $_.Severity -eq 'Error' }).Count
+        }
+        Write-RunLog -Category Summary -Color Cyan -Message (
+            'Completed in {0:N1} seconds. OK={1}; Warning={2}; Alert={3}; Error={4}; exit code={5}.' -f
+                ((Get-Date) - $script:RunStartedAt).TotalSeconds,
+                $counts.OK,
+                $counts.Warning,
+                $counts.Alert,
+                $counts.Error,
+                $finalExitCode
+        )
+        Write-RunLog -Category Summary -Color DarkGray -Message ('Monitoring logs: {0}' -f $script:MonitorLogDirectory)
+        Write-RunLog -Category Summary -Color DarkGray -Message ('Monitor summary log: {0}' -f $script:RunLogPath)
+    }
+    [Environment]::ExitCode = $finalExitCode
+}
+
+# Task Scheduler normally launches this script with powershell.exe -File. In
+# that mode an explicit exit is required for the process to return the monitor
+# severity. Interactive invocation keeps the current PowerShell host open.
+$commandLineArguments = @([Environment]::GetCommandLineArgs())
+if (@($commandLineArguments | Where-Object { $_ -ieq '-File' }).Count -gt 0) {
+    exit $finalExitCode
+}

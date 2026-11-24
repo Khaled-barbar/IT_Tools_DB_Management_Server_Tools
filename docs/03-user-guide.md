@@ -441,6 +441,8 @@ Prerequisites:
 - approved notification recipients;
 - outbound email path available and, when Discord delivery is required, outbound HTTPS access to `discord.com`.
 
+Decide4Action version: the wizard first detects whether the server runs Decide4Action 3.9.x or 4.0. It finds 4.0 from instance folders that contain `API\dbconfig.js`. Press Enter to accept the detected version, or type `3.9` or `4.0`. A 4.0 deployment installs `D4A-ScheduledMonitor-4_0.ps1`, proposes `<base>\Monitoring` (for example `C:\Decide4Action\Monitoring`) as the deployment folder and creates it when you accept it, and writes a 4.0 configuration. The 4.0 monitor finds each instance, its database settings and keys, its API port, and the 4.0 Watchdog logs by itself.
+
 Procedure:
 
 1. Enter one or more frontend sites separated by commas. Press Enter for `hostname:1200`.
@@ -466,6 +468,20 @@ For an offline installation, copy `nodemailer-9.1.1.tgz` into the same folder as
 
 If an earlier deployment stopped after creating the monitor/configuration but before Scheduled Tasks were created, the tool can identify that specific incomplete state even when nodemailer finished installing before the error appeared. It displays **Resume incomplete deployment** and requires `RESUME`; the existing JSON is preserved and backed up while runtime paths are repaired. An active or modified monitor is never treated as an incomplete deployment and must be managed through **Update Existing Monitoring Settings**.
 
+On a server upgraded from 3.9 to Decide4Action 4.0, open **Update Existing Monitoring Settings > Update monitoring script version** and select the existing monitor. When IT Tools detects 4.0, type `4.0` to switch the monitor to the 4.0 edition. The filename, JSON configuration, logs, ignore rules, and Scheduled Tasks are kept and backed up first. Then run **Execute Monitoring Commands > Show configuration** to confirm the discovered instances and API ports.
+
+4.0 settings that can be adjusted in `monitor-logs\D4A-ScheduledMonitor.config.json`:
+
+| Setting | Use |
+|---|---|
+| `D4ABaseFolder` | Base folder containing the instances when it is not `C:`, `D:`, or `E:\Decide4Action` |
+| `LocalApiAddress` | Leave at `http://127.0.0.1:32167/` to use the discovered API port; any other value is used as configured |
+| `ApplicationPerformanceEndpoints` | API routes measured by the performance check |
+| `AutomaticUpdateEnabled` | `false` only for a copy managed by the Decide4Action installer |
+| `DataCollectorSqlFreshnessAlerts` | `true` to notify when no Data Collector event reached SQL within the critical threshold |
+| `WatchdogLogStaleMinutes` | Inactivity threshold for the 4.0 Watchdog log |
+| `WatchdogLogRoot` | 4.0 Watchdog log folder, only when it is not found automatically |
+
 ### Update Existing Monitoring Settings
 
 This menu separates three operations:
@@ -482,7 +498,7 @@ Monitoring configuration is read and written explicitly as UTF-8, so friendly na
 
 Each `SiteAddress` entry has a matching `ApiAddress` entry in `monitor-logs\D4A-ScheduledMonitor.config.json`. During new deployment, IT Tools asks for the API address for every frontend site; press Enter to keep the derived default, such as `https://site-api.example.com/health`, or provide a different API host or full health path. Use **Site Monitoring > Update Existing Monitoring Settings > Update sites, API addresses, monitoring name, and notification emails** to change an installed site's API address. Existing configurations without `ApiAddress` are automatically populated with their current derived endpoints after the updated monitor runs.
 
-`LocalApiAddress` controls the Direct API performance probe run from the monitored server. New configurations use `http://127.0.0.1:32167/`. If the local D4A API listens on another loopback host or port, edit that single value in the same JSON file, then run the monitor with `-ValidateConfiguration`. Existing monitor configurations receive the setting automatically after version 7.4.2 starts, with a one-time pre-migration JSON backup retained beside the configuration.
+`LocalApiAddress` controls the Direct API performance probe run from the monitored server. New configurations use `http://127.0.0.1:32167/`. If the local D4A API listens on another loopback host or port, edit that single value in the same JSON file, then run the monitor with `-ValidateConfiguration`. Existing monitor configurations receive the setting automatically after version 7.4.2 starts, with a one-time pre-migration JSON backup retained beside the configuration. With the Decide4Action 4.0 edition, keep the default value: the monitor then probes the port that each instance API service actually listens on, and switches between HTTP and HTTPS when only the other protocol answers.
 
 The monitor automatically discovers local SQL Server Database Engine services (`MSSQLSERVER` and `MSSQL$<instance>`). Database Engine availability alerts only when none of the detected engines are running, so stopped leftover instances do not create false alerts while another engine is available. Optional SQL Agent, Browser, Full-text, Analysis Services, CEIP, and VSS services are excluded from mandatory engine availability. The monitor also checks detected Node-RED, Nginx, reverse proxy, IIS, World Wide Web Publishing Service, or Internet Information Services Windows services.
 
