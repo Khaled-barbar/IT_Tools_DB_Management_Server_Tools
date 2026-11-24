@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "version": "7.12.4",
-  "releaseDate": "2026-10-30",
+  "version": "7.13.0",
+  "releaseDate": "2026-11-24",
   "monitoring": {
     "version": "7.12.1",
     "releaseDate": "2026-10-28",
@@ -13,6 +13,14 @@
     "releaseDate": "2026-10-28",
     "scriptPath": "D4A-ScheduledMonitor.ps1",
     "sha256": "A740D84927CDFE49A0214F6D0E5CA53066824D0AF465B8EE3644794A1641FEC0"
+  },
+  "d4a40Monitoring": {
+    "version": "7.13.0",
+    "releaseDate": "2026-11-24",
+    "scriptPath": "D4A-ScheduledMonitor-4_0.ps1",
+    "versionFile": "monitor-4_0-version.txt",
+    "platform": "4.0",
+    "sha256": "6A356F78F603B571879C66399B7DFB2A0BEF6F36324C515E639905CD1654EF8A"
   },
   "files": [
     {
@@ -32,12 +40,20 @@
       "sha256": "A740D84927CDFE49A0214F6D0E5CA53066824D0AF465B8EE3644794A1641FEC0"
     },
     {
+      "path": "D4A-ScheduledMonitor-4_0.ps1",
+      "sha256": "6A356F78F603B571879C66399B7DFB2A0BEF6F36324C515E639905CD1654EF8A"
+    },
+    {
       "path": "monitor-version.txt",
       "sha256": "969D5FCCA7FD1CF26AF2048DCE78713DF15CACD9DAF41C6C6A39FCE095BBCF9E"
     },
     {
+      "path": "monitor-4_0-version.txt",
+      "sha256": "9CC9B8F746172545B7FEF01D780B20EC4DF246052A570939FB9D0FB9A1689CCF"
+    },
+    {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "1DAF5F3B7E99C48DFA92F720E71E6202613D1A2B1311AB7CC0DF714DEAE5D2B4"
+      "sha256": "42D165BACF166378526D994FBCD304A779751D062096E9FDC14E12DCDCB19AB1"
     },
     {
       "path": "Invoke-SmtpDiagnostic.ps1",
@@ -49,7 +65,7 @@
     },
     {
       "path": "version.txt",
-      "sha256": "5B68369680A06EED6F0AA09C2596F04AA34A108B45EC021E0F1B568DF5142194"
+      "sha256": "9CC9B8F746172545B7FEF01D780B20EC4DF246052A570939FB9D0FB9A1689CCF"
     },
     {
       "path": "Test-DBConfigFile.ps1",

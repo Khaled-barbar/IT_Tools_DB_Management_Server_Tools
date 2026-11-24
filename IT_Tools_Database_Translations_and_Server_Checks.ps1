@@ -63,8 +63,8 @@ $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
 $Script:MonitoringOverlapWaitTimeoutSeconds = 900
-$Script:ToolVersion = [version]'7.12.4'
-$Script:ToolReleaseDate = '2026-10-30'
+$Script:ToolVersion = [version]'7.13.0'
+$Script:ToolReleaseDate = '2026-11-24'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
 $Script:ToolVersionFileName = 'version.txt'
@@ -1921,13 +1921,27 @@ function Read-SiteMonitoringNamesForSettings {
 }
 
 function Read-SiteMonitoringFolder {
-    param([AllowEmptyString()][string]$DefaultFolder)
+    param(
+        [AllowEmptyString()][string]$DefaultFolder,
+        [string]$DefaultLabel = 'Detected default Decide4Action Configuration folder',
+        [switch]$CreateDefaultIfMissing
+    )
 
     while ($true) {
         if (-not [string]::IsNullOrWhiteSpace($DefaultFolder)) {
-            Write-Host "Detected default Decide4Action Configuration folder: $DefaultFolder" -ForegroundColor Cyan
+            Write-Host "$($DefaultLabel): $DefaultFolder" -ForegroundColor Cyan
             $folder = Read-Host "Press Enter to use this folder, or paste another existing folder path (q to go back; P to previous)"
-            if ([string]::IsNullOrWhiteSpace($folder)) { return $DefaultFolder }
+            if ([string]::IsNullOrWhiteSpace($folder)) {
+                if (-not (Test-Path -LiteralPath $DefaultFolder -PathType Container)) {
+                    if (-not $CreateDefaultIfMissing.IsPresent) {
+                        Write-Host "Folder not found: $DefaultFolder" -ForegroundColor Yellow
+                        continue
+                    }
+                    New-Item -ItemType Directory -Path $DefaultFolder -Force -ErrorAction Stop | Out-Null
+                    Write-Host "Created monitoring folder: $DefaultFolder" -ForegroundColor Green
+                }
+                return (Get-Item -LiteralPath $DefaultFolder -ErrorAction Stop).FullName
+            }
         }
         else {
             Write-Host "No Decide4Action Configuration folder was detected automatically." -ForegroundColor Yellow
@@ -2013,9 +2027,122 @@ function Get-SiteMonitoringScriptMetadata {
     }
 }
 
+function Get-SiteMonitoringScriptChannel {
+    param([Parameter(Mandatory = $true)][string]$ScriptPath)
+
+    $content = Get-Content -LiteralPath $ScriptPath -Raw -ErrorAction Stop
+    if ($content -match '(?m)^#\s*D4A-Monitor-Channel:\s*(?<Value>[^\r\n]+)') {
+        return $matches.Value.Trim()
+    }
+    # Monitors without a channel header are the Decide4Action 3.9 edition.
+    return 'd4a39'
+}
+
+function Get-SiteMonitoringPlatformFromChannel {
+    param([AllowNull()][string]$Channel)
+
+    if ([string]$Channel -ieq 'd4a40') { return '4.0' }
+    return '3.9'
+}
+
+function Get-SiteMonitoringDetectedD4APlatform {
+    # Read-only detection. Decide4Action 4.0 instances keep dbconfig.js in
+    # <base>\<instance>\API; 3.9 installations keep it in <root>\Services\API.
+    $instanceRoots = [System.Collections.Generic.List[string]]::new()
+    $legacyRoots = [System.Collections.Generic.List[string]]::new()
+
+    function Add-DetectedD4AFolder {
+        param([AllowNull()][string]$Path)
+
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        try {
+            $current = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Path)).TrimEnd('\')
+        }
+        catch { return }
+        if ([IO.File]::Exists($current)) { $current = [IO.Path]::GetDirectoryName($current) }
+        for ($level = 0; $level -lt 6 -and -not [string]::IsNullOrWhiteSpace($current); $level++) {
+            if ([IO.Path]::GetFileName($current) -ine 'Services') {
+                if ([IO.File]::Exists([IO.Path]::Combine($current, 'API', 'dbconfig.js'))) {
+                    if (-not $instanceRoots.Contains($current)) { $instanceRoots.Add($current) | Out-Null }
+                    return
+                }
+                if ([IO.File]::Exists([IO.Path]::Combine($current, 'Services', 'API', 'dbconfig.js'))) {
+                    if (-not $legacyRoots.Contains($current)) { $legacyRoots.Add($current) | Out-Null }
+                    return
+                }
+            }
+            $parent = [IO.Path]::GetDirectoryName($current)
+            if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) { return }
+            $current = $parent
+        }
+    }
+
+    $serviceDetails = @()
+    try {
+        $serviceDetails = @(Invoke-OperationWithTimeout -OperationName 'reading Windows service paths for Decide4Action version detection' -TimeoutSeconds $Script:ServerCheckCimTimeoutSeconds -ScriptBlock {
+            Get-CimInstance -ClassName Win32_Service -ErrorAction Stop | Select-Object Name, DisplayName, PathName
+        })
+    }
+    catch {
+        # Folder detection below remains available.
+    }
+    $systemRoot = [string]$env:SystemRoot
+    foreach ($service in $serviceDetails) {
+        $pathName = [Environment]::ExpandEnvironmentVariables([string]$service.PathName)
+        if ([string]::IsNullOrWhiteSpace($pathName)) { continue }
+        if (-not [string]::IsNullOrWhiteSpace($systemRoot) -and $pathName.TrimStart('"').StartsWith($systemRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        foreach ($match in [regex]::Matches($pathName, '"(?<Quoted>[A-Za-z]:\\[^"]+)"|(?<Executable>[A-Za-z]:\\.+?\.(?:exe|js|cmd|bat|ps1))(?=\s|$)|(?<Plain>[A-Za-z]:\\[^\s"]+)')) {
+            $value = if ($match.Groups['Quoted'].Success) { $match.Groups['Quoted'].Value } elseif ($match.Groups['Executable'].Success) { $match.Groups['Executable'].Value } else { $match.Groups['Plain'].Value }
+            Add-DetectedD4AFolder -Path $value
+        }
+    }
+    foreach ($baseFolder in @('C:\Decide4Action', 'D:\Decide4Action', 'E:\Decide4Action')) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $baseFolder -Directory -ErrorAction SilentlyContinue)) {
+            Add-DetectedD4AFolder -Path $child.FullName
+        }
+    }
+
+    $baseFolders = @($instanceRoots | ForEach-Object { [IO.Path]::GetDirectoryName($_) } | Select-Object -Unique)
+    [pscustomobject]@{
+        Platform      = if ($instanceRoots.Count -gt 0) { '4.0' } else { '3.9' }
+        InstanceRoots = @($instanceRoots.ToArray())
+        LegacyRoots   = @($legacyRoots.ToArray())
+        BaseFolder    = if ($baseFolders.Count -gt 0) { [string]$baseFolders[0] } else { '' }
+    }
+}
+
+function Read-SiteMonitoringD4APlatform {
+    param([Parameter(Mandatory = $true)][object]$Detection)
+
+    Write-Host ''
+    if ($Detection.Platform -eq '4.0') {
+        Write-Host ('Decide4Action 4.0 detected. Instance folder(s): {0}' -f (@($Detection.InstanceRoots) -join ', ')) -ForegroundColor Cyan
+    }
+    elseif (@($Detection.LegacyRoots).Count -gt 0) {
+        Write-Host ('Decide4Action 3.9.x detected. Installation folder(s): {0}' -f (@($Detection.LegacyRoots) -join ', ')) -ForegroundColor Cyan
+    }
+    else {
+        Write-Host 'The Decide4Action version could not be detected automatically; 3.9.x is assumed by default.' -ForegroundColor Yellow
+    }
+    Write-Host '3.9 installs D4A-ScheduledMonitor.ps1; 4.0 installs D4A-ScheduledMonitor-4_0.ps1 (installer layout, per-instance API ports, 4.0 Watchdog).' -ForegroundColor Gray
+    while ($true) {
+        $answer = Read-Host ('Decide4Action version for this monitor: press Enter for {0}, or type 3.9 or 4.0 (q to go back)' -f $Detection.Platform)
+        if (Test-IsBack $answer) { return $null }
+        if ([string]::IsNullOrWhiteSpace($answer)) { return [string]$Detection.Platform }
+        switch -Regex ($answer.Trim()) {
+            '^3(?:\.9(?:\.x)?)?$' { return '3.9' }
+            '^4(?:\.0)?$' { return '4.0' }
+        }
+        Write-Host 'Type 3.9 or 4.0, press Enter for the detected version, or type q.' -ForegroundColor Yellow
+    }
+}
+
 function Get-SiteMonitoringTemplatePath {
+    param([ValidateSet('3.9', '4.0')][string]$Platform = '3.9')
+
     $scriptFolder = Get-CurrentScriptFolder
-    $templateName = 'D4A-ScheduledMonitor.ps1'
+    $templateName = if ($Platform -eq '4.0') { 'D4A-ScheduledMonitor-4_0.ps1' } else { 'D4A-ScheduledMonitor.ps1' }
+    $manifestDefinitionName = if ($Platform -eq '4.0') { 'd4a40Monitoring' } else { 'canonicalMonitoring' }
     $templatePath = Join-Path $scriptFolder $templateName
     $downloadUrl = '{0}/{1}' -f $Script:ToolRepositoryRawRoot.TrimEnd('/'), $templateName
     $temporaryFolder = Join-Path ([IO.Path]::GetTempPath()) ('D4AMonitorTemplate_{0}' -f [guid]::NewGuid().ToString('N'))
@@ -2024,9 +2151,10 @@ function Get-SiteMonitoringTemplatePath {
         Write-StreamingLog -Percent 5 -Step 'Release' -Description 'Checking GitHub for the current official monitoring release.'
         $releaseCommit = Get-ITToolsReleaseCommit
         $manifest = (Get-ITToolsRemoteText -RelativePath $Script:ToolUpdateManifestFileName -ReleaseCommit $releaseCommit) | ConvertFrom-Json -ErrorAction Stop
-        $monitoringRelease = $manifest.canonicalMonitoring
+        $monitoringReleaseProperty = $manifest.PSObject.Properties[$manifestDefinitionName]
+        $monitoringRelease = if ($null -eq $monitoringReleaseProperty) { $null } else { $monitoringReleaseProperty.Value }
         if ($null -eq $monitoringRelease -or [string]$monitoringRelease.scriptPath -ine $templateName) {
-            throw "The official release manifest does not define the canonical monitoring release '$templateName'."
+            throw "The official release manifest does not define the $manifestDefinitionName monitoring release '$templateName'."
         }
         $entries = @($manifest.files | Where-Object { [string]$_.path -ieq $templateName })
         if ($entries.Count -ne 1) {
@@ -2038,7 +2166,7 @@ function Get-SiteMonitoringTemplatePath {
             throw "The official release manifest contains an invalid SHA-256 value for '$templateName'."
         }
         if ($expectedHash -ne ([string]$monitoringRelease.sha256).Trim().ToUpperInvariant()) {
-            throw "The canonical monitoring release hash does not match the manifest file entry for '$templateName'."
+            throw "The $manifestDefinitionName monitoring release hash does not match the manifest file entry for '$templateName'."
         }
 
         [void](New-Item -Path $temporaryFolder -ItemType Directory -Force -ErrorAction Stop)
@@ -2054,6 +2182,10 @@ function Get-SiteMonitoringTemplatePath {
         $releaseMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $downloadedTemplate
         if (-not $releaseMetadata.HasVersionHeader) {
             throw 'The downloaded monitoring template is missing valid version or release-date metadata.'
+        }
+        $releasePlatform = Get-SiteMonitoringPlatformFromChannel -Channel (Get-SiteMonitoringScriptChannel -ScriptPath $downloadedTemplate)
+        if ($releasePlatform -ne $Platform) {
+            throw "The downloaded monitoring template '$templateName' is the Decide4Action $releasePlatform edition, not $Platform."
         }
 
         $localHash = if (Test-Path -LiteralPath $templatePath -PathType Leaf) {
@@ -2309,7 +2441,10 @@ function New-SiteMonitoringConfigurationObject {
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
         [Parameter(Mandatory = $true)][string]$MonitorVersion,
         [string]$NodeExecutable,
-        [string]$DiscordWebhookUrl
+        [string]$DiscordWebhookUrl,
+        [ValidateSet('3.9', '4.0')][string]$Platform = '3.9',
+        [string[]]$D4AInstanceRoots = @(),
+        [string]$D4ABaseFolder = ''
     )
 
     $siteAddresses = @($Hosts -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -2323,7 +2458,7 @@ function New-SiteMonitoringConfigurationObject {
     }
     $installRoot = Get-SiteMonitoringInstallRoot -ConfigurationFolder $DeploymentFolder
     $logDirectory = Join-Path $DeploymentFolder 'monitor-logs'
-    [ordered]@{
+    $configuration = [ordered]@{
         ConfigurationVersion = 1
         MonitoringName       = ($SiteNames -join ', ')
         SiteAddress          = $siteAddresses
@@ -2360,6 +2495,22 @@ function New-SiteMonitoringConfigurationObject {
             DailySummaryTime   = $null
         }
     }
+
+    if ($Platform -eq '4.0') {
+        # The 4.0 monitor discovers each instance, its dbconfig.js, its API
+        # port, and the 4.0 Watchdog logs. The legacy TaskSchedulerOutput path
+        # and the 3.9 install root must not be written for a 4.0 deployment.
+        $configuration.Remove('WatchdogLogRoot')
+        $roots = @($D4AInstanceRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($roots.Count -eq 1) { $configuration['D4AInstallRoot'] = $roots[0] } else { $configuration.Remove('D4AInstallRoot') }
+        if (-not [string]::IsNullOrWhiteSpace($D4ABaseFolder)) { $configuration['D4ABaseFolder'] = $D4ABaseFolder }
+        $configuration['MonitorPlatform'] = '4.0'
+        $configuration['AutomaticUpdateEnabled'] = $true
+        $configuration['ApplicationPerformanceEndpoints'] = @('/Decide4ActionStartup/gettenantinfo', '/api/getSystemsAvailable')
+        $configuration['DataCollectorSqlFreshnessAlerts'] = $false
+        $configuration['WatchdogLogStaleMinutes'] = 30
+    }
+    return $configuration
 }
 
 function Write-SiteMonitoringConfiguration {
@@ -2455,7 +2606,10 @@ function Set-SiteMonitoringDeploymentConfiguration {
         [Parameter(Mandatory = $true)][string]$NotificationAddresses,
         [Parameter(Mandatory = $true)][string]$DeploymentFolder,
         [string]$NodeExecutable,
-        [string]$DiscordWebhookUrl
+        [string]$DiscordWebhookUrl,
+        [ValidateSet('3.9', '4.0')][string]$Platform = '3.9',
+        [string[]]$D4AInstanceRoots = @(),
+        [string]$D4ABaseFolder = ''
     )
 
     $metadata = Get-SiteMonitoringScriptMetadata -ScriptPath $ScriptPath
@@ -2471,7 +2625,10 @@ function Set-SiteMonitoringDeploymentConfiguration {
         -DeploymentFolder $DeploymentFolder `
         -MonitorVersion $metadata.VersionText `
         -NodeExecutable $NodeExecutable `
-        -DiscordWebhookUrl $DiscordWebhookUrl
+        -DiscordWebhookUrl $DiscordWebhookUrl `
+        -Platform $Platform `
+        -D4AInstanceRoots $D4AInstanceRoots `
+        -D4ABaseFolder $D4ABaseFolder
     return Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $configurationPath
 }
 
@@ -3161,13 +3318,17 @@ function Invoke-SiteMonitoringVersionUpdate {
     param(
         [Parameter(Mandatory = $true)][string]$InstalledScriptPath,
         [Parameter(Mandatory = $true)][string]$TemplatePath,
-        [object[]]$RelatedTasks = @()
+        [object[]]$RelatedTasks = @(),
+        # Switching between the 3.9 and 4.0 editions uses separate version
+        # lines, so the cross-edition version comparison is not a downgrade.
+        [switch]$AllowEditionChange,
+        [string]$D4ABaseFolder = ''
     )
 
     $deploymentFolder = Split-Path -Parent $InstalledScriptPath
     $templateMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $TemplatePath
     $installedMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $InstalledScriptPath
-    if ($null -ne $installedMetadata.Version -and $installedMetadata.Version -gt $templateMetadata.Version) {
+    if (-not $AllowEditionChange.IsPresent -and $null -ne $installedMetadata.Version -and $installedMetadata.Version -gt $templateMetadata.Version) {
         throw "Installed monitor version $($installedMetadata.VersionText) is newer than template version $($templateMetadata.VersionText). Downgrade blocked."
     }
     $configurationPath = Get-SiteMonitoringConfigurationPath -DeploymentFolder $deploymentFolder
@@ -3244,6 +3405,14 @@ function Invoke-SiteMonitoringVersionUpdate {
             $configuration | Add-Member -MemberType NoteProperty -Name LastMonitorUpdate -Value (Get-Date).ToString('o')
         }
         else { $configuration.LastMonitorUpdate = (Get-Date).ToString('o') }
+        $templatePlatform = Get-SiteMonitoringPlatformFromChannel -Channel (Get-SiteMonitoringScriptChannel -ScriptPath $TemplatePath)
+        if ($null -eq $configuration.PSObject.Properties['MonitorPlatform']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name MonitorPlatform -Value $templatePlatform
+        }
+        else { $configuration.MonitorPlatform = $templatePlatform }
+        if ($templatePlatform -eq '4.0' -and -not [string]::IsNullOrWhiteSpace($D4ABaseFolder) -and $null -eq $configuration.PSObject.Properties['D4ABaseFolder']) {
+            $configuration | Add-Member -MemberType NoteProperty -Name D4ABaseFolder -Value $D4ABaseFolder
+        }
         Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $configurationPath -AllowOverwrite | Out-Null
 
         Write-StreamingLog -Percent 100 -Step 'Done' -Description "Monitoring version $($templateMetadata.VersionText) installed successfully."
@@ -3290,8 +3459,6 @@ function Show-UpdateSiteMonitoringVersion {
     }
 
     try {
-        $templatePath = Get-SiteMonitoringTemplatePath
-        $templateMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $templatePath
         $tasks = @(
             foreach ($taskName in @('D4A-ScheduledMonitor', 'D4A-ScheduledMonitor-DailySummary')) {
                 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -3338,13 +3505,35 @@ function Show-UpdateSiteMonitoringVersion {
         }
 
         $relatedTasks = @($tasks | Where-Object { (Get-SiteMonitoringTaskScriptPath -Task $_) -ieq $selected.ScriptPath })
-        if ($null -ne $selected.Version -and $selected.Version -gt $templateMetadata.Version) {
+
+        # Each edition updates from its own release definition. A 3.9 monitor
+        # on a server upgraded to Decide4Action 4.0 can switch to the 4.0
+        # edition while keeping its filename, settings, logs, and tasks.
+        $installedPlatform = Get-SiteMonitoringPlatformFromChannel -Channel (Get-SiteMonitoringScriptChannel -ScriptPath $selected.ScriptPath)
+        $updatePlatform = $installedPlatform
+        $platformDetection = $null
+        if ($installedPlatform -eq '3.9') {
+            $platformDetection = Get-SiteMonitoringDetectedD4APlatform
+            if ($platformDetection.Platform -eq '4.0') {
+                Write-Host ''
+                Write-Host ('Decide4Action 4.0 was detected ({0}), but the selected monitor is the 3.9 edition.' -f (@($platformDetection.InstanceRoots) -join ', ')) -ForegroundColor Yellow
+                Write-Host 'The 3.9 edition cannot read 4.0 dbconfig.js paths, service-scoped database keys, per-instance API ports, or 4.0 Watchdog logs.' -ForegroundColor Gray
+                $switchChoice = Read-Host 'Type 4.0 to switch this monitor to the Decide4Action 4.0 edition, or press Enter to keep the 3.9 edition (q to go back)'
+                if (Test-IsBack $switchChoice) { return }
+                if ($switchChoice.Trim() -eq '4.0') { $updatePlatform = '4.0' }
+            }
+        }
+        $editionChange = $updatePlatform -ne $installedPlatform
+        $templatePath = Get-SiteMonitoringTemplatePath -Platform $updatePlatform
+        $templateMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $templatePath
+
+        if (-not $editionChange -and $null -ne $selected.Version -and $selected.Version -gt $templateMetadata.Version) {
             Write-Host "The installed monitor version $($selected.VersionText) is newer than the available template $($templateMetadata.VersionText)." -ForegroundColor Yellow
             Write-Host 'The update was blocked to prevent a monitoring downgrade.' -ForegroundColor Yellow
             Pause-Screen
             return
         }
-        if ($selected.HasVersionHeader -and $null -ne $selected.Version -and $templateMetadata.Version -le $selected.Version) {
+        if (-not $editionChange -and $selected.HasVersionHeader -and $null -ne $selected.Version -and $templateMetadata.Version -le $selected.Version) {
             Write-Host "The installed monitor is already version $($selected.VersionText), released $($selected.ReleaseDate)." -ForegroundColor Green
             Write-Host "Available template: version $($templateMetadata.VersionText), released $($templateMetadata.ReleaseDate)." -ForegroundColor Gray
             Pause-Screen
@@ -3356,6 +3545,8 @@ function Show-UpdateSiteMonitoringVersion {
         Write-Host "Installed file: $($selected.ScriptPath)" -ForegroundColor White
         Write-Host "Installed version: $($selected.VersionText)" -ForegroundColor White
         Write-Host "Installed release date: $($selected.ReleaseDate)" -ForegroundColor White
+        Write-Host "Installed edition: Decide4Action $installedPlatform" -ForegroundColor White
+        Write-Host "Target edition: Decide4Action $updatePlatform$(if ($editionChange) { ' (edition change)' } else { '' })" -ForegroundColor $(if ($editionChange) { 'Yellow' } else { 'White' })
         Write-Host "Available version: $($templateMetadata.VersionText)" -ForegroundColor Green
         Write-Host "Available release date: $($templateMetadata.ReleaseDate)" -ForegroundColor Green
         Write-Host "Configuration: $configurationPath" -ForegroundColor White
@@ -3371,7 +3562,8 @@ function Show-UpdateSiteMonitoringVersion {
             Write-Host 'A related monitoring task is running. IT Tools will wait for it to finish, checking every 5 seconds for up to 15 minutes.' -ForegroundColor Yellow
         }
         $relatedTasks = @(Wait-SiteMonitoringTasksToFinish -Tasks $relatedTasks -PollIntervalSeconds 5 -TimeoutSeconds 900)
-        $result = Invoke-SiteMonitoringVersionUpdate -InstalledScriptPath $selected.ScriptPath -TemplatePath $templatePath -RelatedTasks $relatedTasks
+        $detectedBaseFolder = if ($null -ne $platformDetection) { [string]$platformDetection.BaseFolder } else { '' }
+        $result = Invoke-SiteMonitoringVersionUpdate -InstalledScriptPath $selected.ScriptPath -TemplatePath $templatePath -RelatedTasks $relatedTasks -AllowEditionChange:$editionChange -D4ABaseFolder $detectedBaseFolder
         Write-Host "Success: monitoring version $($result.Version), released $($result.ReleaseDate), is installed." -ForegroundColor Green
         Write-Host "Monitor file preserved: $($result.ScriptPath)" -ForegroundColor Green
         Write-Host "Site configuration preserved: $($result.ConfigurationPath)" -ForegroundColor Green
@@ -3419,7 +3611,10 @@ function Show-AddSiteMonitoring {
         Write-Host "Note: Administrator rights are required when creating scheduled tasks that run silently as SYSTEM." -ForegroundColor Yellow
     }
     try {
-        $templatePath = Get-SiteMonitoringTemplatePath
+        $platformDetection = Get-SiteMonitoringDetectedD4APlatform
+        $d4aPlatform = Read-SiteMonitoringD4APlatform -Detection $platformDetection
+        if ($null -eq $d4aPlatform) { return }
+        $templatePath = Get-SiteMonitoringTemplatePath -Platform $d4aPlatform
         $templateMetadata = Get-SiteMonitoringScriptMetadata -ScriptPath $templatePath
 
         $wizardStep = 1
@@ -3457,11 +3652,22 @@ function Show-AddSiteMonitoring {
                     $wizardStep = 4
                 }
                 4 {
-                    if ($null -eq $defaultFolder) {
-                        Write-StreamingLog -Percent 10 -Step 'Detect' -Description 'Looking for the Decide4Action Configuration folder from the Windows service.'
-                        $defaultFolder = Get-DefaultD4AConfigurationFolder
+                    if ($d4aPlatform -eq '4.0') {
+                        # The 4.0 monitor is machine-wide, like nginx and Node-RED,
+                        # so its default folder is <base>\Monitoring.
+                        if ($null -eq $defaultFolder) {
+                            $baseFolder = if (-not [string]::IsNullOrWhiteSpace([string]$platformDetection.BaseFolder)) { [string]$platformDetection.BaseFolder } else { 'C:\Decide4Action' }
+                            $defaultFolder = Join-Path $baseFolder 'Monitoring'
+                        }
+                        $deploymentFolder = Read-SiteMonitoringFolder -DefaultFolder $defaultFolder -DefaultLabel 'Default Decide4Action 4.0 monitoring folder' -CreateDefaultIfMissing
                     }
-                    $deploymentFolder = Read-SiteMonitoringFolder -DefaultFolder $defaultFolder
+                    else {
+                        if ($null -eq $defaultFolder) {
+                            Write-StreamingLog -Percent 10 -Step 'Detect' -Description 'Looking for the Decide4Action Configuration folder from the Windows service.'
+                            $defaultFolder = Get-DefaultD4AConfigurationFolder
+                        }
+                        $deploymentFolder = Read-SiteMonitoringFolder -DefaultFolder $defaultFolder
+                    }
                     if ($null -eq $deploymentFolder) { return }
                     if ($deploymentFolder -eq '__D4A_PREVIOUS_STEP__') {
                         $wizardStep = 3
@@ -3517,6 +3723,7 @@ function Show-AddSiteMonitoring {
 
         Show-SectionTitle "Monitoring Deployment Summary"
         Write-Host "Deployment mode: $(if ($resumeIncompleteDeployment) { 'Resume incomplete deployment' } else { 'New deployment' })" -ForegroundColor White
+        Write-Host "Decide4Action edition: $d4aPlatform ($([IO.Path]::GetFileName($templatePath)))" -ForegroundColor White
         Write-Host "Monitor version: $($templateMetadata.VersionText)" -ForegroundColor White
         Write-Host "Monitor release date: $($templateMetadata.ReleaseDate)" -ForegroundColor White
         Write-Host "Site address(es): $hosts" -ForegroundColor White
@@ -3576,7 +3783,10 @@ function Show-AddSiteMonitoring {
                     -NotificationAddresses $emailAddresses `
                     -DeploymentFolder $deploymentFolder `
                     -NodeExecutable $nodeRuntime.NodePath `
-                    -DiscordWebhookUrl $discordWebhookUrl
+                    -DiscordWebhookUrl $discordWebhookUrl `
+                    -Platform $d4aPlatform `
+                    -D4AInstanceRoots @($platformDetection.InstanceRoots) `
+                    -D4ABaseFolder ([string]$platformDetection.BaseFolder)
             }
             catch {
                 Remove-Item -LiteralPath $configurationPath -Force -ErrorAction SilentlyContinue

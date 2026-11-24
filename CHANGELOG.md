@@ -6,6 +6,33 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.13.0 / Monitoring 7.13.0 (Decide4Action 4.0 edition) - 2026-11-24
+
+Added `D4A-ScheduledMonitor-4_0.ps1`, a monitoring edition for servers deployed with the Decide4Action 4.0 installer. It is based on Monitoring 7.12.1 and keeps its checks, thresholds, notification, cooldown, recovery, maintenance-window, and rule-key behavior. The 3.9 monitor (`D4A-ScheduledMonitor.ps1` and the `D4A-ScheduledMonitor-v5.ps1` bridge) is unchanged at 7.12.1.
+
+**Monitoring 7.13.0 (4.0 edition): integration fixes**
+
+- **Release channel:** the edition updates only from the new `d4a40Monitoring` definition and `monitor-4_0-version.txt`. The channel is set by a `# D4A-Monitor-Channel: d4a40` header, not by the filename, so a copy vendored as `D4A-ScheduledMonitor.ps1` by the 4.0 installer is never replaced by the 3.9 release, and a 3.9 script is rejected as an update. The 3.9 logic would otherwise have put any non-canonical filename on the legacy `-v5` channel.
+- **Update opt-out:** the new `AutomaticUpdateEnabled` JSON setting (default `true`) lets a copy managed by the installer pin its version without changing the Scheduled Task arguments.
+- **Instance discovery:** finds 4.0 instances below `<base>\<instance>` (default `C:\Decide4Action\<name>`) from Windows service paths and NSSM parameters, `D4AInstallRoot`, the new `D4ABaseFolder`, `D4A_HOME`, and the default bases. 3.9 roots are still recognized. `-ShowConfiguration` lists the discovered instances, services, and API ports.
+- **Database settings:** reads `<instance>\API\dbconfig.js` (4.0) as well as `Services\API\dbconfig.js` (3.9), including paths derived from Data Collector services.
+- **Database keys:** `D4AKEY`/`D4AIV` are no longer required at machine level. When they are missing, the monitor reads them from the Windows service environment of the instance API service (service `Environment`, NSSM `AppEnvironmentExtra`, or a WinSW `<env>` entry), where the 4.0 installer stores them, and then from an `API\.env` file. Every candidate is tried. Key values are never logged; the run log records only the source used.
+- **Email:** the Node email helper receives the matching keys in its own process environment, so `dbconfig.js` can decrypt its SMTP settings on 4.0 servers. The installer Node runtime under `<base>\Runtime\node-v*` is also used when Node is not on `PATH`.
+- **API port:** API ports are no longer assumed to be `32167`. The monitor discovers the port each instance API service (and its child processes) listens on. The API listener check now runs per instance API service. A local API address stored by IT Tools on port 32167 is redirected for the run when nothing listens on 32167 and exactly one 4.0 API port exists. A `LocalApiAddress` changed from the default is always used as configured.
+- **API protocol:** when the direct API does not answer over the configured protocol but answers over the other one (HTTP or HTTPS, the Watchdog `apiProtocol` case), the run continues with the working protocol and logs a non-notifying warning to update `LocalApiAddress`.
+- **API routes:** an HTTP 404 on the API health route or a performance route is logged as reachable but with an unknown route, without a notification, because the API answered. Routes can be set with the new `ApplicationPerformanceEndpoints` setting.
+- **Services:** installer-named services whose executables are inside a discovered 4.0 instance folder, and the machine-wide 4.0 Watchdog service, are now monitored even when their names do not start with `D4A`/`Decide4Action`. Broker and web services keep their dedicated checks, and 3.9 servers keep exactly the 3.9 service scope.
+- **Watchdog:** the 4.0 Node Watchdog service logs in `<instance>\logs`, `<base>\logs`, or its service folder are analyzed as log-only evidence (restarts, possible restart loops, failures, and inactivity beyond the new `WatchdogLogStaleMinutes`). The legacy `Log\TaskSchedulerOutput` analysis is kept for servers still running the PowerShell Watchdog, including below 4.0 instance folders.
+- **Data Collector:** because the 4.0 Watchdog no longer writes Data Collector `LastEventTime` evidence, the monitor reads the latest event time directly from `P4A_LineMonitoringStatus` with a read-only, time-limited query when that table exists. Results are log-only by default because idle lines are normal outside production. The new `DataCollectorSqlFreshnessAlerts` setting makes the critical threshold notify.
+- **nginx and events:** machine-wide nginx is found from its Windows service path or below `<base>`. Windows-event relevance includes discovered API ports, 4.0 instance names, and Watchdog events.
+- **Logs:** `monitor-logs\README.txt` gains a "DECIDE4ACTION 4.0 EDITION" section.
+
+**IT Tools 7.13.0**
+
+- **Add New Site Monitoring** detects whether the server runs Decide4Action 3.9.x or 4.0 and asks the operator to confirm. 4.0 deployments download and verify `D4A-ScheduledMonitor-4_0.ps1` from the `d4a40Monitoring` release, default to the machine-wide `<base>\Monitoring` folder (created on confirmation), and write a 4.0 JSON configuration without the legacy `TaskSchedulerOutput` Watchdog path. That configuration includes `D4ABaseFolder`, `MonitorPlatform`, `AutomaticUpdateEnabled`, `ApplicationPerformanceEndpoints`, `DataCollectorSqlFreshnessAlerts`, and `WatchdogLogStaleMinutes`.
+- **Monitoring Version Update** selects the release that matches the installed edition. On a server upgraded to 4.0, it offers to switch a 3.9 monitor to the 4.0 edition while keeping its filename, settings, logs, ignore rules, and Scheduled Tasks. Cross-edition switches are not treated as downgrades, and the template edition is verified after download.
+- Task names, task arguments, and the JSON location are unchanged, so existing tools and the planned Decide4Action installer Monitoring tab recognize monitors of both editions.
+
 ## 7.12.4 / Monitoring 7.12.1 - 2026-10-30
 
 - Added the official signed `SqlServer.22.4.5.1.nupkg` release package for database tools on servers where PowerShell Gallery or NuGet access is unavailable.
