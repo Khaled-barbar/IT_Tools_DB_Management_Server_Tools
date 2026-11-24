@@ -473,7 +473,7 @@ function Get-MonitorRemoteReleaseDefinition {
                 throw "The update manifest does not define the $($script:MonitorManifestDefinitionName) monitoring release."
             }
             if ([string]$monitoring.version -ne $remoteVersion.ToString()) {
-                throw "Monitoring version '$($monitoring.version)' in the manifest does not match monitor-version.txt '$remoteVersion'."
+                throw "Monitoring version '$($monitoring.version)' in the manifest does not match $($script:MonitorVersionFileName) '$remoteVersion'."
             }
             if ([string]$monitoring.scriptPath -ine $script:MonitorReleaseScriptFileName) {
                 throw "The monitoring manifest script path '$($monitoring.scriptPath)' is not '$($script:MonitorReleaseScriptFileName)'."
@@ -2760,7 +2760,7 @@ function Test-IsServiceAlertConfirmationKey {
         $normalizedKey -eq 'server-sql-services' -or
         $normalizedKey -match '^server-mosquitto-mqtt-service(?:-|$)' -or
         $normalizedKey -match '^server-web-infrastructure-service(?:s|-)' -or
-        $normalizedKey -eq 'server-api-listener' -or
+        $normalizedKey -match '^server-api-listener(?:-|$)' -or
         ($normalizedKey -match '^diagnostics-watchdog-' -and
             $normalizedKey -ne 'diagnostics-watchdog-sql-connectivity')
     )
@@ -3367,7 +3367,7 @@ function Get-D4AApiUri {
     $isLocalName = $hostName -notmatch '\.'
     if ($FrontendUri.Port -eq 1200 -or (Test-IsIpAddress -HostName $hostName) -or $isLocalName) {
         # 3.9 used port 32167; a 4.0 instance can listen on another API port.
-        return [UriBuilder]::new($FrontendUri.Scheme, $hostName, (Get-D4ADefaultLocalApiPort), '/health').Uri
+        return [UriBuilder]::new($FrontendUri.Scheme, $hostName, (Get-D4ALocalApiPortForLegacyAddress), '/health').Uri
     }
 
     $labels = $hostName.Split('.')
@@ -3558,7 +3558,7 @@ function Test-WebEndpoint {
     $successful = Test-HttpProbeSucceeded -Result $result
     if (-not $successful -and $TreatNotFoundAsReachable.IsPresent -and $result.StatusCode -eq 404) {
         Add-MonitorResult -Severity Warning -Category Application -Check $Name -Message (
-            'HTTP 404 on {0}; elapsed={1} ms. The API answered, so it is reachable, but this health route does not exist in the installed D4A version. Set ApiAddress to the correct health URL. Availability is still alerted by the application performance checks.' -f
+            'HTTP 404 on {0}; elapsed={1} ms. A server answered, but this health route does not exist in the installed D4A version. Set ApiAddress to the correct health URL. Public API availability is still alerted by the application performance checks, which do not tolerate HTTP 404.' -f
                 $Uri.AbsoluteUri, $result.Millis
         ) -NotificationEligible:$false
         return
@@ -3623,11 +3623,15 @@ function Resolve-D4ADirectApiBaseUri {
 
     $alternateUri = Get-D4AAlternateSchemeUri -Uri $BaseUri
     $alternateProbe = Invoke-HttpProbe -Uri $alternateUri -TimeoutSeconds $HttpTimeoutSeconds
-    if ($null -eq $alternateProbe.StatusCode) { return $BaseUri }
+    # A certificate name or trust failure on 127.0.0.1 still proves that the
+    # endpoint speaks TLS; the trust finding is reported, never bypassed.
+    $tlsAnswered = $alternateUri.Scheme -eq 'https' -and [string]$alternateProbe.Error -match '(?i)trust relationship|certificate|SSL/TLS secure channel|remote certificate'
+    if ($null -eq $alternateProbe.StatusCode -and -not $tlsAnswered) { return $BaseUri }
 
+    $answerText = if ($null -ne $alternateProbe.StatusCode) { 'answered with HTTP {0}' -f $alternateProbe.StatusCode } else { 'completed a TLS handshake but failed certificate validation ({0})' -f $alternateProbe.Error }
     Add-MonitorResult -Severity Warning -Category 'Application performance' -Check ('{0} protocol' -f $TargetName) -Message (
-        '{0} did not answer ({1}) but {2} answered with HTTP {3}. This run uses {2}; set LocalApiAddress to {2} in the JSON configuration (the API protocol differs from the configured one).' -f
-            $BaseUri.AbsoluteUri, (Get-HttpProbeFailureDetail -Result $probe), $alternateUri.AbsoluteUri, $alternateProbe.StatusCode
+        '{0} did not answer ({1}) but {2} {3}. This run uses {2}; set LocalApiAddress to {2} in the JSON configuration (the API protocol differs from the configured one).' -f
+            $BaseUri.AbsoluteUri, (Get-HttpProbeFailureDetail -Result $probe), $alternateUri.AbsoluteUri, $answerText
     ) -NotificationEligible:$false
     return $alternateUri
 }
@@ -3645,10 +3649,16 @@ function Test-ApplicationPerformance {
             $targets.Add([pscustomobject]@{
                     Name    = $directTarget.Name
                     BaseUri = (Resolve-D4ADirectApiBaseUri -BaseUri $directTarget.BaseUri -TargetName $directTarget.Name)
+                    # Discovered targets are unconfirmed: their failures are
+                    # log-only until LocalApiAddress is set explicitly.
+                    LogOnlyFailures = [bool]$directTarget.Discovered
+                    # The local 4.0 API answered, so 404 means an unknown route.
+                    TolerateNotFound = Test-D4AHas40Instance
                 }) | Out-Null
         }
     }
-    $targets.Add([pscustomobject]@{ Name = 'Public API'; BaseUri = $PublicApiBaseUri }) | Out-Null
+    # Public API 404s usually come from nginx/IIS routing and always alert.
+    $targets.Add([pscustomobject]@{ Name = 'Public API'; BaseUri = $PublicApiBaseUri; LogOnlyFailures = $false; TolerateNotFound = $false }) | Out-Null
     $endpoints = @(Get-MonitorApplicationPerformanceEndpoints)
 
     foreach ($target in $targets) {
@@ -3668,7 +3678,7 @@ function Test-ApplicationPerformance {
             if ($successful.Count -eq 0) {
                 $last = $attemptResults | Select-Object -Last 1
                 $notFoundCount = @($attemptResults | Where-Object { $_.StatusCode -eq 404 }).Count
-                if ($notFoundCount -eq $attemptResults.Count) {
+                if ($target.TolerateNotFound -and $notFoundCount -eq $attemptResults.Count) {
                     Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
                         'HTTP 404 on all {0} attempt(s); URL={1}. The API answered, so it is reachable, but this route does not exist in the installed D4A version. Adjust ApplicationPerformanceEndpoints in the JSON configuration.' -f
                             $attemptResults.Count, $uri.AbsoluteUri
@@ -3683,6 +3693,13 @@ function Test-ApplicationPerformance {
                 }
                 else {
                     'No valid response.'
+                }
+                if ($target.LogOnlyFailures) {
+                    Add-MonitorResult -Severity Warning -Category 'Application performance' -Check $checkName -Message (
+                        'All {0} attempt(s) failed on the discovered local API address; URL={1}; last result={2}. Log-only: set LocalApiAddress in the JSON configuration to confirm this address and enable alerts. Public API and API health checks still alert.' -f
+                            $attemptResults.Count, $uri.AbsoluteUri, $detail
+                    ) -NotificationEligible:$false
+                    continue
                 }
                 Add-MonitorResult -Severity Alert -Category 'Application performance' -Check $checkName -Message (
                     'All {0} attempt(s) failed; URL={1}; last result={2}' -f $attemptResults.Count, $uri.AbsoluteUri, $detail
@@ -4149,6 +4166,8 @@ function Test-D4APathUnderFolder {
 
     if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Folder)) { return $false }
     $normalizedFolder = $Folder.TrimEnd('\')
+    # A drive root is never treated as an instance or base folder.
+    if ($normalizedFolder.Length -le 2) { return $false }
     return (
         $Path.Equals($normalizedFolder, [StringComparison]::OrdinalIgnoreCase) -or
         $Path.StartsWith($normalizedFolder + '\', [StringComparison]::OrdinalIgnoreCase)
@@ -4243,11 +4262,12 @@ function Get-D4AInstanceLayoutFromFolder {
     if ([string]::IsNullOrWhiteSpace($Folder)) { return $null }
     try {
         $fullPath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($Folder)).TrimEnd('\')
-        if (-not [IO.Directory]::Exists($fullPath)) { return $null }
+        if ($fullPath.Length -le 2 -or -not [IO.Directory]::Exists($fullPath)) { return $null }
 
         # A 3.9 root contains Services\API\dbconfig.js. Never classify its
-        # Services subfolder as a 4.0 instance root.
-        if ([IO.Path]::GetFileName($fullPath) -ieq 'Services') { return $null }
+        # Services subfolder, or a renamed copy such as Services_old, as a
+        # 4.0 instance root.
+        if ([IO.Path]::GetFileName($fullPath) -match '(?i)^Services') { return $null }
 
         $dbConfig40 = [IO.Path]::Combine($fullPath, 'API', 'dbconfig.js')
         if ([IO.File]::Exists($dbConfig40)) {
@@ -4301,7 +4321,7 @@ function Get-D4ABaseFolderCandidates {
         if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
         try {
             $expanded = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$candidate)).TrimEnd('\')
-            if ([IO.Directory]::Exists($expanded) -and -not $candidates.Contains($expanded)) {
+            if ($expanded.Length -gt 2 -and [IO.Directory]::Exists($expanded) -and -not $candidates.Contains($expanded)) {
                 $candidates.Add($expanded) | Out-Null
             }
         }
@@ -4374,7 +4394,22 @@ function Get-D4AInstanceLayouts {
         }
     }
 
-    $result = @($layouts.ToArray() | Sort-Object -Property Platform, Root)
+    # API\dbconfig.js alone can be a copied folder. A 4.0 instance must also
+    # host a Windows service, be configured explicitly, or sit beside the
+    # installer Node runtime (<base>\Runtime). Unconfirmed folders are ignored.
+    $confirmed = [System.Collections.Generic.List[object]]::new()
+    foreach ($layout in $layouts) {
+        if ($layout.Platform -eq '4.0') {
+            $runtimeExists = -not [string]::IsNullOrWhiteSpace($layout.BaseFolder) -and [IO.Directory]::Exists([IO.Path]::Combine($layout.BaseFolder, 'Runtime'))
+            $configured = $layout.Source -in @('configured install root', 'configured DbConfigPath')
+            if ($layout.Services.Count -eq 0 -and -not $runtimeExists -and -not $configured) {
+                Add-D4ADiscoveryNote -Message ('Ignored {0}: it contains API\dbconfig.js but no D4A service, configuration entry, or <base>\Runtime confirms a 4.0 instance.' -f $layout.Root)
+                continue
+            }
+        }
+        $confirmed.Add($layout) | Out-Null
+    }
+    $result = @($confirmed.ToArray() | Sort-Object -Property Platform, Root)
     $script:D4AInstanceLayoutCache = $result
     foreach ($layout in $result) {
         Add-D4ADiscoveryNote -Message (
@@ -4386,6 +4421,10 @@ function Get-D4AInstanceLayouts {
         Add-D4ADiscoveryNote -Message 'No D4A 3.9 or 4.0 instance folder was discovered; configured paths and legacy defaults are used.'
     }
     return $result
+}
+
+function Test-D4AHas40Instance {
+    return @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' }).Count -gt 0
 }
 
 function Get-D4AInstanceLayoutForPath {
@@ -4404,7 +4443,7 @@ function Get-D4A40BaseFolders {
         if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
         try {
             $expanded = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$candidate)).TrimEnd('\')
-            if ([IO.Directory]::Exists($expanded) -and -not $folders.Contains($expanded)) { $folders.Add($expanded) | Out-Null }
+            if ($expanded.Length -gt 2 -and [IO.Directory]::Exists($expanded) -and -not $folders.Contains($expanded)) { $folders.Add($expanded) | Out-Null }
         }
         catch { }
     }
@@ -4450,11 +4489,7 @@ function Test-D4AInstanceApiService {
     )
 
     $apiFolder = Join-Path $Layout.Root 'API'
-    if (@(Get-D4AServiceCommandPaths -Service $Service | Where-Object { Test-D4APathUnderFolder -Path $_ -Folder $apiFolder }).Count -gt 0) {
-        return $true
-    }
-    $serviceText = '{0} {1}' -f [string]$Service.Name, [string]$Service.DisplayName
-    return $serviceText -match '(?i)(?:^|[^a-z0-9])api(?:service)?(?:$|[^a-z0-9])'
+    return @(Get-D4AServiceCommandPaths -Service $Service | Where-Object { Test-D4APathUnderFolder -Path $_ -Folder $apiFolder }).Count -gt 0
 }
 
 function Get-D4ATcpListeners {
@@ -4480,7 +4515,9 @@ function Get-D4ATcpListeners {
         throw 'Neither Get-NetTCPConnection nor netstat.exe can inspect listening TCP ports.'
     }
     foreach ($row in @(& $netstatCommand.Source -ano -p tcp 2>$null)) {
-        if ([string]$row -match '^\s*TCP\s+\S+:(?<Port>\d+)\s+\S+\s+LISTENING\s+(?<Pid>\d+)\s*$') {
+        # A listening socket has a 0.0.0.0:0 or [::]:0 remote address; the
+        # state word itself is localized on non-English Windows.
+        if ([string]$row -match '^\s*TCP\s+\S+:(?<Port>\d+)\s+(?:0\.0\.0\.0:0|\[::\]:0)\s+\S+\s+(?<Pid>\d+)\s*$') {
             $listeners.Add([pscustomobject]@{ Port = [int]$matches.Port; ProcessId = [int]$matches.Pid }) | Out-Null
         }
     }
@@ -4524,10 +4561,17 @@ function Get-D4ADiscoveredApiEndpoints {
     if ($instances.Count -gt 0) {
         $processes = @()
         $listeners = @()
+        $inventoryComplete = $true
         try { $processes = @(Get-SystemClassInstance -ClassName Win32_Process) }
-        catch { Add-D4ADiscoveryNote -Message ('Process inventory is unavailable for API port discovery: {0}' -f $_.Exception.Message) }
+        catch {
+            $inventoryComplete = $false
+            Add-D4ADiscoveryNote -Message ('Process inventory is unavailable for API port discovery: {0}' -f $_.Exception.Message)
+        }
         try { $listeners = @(Get-D4ATcpListeners) }
-        catch { Add-D4ADiscoveryNote -Message ('Listening-port inventory is unavailable for API port discovery: {0}' -f $_.Exception.Message) }
+        catch {
+            $inventoryComplete = $false
+            Add-D4ADiscoveryNote -Message ('Listening-port inventory is unavailable for API port discovery: {0}' -f $_.Exception.Message)
+        }
 
         foreach ($layout in $instances) {
             foreach ($service in @($layout.Services | Where-Object { Test-D4AInstanceApiService -Service $_ -Layout $layout })) {
@@ -4544,6 +4588,7 @@ function Get-D4ADiscoveredApiEndpoints {
                     ProcessIds    = $processIds
                     Ports         = $ports
                     PreferredPort = Get-D4APreferredApiPort -Ports $ports
+                    InventoryComplete = $inventoryComplete
                 }
                 $endpoints.Add($endpoint) | Out-Null
                 Add-D4ADiscoveryNote -Message (
@@ -4570,6 +4615,20 @@ function Get-D4ADefaultLocalApiPort {
     return $script:LegacyApiPort
 }
 
+function Get-D4ALocalApiPortForLegacyAddress {
+    # Use the discovered 4.0 port only when nothing listens on 32167 and
+    # exactly one 4.0 API port exists, so a 3.9 API on 32167 keeps its port.
+    $discoveredPort = Get-D4ADefaultLocalApiPort
+    if ($discoveredPort -eq $script:LegacyApiPort) { return $script:LegacyApiPort }
+    try {
+        if (@(Get-D4ATcpListeners | Where-Object { $_.Port -eq $script:LegacyApiPort }).Count -gt 0) { return $script:LegacyApiPort }
+    }
+    catch {
+        return $script:LegacyApiPort
+    }
+    return $discoveredPort
+}
+
 function Test-D4AUriTargetsLocalServer {
     param([Parameter(Mandatory = $true)][Uri]$Uri)
 
@@ -4585,14 +4644,8 @@ function Resolve-D4ALegacyLocalApiUri {
     # instance can use another port; redirect only when nothing listens on
     # 32167 and exactly one 4.0 API port was discovered on this server.
     if ($ApiUri.Port -ne $script:LegacyApiPort -or -not (Test-D4AUriTargetsLocalServer -Uri $ApiUri)) { return $ApiUri }
-    $discoveredPort = Get-D4ADefaultLocalApiPort
+    $discoveredPort = Get-D4ALocalApiPortForLegacyAddress
     if ($discoveredPort -eq $script:LegacyApiPort) { return $ApiUri }
-    try {
-        if (@(Get-D4ATcpListeners | Where-Object { $_.Port -eq $script:LegacyApiPort }).Count -gt 0) { return $ApiUri }
-    }
-    catch {
-        return $ApiUri
-    }
 
     $builder = [UriBuilder]::new($ApiUri)
     $builder.Port = $discoveredPort
@@ -4610,14 +4663,14 @@ function Get-MonitorEffectiveLocalApiTargets {
     $discovered = @(Get-D4ADiscoveredApiEndpoints | Where-Object { $_.PreferredPort -gt 0 })
 
     if ($explicitlyConfigured -or $discovered.Count -eq 0) {
-        return @([pscustomobject]@{ Name = 'Direct API'; BaseUri = (Get-AuthorityBaseUri -Uri $configuredUri); Source = 'LocalApiAddress' })
+        return @([pscustomobject]@{ Name = 'Direct API'; BaseUri = (Get-AuthorityBaseUri -Uri $configuredUri); Source = 'LocalApiAddress'; Discovered = $false })
     }
 
     $targets = [System.Collections.Generic.List[object]]::new()
     foreach ($endpoint in $discovered) {
         $name = if ($discovered.Count -eq 1) { 'Direct API' } else { 'Direct API {0}' -f $endpoint.InstanceName }
         $baseUri = [UriBuilder]::new($configuredUri.Scheme, $configuredUri.DnsSafeHost, [int]$endpoint.PreferredPort, '/').Uri
-        $targets.Add([pscustomobject]@{ Name = $name; BaseUri = $baseUri; Source = ('discovered API service {0}' -f $endpoint.ServiceName) }) | Out-Null
+        $targets.Add([pscustomobject]@{ Name = $name; BaseUri = $baseUri; Source = ('discovered API service {0}' -f $endpoint.ServiceName); Discovered = $true }) | Out-Null
     }
     return @($targets.ToArray())
 }
@@ -4796,7 +4849,9 @@ function Get-D4ADatabaseConfigPaths {
             Add-D4ADatabaseConfigPath -Path (Join-Path $expandedRoot 'Services\API\dbconfig.js')
         }
     }
-    foreach ($layout in @(Get-D4AInstanceLayouts)) {
+    # Discovered 4.0 instances only: 3.9 database discovery stays exactly as
+    # in the 3.9 monitor.
+    foreach ($layout in @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' })) {
         Add-D4ADatabaseConfigPath -Path $layout.DbConfigPath
     }
 
@@ -5637,6 +5692,12 @@ function Test-ApiListener {
                 continue
             }
             if (@($endpoint.Ports).Count -eq 0) {
+                if (-not $endpoint.InventoryComplete) {
+                    Add-MonitorResult -Severity Warning -Category Server -Check 'API listener' -Message (
+                        '{0}; instance={1}; the process or listening-port inventory was unavailable, so the listener could not be evaluated.' -f $label, $endpoint.InstanceName
+                    ) -Key $key -NotificationEligible:$false
+                    continue
+                }
                 $alertRaised = $true
                 Add-MonitorResult -Severity Alert -Category Server -Check 'API listener' -Message (
                     '{0}; instance={1}; the service is Running but none of its processes (PID {2}) listens on a TCP port.' -f
@@ -5649,13 +5710,17 @@ function Test-ApiListener {
                 '{0}; instance={1}; listening on port(s) {2}: {3}' -f $label, $endpoint.InstanceName, (@($endpoint.Ports) -join ', '), ($listenerDetails -join '; ')
             ) -Key $key
         }
-        if (-not $alertRaised) {
-            # Keeps the 3.9 rule key healthy so an earlier alert can recover.
-            Add-MonitorResult -Severity OK -Category Server -Check 'API listener' -Message (
-                '{0} discovered D4A 4.0 API service(s) evaluated.' -f $discovered.Count
-            )
+        # A server that also runs a 3.9 installation keeps the 3.9 port check,
+        # which reports under the 3.9 rule key.
+        if (@(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '3.9' }).Count -eq 0) {
+            if (-not $alertRaised) {
+                # Keeps the 3.9 rule key healthy so an earlier alert can recover.
+                Add-MonitorResult -Severity OK -Category Server -Check 'API listener' -Message (
+                    '{0} discovered D4A 4.0 API service(s) evaluated.' -f $discovered.Count
+                )
+            }
+            return
         }
-        return
     }
 
     # Decide4Action 3.9 and unknown layouts: the configured local API port.
@@ -5835,16 +5900,35 @@ function Resolve-NginxErrorLog {
         }
     }
 
-    # Decide4Action 4.0 runs one machine-wide nginx; use its service path first.
-    foreach ($service in @(Get-D4AServiceInventory | Where-Object { (Get-D4AWindowsServiceFamily -Service $_) -eq 'Nginx' })) {
+    # Decide4Action 4.0 runs one machine-wide nginx below <base>; use the path
+    # of an nginx service installed there first. 3.9 servers are unchanged.
+    $baseFolders = @(Get-D4A40BaseFolders)
+    foreach ($service in @(Get-D4AServiceInventory | Where-Object { (Get-D4AWindowsServiceFamily -Service $_) -eq 'Nginx' -and (Test-D4AServiceUnderD4A40Base -Service $_) })) {
         foreach ($commandPath in @(Get-D4AServiceCommandPaths -Service $service)) {
+            if (@($baseFolders | Where-Object { Test-D4APathUnderFolder -Path $commandPath -Folder $_ }).Count -eq 0) { continue }
             $folder = if ([IO.File]::Exists($commandPath)) { [IO.Path]::GetDirectoryName($commandPath) } else { $commandPath }
-            foreach ($candidate in @(
-                    [IO.Path]::Combine($folder, 'logs', 'error.log'),
-                    [IO.Path]::Combine([IO.Path]::GetDirectoryName($folder), 'logs', 'error.log')
-                )) {
+            if ([string]::IsNullOrWhiteSpace($folder)) { continue }
+            $candidates = @([IO.Path]::Combine($folder, 'logs', 'error.log'))
+            $parentFolder = [IO.Path]::GetDirectoryName($folder)
+            if (-not [string]::IsNullOrWhiteSpace($parentFolder)) { $candidates += [IO.Path]::Combine($parentFolder, 'logs', 'error.log') }
+            foreach ($candidate in $candidates) {
                 if ([IO.File]::Exists($candidate)) { return [IO.Path]::GetFullPath($candidate) }
             }
+        }
+    }
+    foreach ($baseFolder in $baseFolders) {
+        foreach ($folderName in @('nginx', 'Nginx', 'Decide4Action-Nginx', 'Decide4Action-Ngnix')) {
+            $nginxRoot = [IO.Path]::Combine($baseFolder, $folderName)
+            if (-not [IO.Directory]::Exists($nginxRoot)) { continue }
+            $directLog = [IO.Path]::Combine($nginxRoot, 'logs', 'error.log')
+            if ([IO.File]::Exists($directLog)) { return $directLog }
+            $versionedLog = Get-ChildItem -LiteralPath $nginxRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'nginx-*' } |
+                Sort-Object -Property LastWriteTime -Descending |
+                ForEach-Object { [IO.Path]::Combine($_.FullName, 'logs', 'error.log') } |
+                Where-Object { [IO.File]::Exists($_) } |
+                Select-Object -First 1
+            if (-not [string]::IsNullOrWhiteSpace([string]$versionedLog)) { return [string]$versionedLog }
         }
     }
 
@@ -5852,26 +5936,20 @@ function Resolve-NginxErrorLog {
         $D4AInstallRoot,
         $env:D4A_HOME,
         (Split-Path -Parent $script:ScriptDirectory),
-        @(Get-D4A40BaseFolders),
-        @(Get-D4AInstanceLayouts | ForEach-Object { $_.Root }),
         'D:\Apps\Decide4Action',
         'C:\Apps\Decide4Action',
         'D:\Apps\Decide4Action-v2',
         'C:\Apps\Decide4Action-v2',
         'C:\Program Files\Decide4Action',
         'C:\Program Files\Decide4Action-v2'
-    ) | ForEach-Object { $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique
 
     foreach ($root in $roots) {
         $expandedRoot = [Environment]::ExpandEnvironmentVariables([string]$root)
-        foreach ($folder in @('Decide4Action-Ngnix', 'Decide4Action-Nginx', 'nginx', 'Nginx')) {
+        foreach ($folder in @('Decide4Action-Ngnix', 'Decide4Action-Nginx')) {
             $nginxRoot = [IO.Path]::Combine($expandedRoot, $folder)
             if (-not [IO.Directory]::Exists($nginxRoot)) {
                 continue
-            }
-            $directLog = [IO.Path]::Combine($nginxRoot, 'logs', 'error.log')
-            if ([IO.File]::Exists($directLog)) {
-                return $directLog
             }
             $candidate = Get-ChildItem -LiteralPath $nginxRoot -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -like 'nginx-*' } |
@@ -6025,10 +6103,12 @@ function Test-RelevantWindowsEvents {
 
     $since = (Get-Date).AddMinutes(-$LogLookbackMinutes)
     $excludedNssmEventIds = @(Get-NssmExcludedLogRotationEventIds)
-    $apiPorts = @(@($script:LegacyApiPort) + @(Get-D4ADiscoveredApiEndpoints | ForEach-Object { @($_.Ports) }) | Where-Object { [int]$_ -gt 0 } | Sort-Object -Unique)
-    $instanceNames = @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' } | ForEach-Object { [regex]::Escape($_.Name) })
-    $componentPattern = '(?i)D4A|Decide4Action|node(?:\.exe)?|\b(?:{0})\b|Data Collector|\bPLC\b|\bMDC\b|Watchdog{1}' -f
-        ($apiPorts -join '|'), $(if ($instanceNames.Count -gt 0) { '|\b(?:' + ($instanceNames -join '|') + ')\b' } else { '' })
+    # 3.9 servers keep the exact 3.9 relevance pattern.
+    $componentPattern = '(?i)D4A|Decide4Action|node(?:\.exe)?|32167|Data Collector|\bPLC\b|\bMDC\b'
+    if (Test-D4AHas40Instance) {
+        $apiPorts = @(@($script:LegacyApiPort) + @(Get-D4ADiscoveredApiEndpoints | ForEach-Object { @($_.Ports) }) | Where-Object { [int]$_ -gt 0 } | Sort-Object -Unique)
+        $componentPattern = '(?i)D4A|Decide4Action|node(?:\.exe)?|\b(?:{0})\b|Data Collector|\bPLC\b|\bMDC\b|Watchdog' -f ($apiPorts -join '|')
+    }
     $events = [System.Collections.Generic.List[object]]::new()
     foreach ($logName in @('Application', 'System')) {
         # Get-WinEvent reports "no matching events" as a non-terminating error.
@@ -6099,7 +6179,7 @@ function Resolve-WatchdogLogRoot {
     }
 
     Add-WatchdogCandidate -Path $WatchdogLogRoot
-    $instanceRoots = @(Get-D4AInstanceLayouts | ForEach-Object { $_.Root })
+    $instanceRoots = @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' } | ForEach-Object { $_.Root })
     foreach ($root in @(@($D4AInstallRoot, $env:D4A_HOME, (Split-Path -Parent $script:ScriptDirectory)) + $instanceRoots + @('D:\Apps\Decide4Action', 'C:\Apps\Decide4Action'))) {
         if (-not [string]::IsNullOrWhiteSpace([string]$root)) {
             Add-WatchdogCandidate -Path ([IO.Path]::Combine(
@@ -6689,13 +6769,21 @@ function Test-D4A40WatchdogServiceLogs {
     $failureLines = [System.Collections.Generic.List[string]]::new()
     $restartTargets = @{}
     foreach ($file in @($logFiles | Where-Object { $_.LastWriteTime -ge $since } | Select-Object -First 5)) {
-        $entryTime = $file.LastWriteTime
-        foreach ($line in @(Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop)) {
+        $lines = @(Get-Content -LiteralPath $file.FullName -Tail $WatchdogLogTailLines -ErrorAction Stop)
+        # Lines inherit the previous timestamp. Before the first timestamp,
+        # or in a file without timestamps, only the last 20 lines are used.
+        $entryTime = [datetime]::MinValue
+        $hasTimestamps = @($lines | Where-Object { ([string]$_) -match '\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}' }).Count -gt 0
+        if (-not $hasTimestamps) {
+            $entryTime = $file.LastWriteTime
+            $lines = @($lines | Select-Object -Last 20)
+        }
+        foreach ($line in $lines) {
             $text = ([string]$line -replace '[\r\n]+', ' ').Trim()
             $entryTime = Get-D4A40WatchdogLineTime -Line $text -FallbackTime $entryTime
             if ([string]::IsNullOrWhiteSpace($text) -or $entryTime -lt $since) { continue }
             if ($text -match '(?i)not-installed|\b1060\b|healthy|\bOK\b|rotat|reopen') { continue }
-            if ($text -match '(?i)\brestart(?:ed|ing)?\b|\bsc\s+start\b|\bstarting\b|\bstopp(?:ed|ing)\b') {
+            if ($text -match '(?i)\brestart(?:ed|ing)?\b|\bsc\s+start\b|\bstopp(?:ed|ing)\s+(?:service|target)\b') {
                 $restartLines.Add(('{0} | {1}' -f $file.Name, $text)) | Out-Null
                 $target = if ($text -match '(?i)(?:service|target)\s*[:=]?\s*[''"]?(?<Name>[A-Za-z0-9_.$-]+)') { $matches.Name } else { 'unknown' }
                 if (-not $restartTargets.ContainsKey($target)) { $restartTargets[$target] = 0 }
@@ -6936,9 +7024,6 @@ function Resolve-DbConfigPath {
             Add-Candidate -Path (Join-Path $expandedRoot 'Services\API\dbconfig.js')
         }
     }
-    foreach ($layout in @(Get-D4AInstanceLayouts | Sort-Object -Property @{ Expression = { if ($_.Platform -eq '4.0') { 0 } else { 1 } } }, Root)) {
-        Add-Candidate -Path $layout.DbConfigPath
-    }
     foreach ($path in @(
         'C:\Decide4Action\Services\API\dbconfig.js',
         'D:\Decide4Action\Services\API\dbconfig.js',
@@ -6952,6 +7037,11 @@ function Resolve-DbConfigPath {
         'C:\Program Files\Decide4Action-v2\Services\API\dbconfig.js'
     )) {
         Add-Candidate -Path $path
+    }
+    # Decide4Action 4.0 instances after the 3.9 locations, so 3.9 servers keep
+    # their previous choice.
+    foreach ($layout in @(Get-D4AInstanceLayouts | Where-Object { $_.Platform -eq '4.0' })) {
+        Add-Candidate -Path $layout.DbConfigPath
     }
 
     foreach ($candidate in $candidates) {
@@ -8101,7 +8191,7 @@ function Invoke-D4AMonitor {
                     -Uri $endpoint.ApiUri `
                     -FailureAttempts $ApiHealthFailureAttempts `
                     -FailureRetryIntervalSeconds $ApiHealthRetryIntervalSeconds `
-                    -TreatNotFoundAsReachable
+                    -TreatNotFoundAsReachable:(Test-D4AHas40Instance)
             }
             Invoke-SafeMonitorCheck -Category TLS -Check Frontend -Action {
                 Test-TlsCertificate -Name ('Frontend certificate ({0})' -f $endpoint.Label) -Uri $endpoint.FrontendUri

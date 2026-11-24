@@ -1932,11 +1932,8 @@ function Read-SiteMonitoringFolder {
             Write-Host "$($DefaultLabel): $DefaultFolder" -ForegroundColor Cyan
             $folder = Read-Host "Press Enter to use this folder, or paste another existing folder path (q to go back; P to previous)"
             if ([string]::IsNullOrWhiteSpace($folder)) {
+                if (-not $CreateDefaultIfMissing.IsPresent) { return $DefaultFolder }
                 if (-not (Test-Path -LiteralPath $DefaultFolder -PathType Container)) {
-                    if (-not $CreateDefaultIfMissing.IsPresent) {
-                        Write-Host "Folder not found: $DefaultFolder" -ForegroundColor Yellow
-                        continue
-                    }
                     New-Item -ItemType Directory -Path $DefaultFolder -Force -ErrorAction Stop | Out-Null
                     Write-Host "Created monitoring folder: $DefaultFolder" -ForegroundColor Green
                 }
@@ -2052,7 +2049,7 @@ function Get-SiteMonitoringDetectedD4APlatform {
     $legacyRoots = [System.Collections.Generic.List[string]]::new()
 
     function Add-DetectedD4AFolder {
-        param([AllowNull()][string]$Path)
+        param([AllowNull()][string]$Path, [switch]$RequireRuntime)
 
         if ([string]::IsNullOrWhiteSpace($Path)) { return }
         try {
@@ -2060,9 +2057,13 @@ function Get-SiteMonitoringDetectedD4APlatform {
         }
         catch { return }
         if ([IO.File]::Exists($current)) { $current = [IO.Path]::GetDirectoryName($current) }
-        for ($level = 0; $level -lt 6 -and -not [string]::IsNullOrWhiteSpace($current); $level++) {
-            if ([IO.Path]::GetFileName($current) -ine 'Services') {
+        for ($level = 0; $level -lt 6 -and $current.Length -gt 2; $level++) {
+            if ([IO.Path]::GetFileName($current) -notmatch '(?i)^Services') {
                 if ([IO.File]::Exists([IO.Path]::Combine($current, 'API', 'dbconfig.js'))) {
+                    # A copied folder is not a 4.0 instance: a folder found by
+                    # scanning must sit beside the installer <base>\Runtime.
+                    $runtimeFolder = [IO.Path]::Combine([IO.Path]::GetDirectoryName($current), 'Runtime')
+                    if ($RequireRuntime.IsPresent -and -not [IO.Directory]::Exists($runtimeFolder)) { return }
                     if (-not $instanceRoots.Contains($current)) { $instanceRoots.Add($current) | Out-Null }
                     return
                 }
@@ -2098,7 +2099,7 @@ function Get-SiteMonitoringDetectedD4APlatform {
     }
     foreach ($baseFolder in @('C:\Decide4Action', 'D:\Decide4Action', 'E:\Decide4Action')) {
         foreach ($child in @(Get-ChildItem -LiteralPath $baseFolder -Directory -ErrorAction SilentlyContinue)) {
-            Add-DetectedD4AFolder -Path $child.FullName
+            Add-DetectedD4AFolder -Path $child.FullName -RequireRuntime
         }
     }
 
@@ -3322,7 +3323,8 @@ function Invoke-SiteMonitoringVersionUpdate {
         # Switching between the 3.9 and 4.0 editions uses separate version
         # lines, so the cross-edition version comparison is not a downgrade.
         [switch]$AllowEditionChange,
-        [string]$D4ABaseFolder = ''
+        [string]$D4ABaseFolder = '',
+        [string[]]$D4AInstanceRoots = @()
     )
 
     $deploymentFolder = Split-Path -Parent $InstalledScriptPath
@@ -3412,6 +3414,22 @@ function Invoke-SiteMonitoringVersionUpdate {
         else { $configuration.MonitorPlatform = $templatePlatform }
         if ($templatePlatform -eq '4.0' -and -not [string]::IsNullOrWhiteSpace($D4ABaseFolder) -and $null -eq $configuration.PSObject.Properties['D4ABaseFolder']) {
             $configuration | Add-Member -MemberType NoteProperty -Name D4ABaseFolder -Value $D4ABaseFolder
+        }
+        if ($AllowEditionChange.IsPresent -and $templatePlatform -eq '4.0') {
+            # 3.9 paths would make the 4.0 monitor keep checking a stale
+            # installation. A 3.9 installation that still runs is found again
+            # from its Data Collector service. The backup above keeps the values.
+            $rootProperty = $configuration.PSObject.Properties['D4AInstallRoot']
+            if ($null -ne $rootProperty -and -not [string]::IsNullOrWhiteSpace([string]$rootProperty.Value) -and
+                @($D4AInstanceRoots | Where-Object { $_ -ieq ([string]$rootProperty.Value).TrimEnd('\') }).Count -eq 0) {
+                Write-StreamingLog -Percent 90 -Step 'Migrate' -Description "Removed the 3.9 D4AInstallRoot '$($rootProperty.Value)'; the 4.0 monitor discovers its instances."
+                $configuration.PSObject.Properties.Remove('D4AInstallRoot')
+            }
+            $watchdogProperty = $configuration.PSObject.Properties['WatchdogLogRoot']
+            if ($null -ne $watchdogProperty -and [string]$watchdogProperty.Value -match '(?i)\\Log\\TaskSchedulerOutput\\?$') {
+                Write-StreamingLog -Percent 92 -Step 'Migrate' -Description "Removed the 3.9 WatchdogLogRoot '$($watchdogProperty.Value)'; legacy and 4.0 Watchdog logs are discovered automatically."
+                $configuration.PSObject.Properties.Remove('WatchdogLogRoot')
+            }
         }
         Write-SiteMonitoringConfiguration -Configuration $configuration -ConfigurationPath $configurationPath -AllowOverwrite | Out-Null
 
@@ -3563,7 +3581,7 @@ function Show-UpdateSiteMonitoringVersion {
         }
         $relatedTasks = @(Wait-SiteMonitoringTasksToFinish -Tasks $relatedTasks -PollIntervalSeconds 5 -TimeoutSeconds 900)
         $detectedBaseFolder = if ($null -ne $platformDetection) { [string]$platformDetection.BaseFolder } else { '' }
-        $result = Invoke-SiteMonitoringVersionUpdate -InstalledScriptPath $selected.ScriptPath -TemplatePath $templatePath -RelatedTasks $relatedTasks -AllowEditionChange:$editionChange -D4ABaseFolder $detectedBaseFolder
+        $result = Invoke-SiteMonitoringVersionUpdate -InstalledScriptPath $selected.ScriptPath -TemplatePath $templatePath -RelatedTasks $relatedTasks -AllowEditionChange:$editionChange -D4ABaseFolder $detectedBaseFolder -D4AInstanceRoots $(if ($null -ne $platformDetection) { @($platformDetection.InstanceRoots) } else { @() })
         Write-Host "Success: monitoring version $($result.Version), released $($result.ReleaseDate), is installed." -ForegroundColor Green
         Write-Host "Monitor file preserved: $($result.ScriptPath)" -ForegroundColor Green
         Write-Host "Site configuration preserved: $($result.ConfigurationPath)" -ForegroundColor Green

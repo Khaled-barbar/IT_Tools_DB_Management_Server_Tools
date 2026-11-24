@@ -20,7 +20,7 @@
     "scriptPath": "D4A-ScheduledMonitor-4_0.ps1",
     "versionFile": "monitor-4_0-version.txt",
     "platform": "4.0",
-    "sha256": "6A356F78F603B571879C66399B7DFB2A0BEF6F36324C515E639905CD1654EF8A"
+    "sha256": "5EF18159FCB7EDC1C2658512397CBCAB92DCD11720C60C123D361946C20863C3"
   },
   "files": [
     {
@@ -41,7 +41,7 @@
     },
     {
       "path": "D4A-ScheduledMonitor-4_0.ps1",
-      "sha256": "6A356F78F603B571879C66399B7DFB2A0BEF6F36324C515E639905CD1654EF8A"
+      "sha256": "5EF18159FCB7EDC1C2658512397CBCAB92DCD11720C60C123D361946C20863C3"
     },
     {
       "path": "monitor-version.txt",
@@ -53,7 +53,7 @@
     },
     {
       "path": "IT_Tools_Database_Translations_and_Server_Checks.ps1",
-      "sha256": "42D165BACF166378526D994FBCD304A779751D062096E9FDC14E12DCDCB19AB1"
+      "sha256": "40F497349D2D1337ACF9CE70242365318FA6AA399FFD9D0FBFD8BA9B4B3EEB49"
     },
     {
       "path": "Invoke-SmtpDiagnostic.ps1",
