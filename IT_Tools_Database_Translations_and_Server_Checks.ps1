@@ -63,7 +63,7 @@ $Script:DeepDirectoryScanTimeoutSeconds = 180
 $Script:FileSearchTimeoutSeconds = 600
 $Script:FolderSizeTimeoutSeconds = 60
 $Script:MonitoringOverlapWaitTimeoutSeconds = 900
-$Script:ToolVersion = [version]'7.13.0'
+$Script:ToolVersion = [version]'7.13.1'
 $Script:ToolReleaseDate = '2026-11-24'
 $Script:ToolRepositoryRawRoot = 'https://raw.githubusercontent.com/Khaled-barbar/IT_Tools_DB_Management_Server_Tools/main'
 $Script:ToolGitHubRepository = 'Khaled-barbar/IT_Tools_DB_Management_Server_Tools'
@@ -2098,8 +2098,16 @@ function Get-SiteMonitoringDetectedD4APlatform {
         }
     }
     foreach ($baseFolder in @('C:\Decide4Action', 'D:\Decide4Action', 'E:\Decide4Action')) {
-        foreach ($child in @(Get-ChildItem -LiteralPath $baseFolder -Directory -ErrorAction SilentlyContinue)) {
-            Add-DetectedD4AFolder -Path $child.FullName -RequireRuntime
+        # Get-ChildItem -Directory fails with a terminating parameter-binding
+        # error when the drive does not exist (for example E:), because
+        # -Directory is a FileSystem-provider dynamic parameter. Use .NET and
+        # skip missing drives, missing folders, and unreadable folders.
+        if (-not [IO.Directory]::Exists($baseFolder)) { continue }
+        $childFolders = @()
+        try { $childFolders = @([IO.Directory]::GetDirectories($baseFolder)) }
+        catch { continue }
+        foreach ($childFolder in $childFolders) {
+            Add-DetectedD4AFolder -Path $childFolder -RequireRuntime
         }
     }
 

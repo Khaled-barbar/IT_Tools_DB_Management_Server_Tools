@@ -6,6 +6,10 @@ The main IT Tools script and the scheduled monitoring component use separate ver
 
 For project context, architecture, and operating procedures, see the [project overview](docs/01-project-overview.md), [technical design](docs/02-technical-design.md), and [technical user guide](docs/03-user-guide.md). `version.txt` and `update-manifest.json` remain the machine-readable sources used by the automatic updater; this changelog is the human-readable release history.
 
+## 7.13.1 / Monitoring 7.13.0 (Decide4Action 4.0 edition) - 2026-11-24
+
+- Fixed **Add New Site Monitoring** stopping with `A parameter cannot be found that matches parameter name 'Directory'` during Decide4Action version detection on servers without a `D:` or `E:` drive. `Get-ChildItem -Directory` is a FileSystem-provider parameter that cannot be bound for a path on a missing drive, even with `-ErrorAction SilentlyContinue`. Detection now checks each default `Decide4Action` base folder exists and lists it with .NET, skipping missing drives, missing folders, and unreadable folders.
+
 ## 7.13.0 / Monitoring 7.13.0 (Decide4Action 4.0 edition) - 2026-11-24
 
 Added `D4A-ScheduledMonitor-4_0.ps1`, a monitoring edition for servers deployed with the Decide4Action 4.0 installer. It is based on Monitoring 7.12.1 and keeps its checks, thresholds, notification, cooldown, recovery, maintenance-window, and rule-key behavior. The 3.9 monitor (`D4A-ScheduledMonitor.ps1` and the `D4A-ScheduledMonitor-v5.ps1` bridge) is unchanged at 7.12.1.
